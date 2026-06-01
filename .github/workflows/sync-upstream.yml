@@ -1,0 +1,68 @@
+name: sync-upstream
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency: sync-upstream-dev
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Merge upstream dev
+        id: merge
+        shell: bash
+        run: |
+          branch="sync/upstream-dev-${{ github.run_id }}"
+          git config user.name "c0dn-sync-bot"
+          git config user.email "actions@github.com"
+          git remote add upstream https://github.com/anomalyco/opencode.git
+          git fetch upstream dev
+          git checkout -b "$branch"
+          git merge --no-edit upstream/dev
+          if [ "$(git rev-list --count origin/dev..HEAD)" = "0" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Typecheck opencode package
+        if: steps.merge.outputs.changed == 'true'
+        run: bun --cwd packages/opencode typecheck
+
+      - name: Test personal updater changes
+        if: steps.merge.outputs.changed == 'true'
+        run: bun --cwd packages/opencode test test/installation/installation.test.ts
+
+      - name: Push sync branch
+        if: steps.merge.outputs.changed == 'true'
+        run: git push origin "${{ steps.merge.outputs.branch }}"
+
+      - name: Open sync PR
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr create \
+            --base dev \
+            --head "${{ steps.merge.outputs.branch }}" \
+            --title "sync: upstream dev" \
+            --body "Automated merge from anomalyco/opencode dev into this personal fork."
