@@ -8,15 +8,16 @@ import { SessionLegacy } from "@opencode-ai/core/session/legacy"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionMessageBackfillService } from "@opencode-ai/core/session/message-backfill-service"
 import { MessageTable, PartTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
-import { asc, eq, sql } from "drizzle-orm"
+import { sql } from "drizzle-orm"
 import { Cause, DateTime, Effect, Exit, Layer, Schema } from "effect"
 import { mkdtemp, rm } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
-import { BackfillNotReadyError, PromptV2Context, ensureBackfillReady } from "../../src/session/prompt-v2-context"
+import { CompactionV2Session } from "../../src/session/compaction-v2-session"
+import { BackfillNotReadyError, ensureBackfillReady } from "../../src/session/session-v2-backfill-readiness"
 
 const tmp = new Array<string>()
-const sessionID = SessionV2.ID.make("ses_prompt_v2_context")
+const sessionID = SessionV2.ID.make("ses_compaction_v2_session")
 const providerID = ProviderV2.ID.make("provider")
 const modelID = ProviderV2.ModelID.make("model")
 const v1MarkerName = `legacy-session-message-backfill/v1/${sessionID}`
@@ -26,52 +27,45 @@ afterEach(async () => {
   await Promise.all(tmp.splice(0).map((path) => rm(path, { recursive: true, force: true })))
 })
 
-describe("session.prompt-v2-context", () => {
-  test("backfills a real DB legacy-only transcript before returning provider model messages", async () => {
+describe("session.compaction-v2-session", () => {
+  test("selects from a real DB legacy compaction fixture after readiness succeeds", async () => {
     const dbPath = await makeDbPath()
-    const userEntry = user("msg_user", 10, "hello from legacy")
-    userEntry.parts.push(file("msg_user", "prt_user_file"), subtask("msg_user", "prt_user_task"))
-    const assistantEntry = assistant("msg_assistant", 20, [
-      reasoning("msg_assistant", "prt_reasoning", "thinking from legacy"),
-      text("msg_assistant", "prt_answer", "answer from legacy"),
-      completedTool("msg_assistant", "prt_tool"),
-      patch("msg_assistant", "prt_patch"),
-    ])
 
-    const messages = await run(
+    const selected = await run(
       dbPath,
       Effect.gen(function* () {
         yield* seedSession()
-        yield* seedLegacy([userEntry, assistantEntry])
-        return yield* PromptV2Context.toModelMessages(sessionID)
+        yield* seedLegacy([
+          user("msg_dropped", 10, "dropped prefix"),
+          user("msg_retained_user", 20, "retained user"),
+          assistant("msg_retained_assistant", 30, [text("msg_retained_assistant", "prt_retained_answer", "retained assistant")]),
+          user("msg_compaction_marker", 40, [
+            compaction("msg_compaction_marker", "prt_compaction", { auto: false, tail_start_id: "msg_retained_user" }),
+          ]),
+          summaryAssistant("msg_compaction_summary", 50, "msg_compaction_marker", "summary of prior work"),
+          user("msg_later_user", 60, "later user"),
+          assistant("msg_later_assistant", 70, [text("msg_later_assistant", "prt_later_answer", "later assistant")]),
+        ])
+
+        return yield* CompactionV2Session.selectForSession(sessionID)
       }),
     )
 
-    expect(messages).toStrictEqual([
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "hello from legacy" },
-          { type: "file", mediaType: "text/plain", filename: "note.txt", data: "data:text/plain;base64,aGVsbG8=" },
-        ],
-      },
-      {
-        role: "assistant",
-        content: [
-          { type: "text", text: "answer from legacy" },
-          { type: "reasoning", text: "thinking from legacy", providerOptions: undefined },
-          { type: "tool-call", toolCallId: "call_1", toolName: "bash", input: { cmd: "pwd" }, providerExecuted: undefined },
-        ],
-      },
-      {
-        role: "tool",
-        content: [{ type: "tool-result", toolCallId: "call_1", toolName: "bash", output: { type: "text", value: "done" } }],
-      },
+    expect(selected.previousSummary).toBe("summary of prior work")
+    expect(selected.latestCompaction?.include).toBe(selected.history[0]?.id)
+    expect(selected.history.map(displayText)).toStrictEqual([
+      "retained user",
+      "retained assistant",
+      "later user",
+      "later assistant",
     ])
-    assertNoLegacyIDs(messages)
+    expect(selected.head.map(displayText)).toStrictEqual(selected.history.map(displayText))
+    expect(selected.history.some((message) => message.type === "compaction")).toBe(false)
+    expect(JSON.stringify(selected.history)).not.toContain("dropped prefix")
+    assertNoLegacyIDs(selected)
   })
 
-  test("fails before model conversion for ambiguous mixed cutoff", async () => {
+  test("fails before selection for ambiguous mixed cutoff", async () => {
     const dbPath = await makeDbPath()
 
     const exit = await run(
@@ -80,7 +74,13 @@ describe("session.prompt-v2-context", () => {
         yield* seedSession()
         yield* seedLegacy([user("msg_older", 10, "older"), user("msg_equal", 50, "equal boundary")])
         yield* seedV2(liveUser("evt_live_equal", 50, "live"))
-        return yield* PromptV2Context.toModelMessages(sessionID).pipe(Effect.exit)
+        return yield* CompactionV2Session.selectForSession(sessionID, {
+          tailTurns: 1,
+          preserveRecentBudget: 1,
+          estimate: () => {
+            throw new Error("selection should not run")
+          },
+        }).pipe(Effect.exit)
       }),
     )
 
@@ -91,7 +91,7 @@ describe("session.prompt-v2-context", () => {
     expect(error).toMatchObject({ status: "aborted", reason: "mixed_cutoff_ambiguous" })
   })
 
-  test("fails before model conversion when upgrade is unavailable", async () => {
+  test("fails typed readiness when v1 marker exists but legacy source is unavailable", async () => {
     const dbPath = await makeDbPath()
 
     const exit = await run(
@@ -99,7 +99,7 @@ describe("session.prompt-v2-context", () => {
       Effect.gen(function* () {
         yield* seedSession()
         yield* seedMarker(v1MarkerName)
-        return yield* PromptV2Context.toModelMessages(sessionID).pipe(Effect.exit)
+        return yield* CompactionV2Session.selectForSession(sessionID).pipe(Effect.exit)
       }),
     )
 
@@ -110,38 +110,29 @@ describe("session.prompt-v2-context", () => {
     expect(error).toMatchObject({ status: "upgrade_unavailable", reason: "legacy_source_unavailable" })
   })
 
-  test("allows model-context-safe upgrade_pending reasons", async () => {
+  test("allows safe upgrade_pending degradation before selecting canonical rows", async () => {
     const dbPath = await makeDbPath()
-    const assistantEntry = assistant("msg_tool_title_deferred", 10, [completedTool("msg_tool_title_deferred", "prt_tool_title")])
-    if (assistantEntry.info.role !== "assistant") throw new Error("expected assistant message")
-    assistantEntry.info.structured = { type: "json_schema" }
-    assistantEntry.info.tokens.total = 6
+    const assistantEntry = assistant("msg_tool_title_deferred", 10, [
+      completedTool("msg_tool_title_deferred", "prt_tool_title"),
+    ])
     const tool = assistantEntry.parts[0]
     if (tool?.type !== "tool" || tool.state.status !== "completed") throw new Error("expected completed tool")
     tool.state.metadata = { unsupported: true }
 
-    const messages = await run(
+    const selected = await run(
       dbPath,
       Effect.gen(function* () {
         yield* seedSession()
         yield* seedLegacy([assistantEntry])
-        return yield* PromptV2Context.toModelMessages(sessionID)
+        return yield* CompactionV2Session.selectForSession(sessionID)
       }),
     )
 
-    expect(messages).toStrictEqual([
-      {
-        role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call_1", toolName: "bash", input: { cmd: "pwd" }, providerExecuted: undefined }],
-      },
-      {
-        role: "tool",
-        content: [{ type: "tool-result", toolCallId: "call_1", toolName: "bash", output: { type: "text", value: "done" } }],
-      },
-    ])
+    expect(selected.history).toHaveLength(1)
+    expect(selected.history[0]?.type).toBe("assistant")
   })
 
-  test("classifier rejects unknown upgrade_pending reasons", () => {
+  test("classifier rejects unknown future pending-driving reasons", () => {
     const pendingUpgradeReasons = new Set([...SessionMessageBackfillService.pendingUpgradeReasons, "future_schema_missing"])
     const result: SessionMessageBackfillService.Result = {
       status: "upgrade_pending",
@@ -156,12 +147,24 @@ describe("session.prompt-v2-context", () => {
       reason: "future_schema_missing",
     })
   })
+
+  test("wrapper stays DB/readiness-only and does not wire provider compaction", async () => {
+    const source = await Bun.file(new URL("../../src/session/compaction-v2-session.ts", import.meta.url)).text()
+
+    expect(source).not.toContain("MessageV2Model")
+    expect(source).not.toContain("toModelMessages")
+    expect(source).not.toContain("SessionCompaction")
+    expect(source).not.toContain("SessionProcessor")
+    expect(source).not.toContain("Plugin")
+    expect(source).not.toContain("Token")
+    expect(source).not.toContain("SUMMARY_TEMPLATE")
+  })
 })
 
 async function makeDbPath() {
-  const dir = await mkdtemp(join(tmpdir(), "opencode-prompt-v2-context-"))
+  const dir = await mkdtemp(join(tmpdir(), "opencode-compaction-v2-session-"))
   tmp.push(dir)
-  return join(dir, "prompt-v2-context.db")
+  return join(dir, "compaction-v2-session.db")
 }
 
 function layer(filename: string) {
@@ -173,10 +176,11 @@ function run<A, E>(filename: string, effect: Effect.Effect<A, E, SessionV2.Servi
   return Effect.runPromise(effect.pipe(Effect.provide(layer(filename)), Effect.scoped))
 }
 
-function user(id: string, created: number, value: string): SessionLegacy.WithParts {
+function user(id: string, created: number, valueOrParts: string | SessionLegacy.Part[]): SessionLegacy.WithParts {
+  const parts = Array.isArray(valueOrParts) ? valueOrParts : [text(id, `${id.replace("msg", "prt")}_text`, valueOrParts)]
   return {
     info: { id: SessionLegacy.MessageID.make(id), sessionID, role: "user", time: { created }, agent: "build", model: { providerID, modelID } },
-    parts: [text(id, `${id.replace("msg", "prt")}_text`, value)],
+    parts,
   }
 }
 
@@ -201,54 +205,27 @@ function assistant(id: string, created: number, parts: SessionLegacy.Part[]): Se
   }
 }
 
+function summaryAssistant(id: string, created: number, parentID: string, value: string): SessionLegacy.WithParts {
+  const entry = assistant(id, created, [text(id, `${id.replace("msg", "prt")}_text`, value)])
+  if (entry.info.role !== "assistant") throw new Error("expected assistant")
+  entry.info.parentID = SessionLegacy.MessageID.make(parentID)
+  entry.info.summary = true
+  entry.info.finish = "stop"
+  return entry
+}
+
 function text(messageID: string, id: string, value: string): SessionLegacy.TextPart {
   return { id: SessionLegacy.PartID.make(id), sessionID, messageID: SessionLegacy.MessageID.make(messageID), type: "text", text: value }
 }
 
-function reasoning(messageID: string, id: string, value: string): SessionLegacy.ReasoningPart {
+function compaction(messageID: string, id: string, input?: { auto?: boolean; tail_start_id?: string }): SessionLegacy.CompactionPart {
   return {
     id: SessionLegacy.PartID.make(id),
     sessionID,
     messageID: SessionLegacy.MessageID.make(messageID),
-    type: "reasoning",
-    text: value,
-    time: { start: 1, end: 2 },
-  }
-}
-
-function file(messageID: string, id: string): SessionLegacy.FilePart {
-  return {
-    id: SessionLegacy.PartID.make(id),
-    sessionID,
-    messageID: SessionLegacy.MessageID.make(messageID),
-    type: "file",
-    mime: "text/plain",
-    filename: "note.txt",
-    url: "data:text/plain;base64,aGVsbG8=",
-  }
-}
-
-function subtask(messageID: string, id: string): SessionLegacy.SubtaskPart {
-  return {
-    id: SessionLegacy.PartID.make(id),
-    sessionID,
-    messageID: SessionLegacy.MessageID.make(messageID),
-    type: "subtask",
-    prompt: "do not send this to provider",
-    description: "review",
-    agent: "reviewer",
-    model: { providerID, modelID },
-  }
-}
-
-function patch(messageID: string, id: string): SessionLegacy.PatchPart {
-  return {
-    id: SessionLegacy.PartID.make(id),
-    sessionID,
-    messageID: SessionLegacy.MessageID.make(messageID),
-    type: "patch",
-    hash: "abc123",
-    files: ["README.md"],
+    type: "compaction",
+    auto: input?.auto ?? true,
+    tail_start_id: input?.tail_start_id ? SessionLegacy.MessageID.make(input.tail_start_id) : undefined,
   }
 }
 
@@ -288,11 +265,11 @@ function seedSession() {
     const { db } = yield* Database.Service
     yield* db.run(sql`
       INSERT INTO project (id, worktree, name, time_created, time_updated, sandboxes)
-      VALUES ('proj_prompt_v2_context', '/tmp/prompt-v2-context', 'prompt-v2-context', 1, 1, '[]')
+      VALUES ('proj_compaction_v2_session', '/tmp/compaction-v2-session', 'compaction-v2-session', 1, 1, '[]')
     `)
     yield* db.run(sql`
       INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated)
-      VALUES (${sessionID}, 'proj_prompt_v2_context', 'prompt-v2-context', '/tmp/prompt-v2-context', 'prompt-v2-context', 'test', 1, 1)
+      VALUES (${sessionID}, 'proj_compaction_v2_session', 'compaction-v2-session', '/tmp/compaction-v2-session', 'compaction-v2-session', 'test', 1, 1)
     `)
   })
 }
@@ -334,6 +311,12 @@ function v2Row(message: SessionMessage.Message): typeof SessionMessageTable.$inf
   const encoded = encodeMessage(message)
   const { id, type, ...data } = encoded
   return { id: SessionMessage.ID.make(id), session_id: sessionID, type, time_created: DateTime.toEpochMillis(message.time.created), data }
+}
+
+function displayText(message: SessionMessage.Message) {
+  if (message.type === "user") return message.text
+  if (message.type === "assistant") return message.content.find((content) => content.type === "text")?.text
+  return message.type
 }
 
 function assertNoLegacyIDs(value: unknown) {
