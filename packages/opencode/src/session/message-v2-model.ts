@@ -10,7 +10,10 @@ const InterruptedToolOutput = "[Tool execution was interrupted]"
 export type ToModelMessagesOptions = {
   stripMedia?: boolean
   toolOutputMaxChars?: number
+  model?: ToolMediaModel
 }
+
+export type ToolMediaModel = { api: { npm: string; id: string } }
 
 export async function toModelMessages(
   input: SessionMessage.Message[],
@@ -36,6 +39,7 @@ export async function toModelMessages(
       if (message.error && !isAbortedAssistantWithContent(message)) continue
 
       const parts: UIMessage["parts"] = []
+      const extractedMedia: ToolOutputFile[] = []
       for (const content of message.content) {
         if (content.type === "text") {
           // Provider metadata on assistant text is intentionally deferred for the
@@ -58,9 +62,21 @@ export async function toModelMessages(
         }
 
         toolNames.add(content.name)
-        parts.push(toolPart(content, options))
+        const tool = toolPart(content, options)
+        parts.push(tool.part)
+        extractedMedia.push(...tool.extractedMedia)
       }
       if (parts.length > 0) messages.push({ id: message.id, role: "assistant", parts })
+      if (extractedMedia.length > 0) {
+        messages.push({
+          id: `${message.id}_tool_media`,
+          role: "user",
+          parts: [
+            { type: "text", text: "Attached media from tool result:" },
+            ...extractedMedia.map((file) => userFilePart({ uri: file.uri, mime: file.mime, name: file.name }, undefined)),
+          ],
+        })
+      }
     }
   }
 
@@ -105,7 +121,10 @@ function isMeaningfulAssistantContent(content: SessionMessage.AssistantContent) 
   return false
 }
 
-function toolPart(content: SessionMessage.AssistantTool, options: ToModelMessagesOptions | undefined): UIMessage["parts"][number] {
+function toolPart(
+  content: SessionMessage.AssistantTool,
+  options: ToModelMessagesOptions | undefined,
+): { part: UIMessage["parts"][number]; extractedMedia: ToolOutputFile[] } {
   const metadata = providerMetadata(content.provider?.metadata)
   const base = {
     type: `tool-${content.name}` as `tool-${string}`,
@@ -116,25 +135,35 @@ function toolPart(content: SessionMessage.AssistantTool, options: ToModelMessage
   }
 
   if (content.state.status === "completed") {
+    const output = content.time.pruned ? { value: PrunedToolOutput, extractedMedia: [] } : toolOutput(content.state.content, options)
     return {
-      ...base,
-      state: "output-available",
-      output: content.time.pruned ? PrunedToolOutput : toolOutput(content.state.content, options),
+      part: {
+        ...base,
+        state: "output-available",
+        output: output.value,
+      },
+      extractedMedia: output.extractedMedia,
     }
   }
 
   if (content.state.status === "error") {
     return {
-      ...base,
-      state: "output-error",
-      errorText: content.state.error.message,
+      part: {
+        ...base,
+        state: "output-error",
+        errorText: content.state.error.message,
+      },
+      extractedMedia: [],
     }
   }
 
   return {
-    ...base,
-    state: "output-error",
-    errorText: InterruptedToolOutput,
+    part: {
+      ...base,
+      state: "output-error",
+      errorText: InterruptedToolOutput,
+    },
+    extractedMedia: [],
   }
 }
 
@@ -159,7 +188,12 @@ function isJSONValue(input: unknown): input is JSONValue {
   return isJSONObject(input)
 }
 
-function toolOutput(content: SessionMessage.ToolStateCompleted["content"], options: ToModelMessagesOptions | undefined) {
+type ToolOutputFile = { uri: string; mime: string; name?: string }
+
+function toolOutput(
+  content: SessionMessage.ToolStateCompleted["content"],
+  options: ToModelMessagesOptions | undefined,
+): { value: string | { text: string; attachments: Array<{ mime: string; url: string; filename?: string }> }; extractedMedia: ToolOutputFile[] } {
   const text = truncateToolOutput(
     content
       .filter((item) => item.type === "text")
@@ -167,12 +201,40 @@ function toolOutput(content: SessionMessage.ToolStateCompleted["content"], optio
       .join(""),
     options?.toolOutputMaxChars,
   )
+  const files = content.filter((item): item is ToolOutputFile & { type: "file" } => item.type === "file")
+  const extractedMedia = options?.stripMedia ? [] : files.filter((item) => shouldExtractToolMedia(item, options?.model))
   const attachments = options?.stripMedia
     ? []
-    : content.filter((item) => item.type === "file").map((item) => ({ mime: item.mime, url: item.uri, filename: item.name }))
+    : files
+        .filter((item) => !shouldExtractToolMedia(item, options?.model))
+        .map((item) => ({ mime: item.mime, url: item.uri, filename: item.name }))
 
-  if (attachments.length === 0) return text
-  return { text, attachments }
+  if (attachments.length === 0) return { value: text, extractedMedia }
+  return { value: { text, attachments }, extractedMedia }
+}
+
+function shouldExtractToolMedia(file: ToolOutputFile, model: ToolMediaModel | undefined) {
+  if (!model) return false
+  if (!isMedia(file.mime)) return false
+  return !isToolResultMediaSupported(file.mime, model)
+}
+
+function isToolResultMediaSupported(mime: string, model: ToolMediaModel) {
+  switch (model.api.npm) {
+    case "@ai-sdk/anthropic":
+    case "@ai-sdk/openai":
+    case "@ai-sdk/google-vertex/anthropic":
+      return true
+    case "@ai-sdk/amazon-bedrock":
+    case "@ai-sdk/xai":
+      return mime.startsWith("image/")
+    case "@ai-sdk/google": {
+      const id = model.api.id.toLowerCase()
+      return id.includes("gemini-3") && !id.includes("gemini-2")
+    }
+    default:
+      return false
+  }
 }
 
 function truncateToolOutput(text: string, maxChars?: number) {

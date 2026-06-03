@@ -26,8 +26,11 @@ export function prepareMessages(input: PrepareMessagesInput): SessionMessage.Mes
   return appendReminderOverlay(wrapped, input, latest)
 }
 
-export async function toProviderMessages(input: PrepareMessagesInput): Promise<ModelMessage[]> {
-  return MessageV2Model.toModelMessages(prepareMessages(input))
+export async function toProviderMessages(
+  input: PrepareMessagesInput,
+  options?: MessageV2Model.ToModelMessagesOptions,
+): Promise<ModelMessage[]> {
+  return MessageV2Model.toModelMessages(prepareMessages(input), options)
 }
 
 function wrapUserMessagesAfterLatestFinishedAssistant(

@@ -14,6 +14,12 @@ const model = {
   variant: ModelV2.VariantID.make("default"),
 }
 
+const bedrockModel = { api: { npm: "@ai-sdk/amazon-bedrock", id: "anthropic.claude-sonnet-4" } }
+const openAIModel = { api: { npm: "@ai-sdk/openai", id: "gpt-4.1" } }
+const xaiModel = { api: { npm: "@ai-sdk/xai", id: "grok-4" } }
+const gemini2Model = { api: { npm: "@ai-sdk/google", id: "gemini-2.5-pro" } }
+const gemini3Model = { api: { npm: "@ai-sdk/google", id: "gemini-3-pro" } }
+
 function id(suffix: string) {
   return EventV2.ID.make(`evt_${suffix}`)
 }
@@ -63,6 +69,25 @@ function completedTool(input?: Partial<SessionMessage.AssistantTool>): SessionMe
     }),
     ...input,
   })
+}
+
+function completedToolWithContent(content: SessionMessage.ToolStateCompleted["content"], input: Record<string, unknown> = { path: "file" }) {
+  return completedTool({
+    state: new SessionMessage.ToolStateCompleted({
+      status: "completed",
+      input,
+      structured: {},
+      content,
+    }),
+  })
+}
+
+function textContent(text: string) {
+  return new ToolOutput.TextContent({ type: "text", text })
+}
+
+function fileContent(uri: string, mime: string, name: string) {
+  return new ToolOutput.FileContent({ type: "file", uri, mime, name })
 }
 
 function patch(input?: Partial<SessionMessage.AssistantPatch>): SessionMessage.AssistantPatch {
@@ -726,6 +751,266 @@ describe("session.message-v2-model.toModelMessages", () => {
             toolName: "bash",
             output: { type: "content", value: [{ type: "text", text: "read image" }] },
           },
+        ],
+      },
+    ])
+  })
+
+  test("extracts unsupported Bedrock PDF after completed tool result while preserving exact message order", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [
+          assistant("assistant", 1, [
+            completedToolWithContent(
+              [textContent("read pdf"), fileContent("data:application/pdf;base64,JVBERi0=", "application/pdf", "doc.pdf")],
+              { path: "doc.pdf" },
+            ),
+          ]),
+        ],
+        { model: bedrockModel },
+      ),
+    ).toStrictEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { path: "doc.pdf" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "text", value: "read pdf" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Attached media from tool result:" },
+          { type: "file", mediaType: "application/pdf", filename: "doc.pdf", data: "data:application/pdf;base64,JVBERi0=" },
+        ],
+      },
+    ])
+  })
+
+  test("extracts Bedrock PDF-only completed tool media and keeps an empty text tool result", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [assistant("assistant", 1, [completedToolWithContent([fileContent("data:application/pdf;base64,JVBERi0=", "application/pdf", "doc.pdf")])])],
+        { model: bedrockModel },
+      ),
+    ).toStrictEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { path: "file" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "text", value: "" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Attached media from tool result:" },
+          { type: "file", mediaType: "application/pdf", filename: "doc.pdf", data: "data:application/pdf;base64,JVBERi0=" },
+        ],
+      },
+    ])
+  })
+
+  test("keeps Bedrock image media in completed tool result", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [assistant("assistant", 1, [completedToolWithContent([textContent("read image"), fileContent("data:image/png;base64,Zm9v", "image/png", "image.png")])])],
+        { model: bedrockModel },
+      ),
+    ).toStrictEqual([
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "content", value: [{ type: "text", text: "read image" }, { type: "media", mediaType: "image/png", data: "Zm9v" }] },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("keeps OpenAI PDF media in completed tool result", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [assistant("assistant", 1, [completedToolWithContent([textContent("read pdf"), fileContent("data:application/pdf;base64,JVBERi0=", "application/pdf", "doc.pdf")])])],
+        { model: openAIModel },
+      ),
+    ).toStrictEqual([
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "content", value: [{ type: "text", text: "read pdf" }, { type: "media", mediaType: "application/pdf", data: "JVBERi0=" }] },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("uses XAI image-only tool media policy", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [
+          assistant("assistant", 1, [
+            completedToolWithContent([
+              textContent("mixed media"),
+              fileContent("data:application/pdf;base64,JVBERi0=", "application/pdf", "doc.pdf"),
+              fileContent("data:image/png;base64,Zm9v", "image/png", "image.png"),
+            ]),
+          ]),
+        ],
+        { model: xaiModel },
+      ),
+    ).toStrictEqual([
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "content", value: [{ type: "text", text: "mixed media" }, { type: "media", mediaType: "image/png", data: "Zm9v" }] },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Attached media from tool result:" },
+          { type: "file", mediaType: "application/pdf", filename: "doc.pdf", data: "data:application/pdf;base64,JVBERi0=" },
+        ],
+      },
+    ])
+  })
+
+  test("extracts Google Gemini 2 tool media and keeps Gemini 3 tool media", async () => {
+    const messages = [assistant("assistant", 1, [completedToolWithContent([textContent("read image"), fileContent("data:image/png;base64,Zm9v", "image/png", "image.png")])])]
+
+    expect(await MessageV2Model.toModelMessages(messages, { model: gemini2Model })).toStrictEqual([
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "call-1", toolName: "bash", output: { type: "text", value: "read image" } }],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Attached media from tool result:" },
+          { type: "file", mediaType: "image/png", filename: "image.png", data: "data:image/png;base64,Zm9v" },
+        ],
+      },
+    ])
+
+    expect(await MessageV2Model.toModelMessages(messages, { model: gemini3Model })).toStrictEqual([
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "content", value: [{ type: "text", text: "read image" }, { type: "media", mediaType: "image/png", data: "Zm9v" }] },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("stripMedia with model removes completed tool media without injecting extracted media", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [assistant("assistant", 1, [completedToolWithContent([textContent("read pdf"), fileContent("data:application/pdf;base64,JVBERi0=", "application/pdf", "doc.pdf")])])],
+        { stripMedia: true, model: bedrockModel },
+      ),
+    ).toStrictEqual([
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "call-1", toolName: "bash", output: { type: "text", value: "read pdf" } }],
+      },
+    ])
+  })
+
+  test("extracts non-data unsupported media into synthetic user file message", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [assistant("assistant", 1, [completedToolWithContent([textContent("read pdf"), fileContent("file:///tmp/doc.pdf", "application/pdf", "doc.pdf")])])],
+        { model: bedrockModel },
+      ),
+    ).toStrictEqual([
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "call-1", toolName: "bash", output: { type: "text", value: "read pdf" } }],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Attached media from tool result:" },
+          { type: "file", mediaType: "application/pdf", filename: "doc.pdf", data: "file:///tmp/doc.pdf" },
         ],
       },
     ])

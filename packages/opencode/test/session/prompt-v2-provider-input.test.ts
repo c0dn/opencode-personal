@@ -283,6 +283,33 @@ describe("session.prompt-v2-provider-input", () => {
       },
     ])
   })
+
+  test("toProviderMessages passes MessageV2Model options through", async () => {
+    const result = await PromptV2ProviderInput.toProviderMessages(
+      {
+        messages: [
+          user("media", 1, {
+            text: "see file",
+            files: [new FileAttachment({ uri: "data:image/png;base64,Zm9v", mime: "image/png", name: "image.png" })],
+          }),
+        ],
+        agentName: "build",
+        step: 1,
+        experimentalPlanMode: false,
+      },
+      { stripMedia: true },
+    )
+
+    expect(result).toStrictEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "see file" },
+          { type: "text", text: "[Attached image/png: image.png]" },
+        ],
+      },
+    ])
+  })
 })
 
 function latestUserText(messages: SessionMessage.Message[]) {
