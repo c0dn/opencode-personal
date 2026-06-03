@@ -8,6 +8,15 @@ const decodeToolContent = Schema.decodeUnknownSync(ToolOutput.Content)
 
 export type MemoryState = {
   messages: SessionMessage.Message[]
+  pendingCompactions?: PendingCompaction[]
+}
+
+export type PendingCompaction = {
+  id: SessionMessage.ID
+  metadata?: Record<string, unknown>
+  sessionID: SessionEvent.Compaction.Started["data"]["sessionID"]
+  reason: SessionMessage.Compaction["reason"]
+  time: SessionMessage.Compaction["time"]
 }
 
 export interface Adapter {
@@ -18,6 +27,12 @@ export interface Adapter {
   readonly updateCompaction: (compaction: SessionMessage.Compaction) => Effect.Effect<void>
   readonly updateShell: (shell: SessionMessage.Shell) => Effect.Effect<void>
   readonly appendMessage: (message: SessionMessage.Message) => Effect.Effect<void>
+  readonly appendCompaction: (message: SessionMessage.Compaction) => Effect.Effect<void>
+  readonly recordCompactionStarted: (compaction: PendingCompaction) => Effect.Effect<void>
+  readonly getPendingCompactionStarted: (
+    event: SessionEvent.Compaction.Ended,
+  ) => Effect.Effect<PendingCompaction | undefined>
+  readonly clearPendingCompactionStarted: (id: SessionMessage.ID) => Effect.Effect<void>
 }
 
 export function memory(state: MemoryState): Adapter {
@@ -82,6 +97,30 @@ export function memory(state: MemoryState): Adapter {
     appendMessage(message) {
       return Effect.sync(() => {
         state.messages.push(message)
+      })
+    },
+    appendCompaction(message) {
+      return Effect.sync(() => {
+        if (state.messages.some((existing) => existing.id === message.id)) return
+        state.messages.push(message)
+      })
+    },
+    recordCompactionStarted(compaction) {
+      return Effect.sync(() => {
+        state.pendingCompactions = [
+          ...(state.pendingCompactions ?? []).filter((pending) => pending.sessionID !== compaction.sessionID),
+          compaction,
+        ]
+      })
+    },
+    getPendingCompactionStarted(event) {
+      return Effect.sync(() => {
+        return (state.pendingCompactions ?? []).findLast((compaction) => compaction.sessionID === event.data.sessionID)
+      })
+    },
+    clearPendingCompactionStarted(id) {
+      return Effect.sync(() => {
+        state.pendingCompactions = (state.pendingCompactions ?? []).filter((compaction) => compaction.id !== id)
       })
     },
   }
@@ -465,40 +504,33 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
         })
       },
       "session.next.compaction.started": (event) => {
-        return adapter.appendMessage(
-          new SessionMessage.Compaction({
-            id: event.id,
-            type: "compaction",
-            metadata: event.metadata,
-            reason: event.data.reason,
-            summary: "",
-            time: { created: event.data.timestamp },
-          }),
-        )
-      },
-      "session.next.compaction.delta": (event) => {
-        return Effect.gen(function* () {
-          const currentCompaction = yield* adapter.getCurrentCompaction()
-          if (currentCompaction) {
-            yield* adapter.updateCompaction(
-              produce(currentCompaction, (draft) => {
-                draft.summary += event.data.text
-              }),
-            )
-          }
+        return adapter.recordCompactionStarted({
+          id: event.id,
+          metadata: event.metadata,
+          sessionID: event.data.sessionID,
+          reason: event.data.reason,
+          time: { created: event.data.timestamp },
         })
+      },
+      "session.next.compaction.delta": () => {
+        return Effect.void
       },
       "session.next.compaction.ended": (event) => {
         return Effect.gen(function* () {
-          const currentCompaction = yield* adapter.getCurrentCompaction()
-          if (currentCompaction) {
-            yield* adapter.updateCompaction(
-              produce(currentCompaction, (draft) => {
-                draft.summary = event.data.text
-                draft.include = event.data.include
-              }),
-            )
-          }
+          const started = yield* adapter.getPendingCompactionStarted(event)
+          if (!started) return
+          yield* adapter.appendCompaction(
+            new SessionMessage.Compaction({
+              id: started.id,
+              type: "compaction",
+              metadata: started.metadata,
+              reason: started.reason,
+              summary: event.data.text,
+              include: event.data.include,
+              time: started.time,
+            }),
+          )
+          yield* adapter.clearPendingCompactionStarted(started.id)
         })
       },
     })

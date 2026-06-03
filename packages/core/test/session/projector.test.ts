@@ -12,6 +12,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
+import { SessionV2 } from "@opencode-ai/core/session"
 import { Prompt } from "@opencode-ai/core/session/prompt"
 import { SessionMessageTable } from "@opencode-ai/core/session/sql"
 import { SessionSchema } from "@opencode-ai/core/session/schema"
@@ -35,13 +36,13 @@ async function makeDbPath() {
 }
 
 function layer(filename: string) {
-  return SessionProjector.layer.pipe(
+  return Layer.mergeAll(SessionProjector.layer, SessionV2.layer).pipe(
     Layer.provideMerge(EventV2.layer),
     Layer.provideMerge(Database.layerFromPath(filename)),
   )
 }
 
-function run<A, E>(filename: string, effect: Effect.Effect<A, E, Database.Service | EventV2.Service>) {
+function run<A, E>(filename: string, effect: Effect.Effect<A, E, Database.Service | EventV2.Service | SessionV2.Service>) {
   return Effect.runPromise(effect.pipe(Effect.provide(layer(filename)), Effect.scoped))
 }
 
@@ -82,8 +83,33 @@ function readMessages() {
     const { db } = yield* Database.Service
     const rows = yield* db.select().from(SessionMessageTable).all().pipe(Effect.orDie)
     return rows
-      .sort((left, right) => left.time_created - right.time_created)
+      .sort((left, right) => left.time_created - right.time_created || left.id.localeCompare(right.id))
       .map((row) => Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type }))
+  })
+}
+
+function publishCompaction(input: {
+  startedID: EventV2.ID
+  endedID?: EventV2.ID
+  startedAt: number
+  endedAt?: number
+  reason?: "manual" | "auto"
+  text?: string
+  include?: string
+}) {
+  return Effect.gen(function* () {
+    const events = yield* EventV2.Service
+    yield* events.publish(
+      SessionEvent.Compaction.Started,
+      { sessionID, timestamp: at(input.startedAt), reason: input.reason ?? "manual" },
+      { id: input.startedID },
+    )
+    if (!input.endedID || input.endedAt === undefined) return
+    yield* events.publish(
+      SessionEvent.Compaction.Ended,
+      { sessionID, timestamp: at(input.endedAt), text: input.text ?? "summary", include: input.include },
+      { id: input.endedID },
+    )
   })
 }
 
@@ -93,6 +119,29 @@ function resetStoredEvents() {
     yield* db.delete(EventTable).where(eq(EventTable.aggregate_id, sessionID)).run().pipe(Effect.orDie)
     yield* db.delete(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, sessionID)).run().pipe(Effect.orDie)
   })
+}
+
+function dbEvents() {
+  return Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    return yield* db
+      .select()
+      .from(EventTable)
+      .where(eq(EventTable.aggregate_id, sessionID))
+      .orderBy(sql`seq asc`)
+      .all()
+      .pipe(Effect.orDie)
+  })
+}
+
+function serializedEventRow(row: typeof EventTable.$inferSelect): EventV2.SerializedEvent {
+  return {
+    id: row.id,
+    type: row.type,
+    seq: row.seq,
+    aggregateID: row.aggregate_id,
+    data: row.data,
+  }
 }
 
 function publishTranscript() {
@@ -320,6 +369,257 @@ describe("SessionProjector", () => {
         expect(assistant.content).toMatchObject([
           { type: "text", text: "hello assistant" },
           { type: "tool", state: { status: "completed" } },
+        ])
+      }),
+    )
+  })
+
+  test("compaction started only does not create a canonical compaction row", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* publishCompaction({ startedID: eventID("started_only"), startedAt: 10 })
+
+        expect(yield* readMessages()).toEqual([])
+      }),
+    )
+  })
+
+  test("compaction started plus delta does not create a canonical compaction row", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        const events = yield* EventV2.Service
+        yield* events.publish(
+          SessionEvent.Compaction.Started,
+          { sessionID, timestamp: at(10), reason: "manual" },
+          { id: eventID("started_delta") },
+        )
+        yield* events.publish(
+          SessionEvent.Compaction.Delta,
+          { sessionID, timestamp: at(11), text: "partial" },
+          { id: eventID("delta_without_end") },
+        )
+
+        expect(yield* readMessages()).toEqual([])
+      }),
+    )
+  })
+
+  test("compaction ended without a matching started event does not create or mutate rows", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        const events = yield* EventV2.Service
+        yield* events.publish(
+          SessionEvent.Compaction.Ended,
+          { sessionID, timestamp: at(10), text: "orphan summary", include: "orphan" },
+          { id: eventID("orphan_ended") },
+        )
+        expect(yield* readMessages()).toEqual([])
+
+        yield* publishCompaction({
+          startedID: eventID("completed_before_orphan"),
+          endedID: eventID("completed_before_orphan_end"),
+          startedAt: 20,
+          endedAt: 30,
+          text: "original summary",
+          include: "original",
+        })
+        yield* events.publish(
+          SessionEvent.Compaction.Ended,
+          { sessionID, timestamp: at(40), text: "stale summary", include: "stale" },
+          { id: eventID("stale_ended") },
+        )
+
+        expect(yield* readMessages()).toMatchObject([
+          { id: eventID("completed_before_orphan"), type: "compaction", summary: "original summary", include: "original" },
+        ])
+      }),
+    )
+  })
+
+  test("compaction ended materializes one row from started identity and ended payload", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* publishCompaction({
+          startedID: eventID("materialized_started"),
+          endedID: eventID("materialized_ended"),
+          startedAt: 10,
+          endedAt: 20,
+          reason: "auto",
+          text: "authoritative summary",
+          include: "keep-after-anchor",
+        })
+
+        const messages = yield* readMessages()
+        expect(messages).toHaveLength(1)
+        expect(messages[0]).toMatchObject({
+          id: eventID("materialized_started"),
+          type: "compaction",
+          reason: "auto",
+          summary: "authoritative summary",
+          include: "keep-after-anchor",
+          time: { created: at(10) },
+        })
+      }),
+    )
+  })
+
+  test("repeated completed compactions create two rows and context anchors on the second", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* publishCompaction({
+          startedID: eventID("first_compaction"),
+          endedID: eventID("first_compaction_end"),
+          startedAt: 10,
+          endedAt: 20,
+          text: "first summary",
+        })
+        const events = yield* EventV2.Service
+        yield* events.publish(
+          SessionEvent.Prompted,
+          { sessionID, timestamp: at(30), prompt: new Prompt({ text: "between", files: [], agents: [], references: [] }) },
+          { id: eventID("between_compactions") },
+        )
+        yield* publishCompaction({
+          startedID: eventID("second_compaction"),
+          endedID: eventID("second_compaction_end"),
+          startedAt: 40,
+          endedAt: 50,
+          text: "second summary",
+        })
+        yield* events.publish(
+          SessionEvent.Prompted,
+          { sessionID, timestamp: at(60), prompt: new Prompt({ text: "after", files: [], agents: [], references: [] }) },
+          { id: eventID("after_second_compaction") },
+        )
+
+        const messages = yield* readMessages()
+        expect(messages.filter((message) => message.type === "compaction").map((message) => message.id)).toEqual([
+          eventID("first_compaction"),
+          eventID("second_compaction"),
+        ])
+
+        const session = yield* SessionV2.Service
+        const context = yield* session.context(sessionID)
+        expect(context.map((message) => message.id)).toEqual([
+          eventID("second_compaction"),
+          eventID("after_second_compaction"),
+        ])
+      }),
+    )
+  })
+
+  test("abandoned compaction start is not updated by a later completed compaction", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* publishCompaction({ startedID: eventID("abandoned_compaction"), startedAt: 10 })
+        yield* publishCompaction({
+          startedID: eventID("completed_after_abandoned"),
+          endedID: eventID("completed_after_abandoned_end"),
+          startedAt: 20,
+          endedAt: 30,
+          text: "completed summary",
+        })
+
+        expect(yield* readMessages()).toMatchObject([
+          { id: eventID("completed_after_abandoned"), type: "compaction", summary: "completed summary" },
+        ])
+      }),
+    )
+  })
+
+  test("duplicate replay does not duplicate compaction or mutate a stale started row", async () => {
+    const sourceDb = await makeDbPath()
+    const targetDb = await makeDbPath()
+    const events = await run(
+      sourceDb,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* publishCompaction({ startedID: eventID("duplicate_abandoned"), startedAt: 10 })
+        yield* publishCompaction({
+          startedID: eventID("duplicate_completed"),
+          endedID: eventID("duplicate_completed_end"),
+          startedAt: 20,
+          endedAt: 30,
+          text: "completed once",
+        })
+        return (yield* dbEvents()).map(serializedEventRow)
+      }),
+    )
+
+    await run(
+      targetDb,
+      Effect.gen(function* () {
+        yield* seedSession()
+        const service = yield* EventV2.Service
+        yield* service.replayAll(events)
+        yield* resetStoredEvents()
+        yield* service.replayAll(events)
+
+        expect(yield* readMessages()).toMatchObject([
+          { id: eventID("duplicate_completed"), type: "compaction", summary: "completed once" },
+        ])
+      }),
+    )
+  })
+
+  test("context ignores started-only compactions and keeps messages after a started anchor visible", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        const events = yield* EventV2.Service
+        yield* events.publish(
+          SessionEvent.Prompted,
+          { sessionID, timestamp: at(10), prompt: new Prompt({ text: "before", files: [], agents: [], references: [] }) },
+          { id: eventID("before_started_only") },
+        )
+        yield* publishCompaction({ startedID: eventID("context_started_only"), startedAt: 20 })
+        yield* events.publish(
+          SessionEvent.Prompted,
+          { sessionID, timestamp: at(30), prompt: new Prompt({ text: "after start", files: [], agents: [], references: [] }) },
+          { id: eventID("after_started_only") },
+        )
+
+        const session = yield* SessionV2.Service
+        expect((yield* session.context(sessionID)).map((message) => message.id)).toEqual([
+          eventID("before_started_only"),
+          eventID("after_started_only"),
+        ])
+
+        yield* events.publish(
+          SessionEvent.Compaction.Ended,
+          { sessionID, timestamp: at(40), text: "summary", include: undefined },
+          { id: eventID("context_ended") },
+        )
+        yield* events.publish(
+          SessionEvent.Prompted,
+          { sessionID, timestamp: at(50), prompt: new Prompt({ text: "after end", files: [], agents: [], references: [] }) },
+          { id: eventID("after_ended") },
+        )
+
+        expect((yield* session.context(sessionID)).map((message) => message.id)).toEqual([
+          eventID("context_started_only"),
+          eventID("after_started_only"),
+          eventID("after_ended"),
         ])
       }),
     )

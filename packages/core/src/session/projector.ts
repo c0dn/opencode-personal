@@ -1,9 +1,10 @@
 export * as SessionProjector from "./projector"
 
-import { and, eq, sql } from "drizzle-orm"
+import { and, asc, eq, inArray, sql } from "drizzle-orm"
 import { DateTime, Effect, Layer, Schema } from "effect"
 import { Database } from "../database/database"
 import { EventV2 } from "../event"
+import { EventTable } from "../event/sql"
 import { SessionEvent } from "./event"
 import { SessionLegacy } from "./legacy"
 import { WorkspaceTable } from "../control-plane/workspace.sql"
@@ -16,6 +17,8 @@ type DatabaseService = Database.Interface["db"]
 
 const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Message)
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
+const compactionStartedType = EventV2.versionedType(SessionEvent.Compaction.Started.type, 1)
+const compactionEndedType = EventV2.versionedType(SessionEvent.Compaction.Ended.type, 1)
 
 type Usage = {
   cost: number
@@ -262,8 +265,68 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
             .pipe(Effect.orDie)
         })
       },
+      appendCompaction(message) {
+        return Effect.gen(function* () {
+          const encoded = encodeMessage(message)
+          const { id, type, ...data } = encoded
+          yield* db
+            .insert(SessionMessageTable)
+            .values([
+              {
+                id: SessionMessage.ID.make(id),
+                session_id: event.data.sessionID,
+                type,
+                time_created: DateTime.toEpochMillis(message.time.created),
+                data,
+              },
+            ])
+            .onConflictDoNothing()
+            .run()
+            .pipe(Effect.orDie)
+        })
+      },
+      recordCompactionStarted() {
+        return Effect.void
+      },
+      getPendingCompactionStarted(event) {
+        return findLatestUnmatchedCompactionStarted(db, event.data.sessionID)
+      },
+      clearPendingCompactionStarted() {
+        return Effect.void
+      },
     }
     yield* SessionMessageUpdater.update(adapter, event)
+  })
+}
+
+function findLatestUnmatchedCompactionStarted(
+  db: DatabaseService,
+  sessionID: SessionEvent.Compaction.Started["data"]["sessionID"],
+) {
+  return Effect.gen(function* () {
+    const rows = yield* db
+      .select()
+      .from(EventTable)
+      .where(and(eq(EventTable.aggregate_id, sessionID), inArray(EventTable.type, [compactionStartedType, compactionEndedType])))
+      .orderBy(asc(EventTable.seq))
+      .all()
+      .pipe(Effect.orDie)
+
+    let pending: SessionMessageUpdater.PendingCompaction | undefined
+    for (const row of rows) {
+      if (row.type === compactionStartedType) {
+        const data = EventV2.decodeData(SessionEvent.Compaction.Started, row.data)
+        pending = {
+          id: row.id,
+          sessionID: data.sessionID,
+          reason: data.reason,
+          time: { created: data.timestamp },
+        }
+        continue
+      }
+      if (row.type === compactionEndedType) pending = undefined
+    }
+    return pending
   })
 }
 
@@ -441,6 +504,7 @@ export const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Reasoning.Ended, (event) => run(db, event))
     yield* events.project(SessionEvent.Retried, (event) => run(db, event))
     yield* events.project(SessionEvent.Compaction.Started, (event) => run(db, event))
+    yield* events.project(SessionEvent.Compaction.Delta, (event) => run(db, event))
     yield* events.project(SessionEvent.Compaction.Ended, (event) => run(db, event))
   }),
 )

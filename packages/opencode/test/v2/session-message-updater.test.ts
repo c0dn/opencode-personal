@@ -93,9 +93,48 @@ test("v2 message entities use creating evt_* IDs", () => {
     },
   ] satisfies SessionEvent.Event[])
 
-  expect(state.messages.map((message) => message.id)).toEqual([promptedID, assistantID, shellID, compactionID])
+  expect(state.messages.map((message) => message.id)).toEqual([promptedID, assistantID, shellID])
   for (const message of state.messages) {
     expect(message.id.startsWith("evt_")).toBe(true)
+  }
+
+  const completed = applyEvents([
+    ...state.pendingCompactions!.map(
+      (compaction) =>
+        ({
+          id: compaction.id,
+          type: "session.next.compaction.started",
+          data: {
+            sessionID,
+            timestamp: compaction.time.created,
+            reason: compaction.reason,
+          },
+        }) satisfies SessionEvent.Event,
+    ),
+    {
+      id: eventID("compaction_ended"),
+      type: "session.next.compaction.ended",
+      data: {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(5),
+        text: "final summary",
+        include: "keep",
+      },
+    },
+  ] satisfies SessionEvent.Event[])
+  expect(completed.messages).toHaveLength(1)
+  expect(completed.messages[0]).toMatchObject({
+    id: compactionID,
+    type: "compaction",
+    reason: "auto",
+    summary: "final summary",
+    include: "keep",
+    time: { created: DateTime.makeUnsafe(4) },
+  })
+
+  for (const value of canonicalStateStrings(completed)) {
+    expect(value.startsWith("msg_")).toBe(false)
+    expect(value.startsWith("prt_")).toBe(false)
   }
 })
 
@@ -252,7 +291,7 @@ test("step ended carries finish, snapshot, and token usage onto current assistan
   expect(assistant.time.completed).toEqual(DateTime.makeUnsafe(2))
 })
 
-test("compaction delta and ended reduce summary and include", () => {
+test("compaction delta is non-canonical and ended materializes summary and include", () => {
   const compactionID = eventID("compaction_started")
   const events = [
     {
@@ -287,10 +326,7 @@ test("compaction delta and ended reduce summary and include", () => {
   ] satisfies SessionEvent.Event[]
 
   const deltaState = applyEvents(events.slice(0, 3))
-  const deltaCompaction = deltaState.messages[0]
-  expect(deltaCompaction?.type).toBe("compaction")
-  if (deltaCompaction?.type !== "compaction") return
-  expect(deltaCompaction.summary).toBe("partial summary")
+  expect(deltaState.messages).toEqual([])
 
   const state = applyEvents(events)
 
@@ -303,4 +339,10 @@ test("compaction delta and ended reduce summary and include", () => {
   expect(compaction.reason).toBe("manual")
   expect(compaction.summary).toBe("final summary")
   expect(compaction.include).toBe("keep this context")
+  expect(compaction.time.created).toEqual(DateTime.makeUnsafe(1))
+
+  for (const value of canonicalStateStrings(state)) {
+    expect(value.startsWith("msg_")).toBe(false)
+    expect(value.startsWith("prt_")).toBe(false)
+  }
 })

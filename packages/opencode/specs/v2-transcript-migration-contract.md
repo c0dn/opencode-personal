@@ -89,6 +89,8 @@ Only completed legacy compaction marker + paired summary assistant records map t
 
 `reason` maps to `auto` when the legacy marker has `auto: true`; otherwise it maps to `manual`. `summary` is the joined text from the paired summary assistant, preserving paragraph order. `include` translates legacy `tail_start_id` to the deterministic v2 ID when that legacy ID was mapped and the mapping is safe. Omit `include` when the target cannot be proven. Incomplete pairs are skipped with stats and must not produce v2 compaction anchors.
 
+For live EventV2 projection, `session.next.compaction.started` records only pending lifecycle state and must not create a canonical `SessionMessage.Compaction` row. `session.next.compaction.delta` is non-canonical; `session.next.compaction.ended` is authoritative and materializes exactly one completed row from the matching latest pending Started event: row ID and `time.created` come from Started, `reason` comes from Started, and `summary`/`include` come from Ended. Ended events without a matching pending Started are no-ops and must not create anchors.
+
 ## Consumer Fidelity Matrix
 
 Readiness categories are deliberately conservative: `already-canonical-v2`, `ready-for-leaf-semantic-tests`, `transitional-legacy-oracle`, `high-risk-core-helper-blocked`, `destructive-semantics-blocked`, `v2-payload-policy-blocked`, and `ready-for-controlled-v2-cutover`.
