@@ -21,6 +21,15 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { EventV2 } from "@opencode-ai/core/event"
+import { Database } from "@opencode-ai/core/database/database"
+import { SessionMessage } from "@opencode-ai/core/session/message"
+import { SessionMessageBackfillService } from "@opencode-ai/core/session/message-backfill-service"
+import { SessionMessageTable } from "@opencode-ai/core/session/sql"
+import { asc, eq } from "drizzle-orm"
+import { CompactionV2Context } from "./compaction-v2-context"
+import { CompactionV2Process } from "./compaction-v2-process"
+import { CompactionV2Prompt } from "./compaction-v2-prompt"
+import { ensureBackfillReady } from "./session-v2-backfill-readiness"
 
 const log = Log.create({ service: "session.compaction" })
 
@@ -215,6 +224,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const config = yield* Config.Service
     const session = yield* Session.Service
+    const database = yield* Database.Service
     const agents = yield* Agent.Service
     const plugin = yield* Plugin.Service
     const processors = yield* SessionProcessor.Service
@@ -387,28 +397,40 @@ export const layer = Layer.effect(
         ? yield* provider.getModel(agent.model.providerID, agent.model.modelID).pipe(Effect.orDie)
         : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
       const cfg = yield* config.get()
+      const canonicalMessages = yield* readCanonicalV2Messages(input.sessionID)
+      const canonicalHistory = CompactionV2Context.history(canonicalMessages).history
+      const overflowReplayStartID = input.overflow ? latestVisibleUserID(canonicalHistory) : undefined
+      const v2Selected = CompactionV2Process.selectForProcess(canonicalMessages, {
+        overflow: input.overflow === true,
+        overflowReplayStartID,
+        tailTurns: cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS,
+        preserveRecentBudget: preserveRecentBudget({ cfg, model }),
+        estimate: estimateCanonical,
+      })
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const prior = completedCompactions(history)
       const hidden = new Set(prior.flatMap((item) => [item.userIndex, item.assistantIndex]))
-      const previousSummary = prior.at(-1)?.summary
-      const selected = yield* select({
+      const legacySelected = yield* select({
         messages: history.filter((_, index) => !hidden.has(index)),
         cfg,
         model,
       })
+      const legacyTailStartID = legacySelected.tail_start_id
+      const v2TailStartID = v2Selected.tailStartID
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
         "experimental.session.compacting",
         { sessionID: input.sessionID },
         { context: [], prompt: undefined },
       )
-      const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
-      const msgs = structuredClone(selected.head)
-      yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
-        stripMedia: true,
-        toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-      })
+      const modelMessages = yield* Effect.promise(() =>
+        CompactionV2Prompt.toProviderMessages({
+          head: v2Selected.head,
+          previousSummary: v2Selected.previousSummary,
+          context: compacting.context,
+          promptOverride: compacting.prompt,
+        }),
+      )
       const ctx = yield* InstanceState.context
       const msg: SessionLegacy.Assistant = {
         id: MessageID.ascending(),
@@ -448,13 +470,7 @@ export const layer = Layer.effect(
         sessionID: input.sessionID,
         tools: {},
         system: [],
-        messages: [
-          ...modelMessages,
-          {
-            role: "user",
-            content: [{ type: "text", text: nextPrompt }],
-          },
-        ],
+        messages: modelMessages,
         model,
       })
 
@@ -469,10 +485,10 @@ export const layer = Layer.effect(
         return "stop"
       }
 
-      if (compactionPart && selected.tail_start_id && compactionPart.tail_start_id !== selected.tail_start_id) {
+      if (compactionPart && legacyTailStartID && compactionPart.tail_start_id !== legacyTailStartID) {
         yield* session.updatePart({
           ...compactionPart,
-          tail_start_id: selected.tail_start_id,
+          tail_start_id: legacyTailStartID,
         })
       }
 
@@ -574,7 +590,7 @@ export const layer = Layer.effect(
           sessionID: input.sessionID,
           timestamp: DateTime.makeUnsafe(Date.now()),
           text: summary ?? "",
-          include: selected.tail_start_id,
+          include: v2TailStartID,
         })
         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
       }
@@ -611,18 +627,68 @@ export const layer = Layer.effect(
       })
     })
 
+    function readCanonicalV2Messages(sessionID: SessionID) {
+      return Effect.gen(function* () {
+        const backfill = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID).pipe(
+          Effect.provideService(Database.Service, database),
+          Effect.orDie,
+        )
+        const notReady = ensureBackfillReady(backfill, sessionID)
+        if (notReady) return yield* notReady
+
+        const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
+        const rows = yield* database.db
+          .select()
+          .from(SessionMessageTable)
+          .where(eq(SessionMessageTable.session_id, sessionID))
+          .orderBy(asc(SessionMessageTable.time_created), asc(SessionMessageTable.id))
+          .all()
+          .pipe(Effect.orDie)
+        return yield* Effect.forEach(
+          rows,
+          (row) => decodeMessage({ ...row.data, id: row.id, type: row.type }).pipe(Effect.orDie),
+          { concurrency: 1 },
+        )
+      })
+    }
+
     return Service.of({
       isOverflow,
       prune,
-      process: processCompaction,
+      process: processCompaction as Interface["process"],
       create,
     })
   }),
 )
 
+function latestVisibleUserID(messages: readonly SessionMessage.Message[]) {
+  return messages.findLast((message): message is SessionMessage.User => message.type === "user")?.id
+}
+
+function estimateCanonical(messages: readonly SessionMessage.Message[]) {
+  return Token.estimate(messages.map(canonicalEstimateText).join("\n"))
+}
+
+function canonicalEstimateText(message: SessionMessage.Message) {
+  if (message.type === "user") {
+    return [message.text, ...(message.files ?? []).map((file) => `${file.name ?? "file"} ${file.uri}`)].join("\n")
+  }
+  if (message.type === "assistant") {
+    return message.content
+      .map((content) => {
+        if (content.type === "text" || content.type === "reasoning") return content.text
+        if (content.type === "patch") return content.files.join("\n")
+        return JSON.stringify(content.state)
+      })
+      .join("\n")
+  }
+  return ""
+}
+
 export const defaultLayer = Layer.suspend(() =>
   layer.pipe(
     Layer.provide(Provider.defaultLayer),
+    Layer.provide(Database.defaultLayer),
     Layer.provide(Session.defaultLayer),
     Layer.provide(SessionProcessor.defaultLayer),
     Layer.provide(Agent.defaultLayer),

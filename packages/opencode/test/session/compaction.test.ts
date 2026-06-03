@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, mock, test } from "bun:test"
 import { SessionLegacy } from "@opencode-ai/core/session/legacy"
 import { Database } from "@opencode-ai/core/database/database"
+import { DataMigrationTable } from "@opencode-ai/core/data-migration.sql"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { APICallError } from "ai"
@@ -33,6 +34,9 @@ import { TestConfig } from "../fixture/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { LLMEvent, Usage } from "@opencode-ai/llm"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+import { SessionMessage } from "@opencode-ai/core/session/message"
+import { SessionMessageTable } from "@opencode-ai/core/session/sql"
+import * as DateTime from "effect/DateTime"
 
 void Log.init({ print: false })
 
@@ -51,6 +55,7 @@ const ref = {
 }
 
 const usage = (input: ConstructorParameters<typeof Usage>[0]) => new Usage(input)
+const encodeSessionMessage = Schema.encodeSync(SessionMessage.Message)
 
 const basicUsage = () => usage({ inputTokens: 1, outputTokens: 1, totalTokens: 2 })
 
@@ -279,7 +284,12 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
         Layer.provide(status),
       )
     : layer(options?.result ?? "continue")
-  return Layer.mergeAll(SessionCompaction.layer.pipe(Layer.provide(processor)), processor, events, status).pipe(
+  return Layer.mergeAll(
+    SessionCompaction.layer.pipe(Layer.provide(processor)),
+    processor,
+    events,
+    status,
+  ).pipe(
     Layer.provide(SessionNs.defaultLayer),
     Layer.provide((options?.provider ?? wide()).layer),
     Layer.provide(Snapshot.defaultLayer),
@@ -376,6 +386,24 @@ function autocontinue(enabled: boolean) {
         ;(output as { enabled: boolean }).enabled = enabled
         return output
       })
+    },
+    list: () => Effect.succeed([]),
+    init: () => Effect.void,
+  })
+}
+
+function transformGuardPlugin(input: { compacting?: { context?: string[]; prompt?: string }; onTransform?: () => void }) {
+  return Layer.mock(Plugin.Service)({
+    trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
+      if (name === "experimental.session.compacting" && input.compacting) {
+        return Effect.succeed({
+          ...(output as object),
+          context: input.compacting.context ?? (output as { context?: string[] }).context,
+          prompt: input.compacting.prompt ?? (output as { prompt?: string }).prompt,
+        } as Output)
+      }
+      if (name === "experimental.chat.messages.transform") input.onTransform?.()
+      return Effect.succeed(output)
     },
     list: () => Effect.succeed([]),
     init: () => Effect.void,
@@ -986,6 +1014,142 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
+    "uses canonical v2 rows for provider input after legacy backfill instead of passed legacy messages",
+    () => {
+      const stub = llm()
+      let captured = ""
+      stub.push(reply("summary", (input) => (captured = JSON.stringify(input.messages))))
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const msg = yield* createUserMessage(session.id, "canonical text")
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const mutated = structuredClone(msgs)
+        const part = mutated[0]?.parts[0]
+        if (part?.type === "text") part.text = "mutated legacy input text"
+
+        yield* SessionCompaction.use.process({ parentID: msg.id, messages: mutated, sessionID: session.id, auto: false })
+
+        expect(captured).toContain("canonical text")
+        expect(captured).not.toContain("mutated legacy input text")
+      }).pipe(withCompaction({ llm: stub.layer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "fails readiness before summary assistant creation and compaction ended event",
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const { db } = yield* Database.Service
+      const events = yield* EventV2Bridge.Service
+      const session = yield* ssn.create({})
+      const msg = yield* createUserMessage(session.id, "hello")
+      const msgs = yield* ssn.messages({ sessionID: session.id })
+      let ended = false
+      const off = yield* events.listen((evt) => {
+        if (evt.type === SessionEvent.Compaction.Ended.type && (evt.data as { sessionID?: string }).sessionID === session.id) {
+          ended = true
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => off)
+      yield* db
+        .insert(DataMigrationTable)
+        .values({ name: `legacy-session-message-backfill/v1/${session.id}`, time_completed: Date.now() })
+        .run()
+      yield* db
+        .insert(SessionMessageTable)
+        .values({
+          id: SessionMessage.ID.make("evt_live_equal_boundary"),
+          session_id: SessionV2.ID.make(session.id),
+          type: "user",
+          time_created: msg.time.created,
+          data: encodeSessionMessage(
+            new SessionMessage.User({
+              id: SessionMessage.ID.make("evt_live_equal_boundary"),
+              type: "user",
+              text: "live boundary",
+              files: [],
+              agents: [],
+              references: [],
+              time: { created: DateTime.makeUnsafe(msg.time.created) },
+            }),
+          ),
+        })
+        .run()
+
+      const exit = yield* SessionCompaction.use
+        .process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: false })
+        .pipe(Effect.exit)
+      const all = yield* ssn.messages({ sessionID: session.id })
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(String(Cause.squash(exit.cause))).toContain("BackfillNotReadyError")
+      expect(all.some((item) => item.info.role === "assistant" && item.info.summary)).toBe(false)
+      expect(ended).toBe(false)
+    }).pipe(withCompaction()),
+  )
+
+  itCompaction.instance(
+    "publishes v2 tail include while keeping legacy compaction tail_start_id legacy",
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const session = yield* ssn.create({})
+      yield* createUserMessage(session.id, "first")
+      const keep = yield* createUserMessage(session.id, "second")
+      yield* createUserMessage(session.id, "third")
+      yield* createSummaryCompaction(session.id)
+      let include: string | undefined
+      const off = yield* events.listen((evt) => {
+        if (evt.type === SessionEvent.Compaction.Ended.type && (evt.data as { sessionID?: string }).sessionID === session.id) {
+          include = (evt.data as typeof SessionEvent.Compaction.Ended.data.Type).include
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => off)
+
+      const msgs = yield* ssn.messages({ sessionID: session.id })
+      const parent = msgs.at(-1)?.info.id
+      expect(parent).toBeTruthy()
+      yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+      const part = yield* readCompactionPart(session.id)
+      expect(part?.tail_start_id).toBe(keep.id)
+      expect(part?.tail_start_id?.startsWith("msg_")).toBe(true)
+      expect(include?.startsWith("evt_")).toBe(true)
+    }).pipe(withCompaction({ config: cfg({ tail_turns: 2, preserve_recent_tokens: 10_000 }) })),
+  )
+
+  itCompaction.instance(
+    "keeps compacting hook but skips chat message transform for v2 compaction input",
+    () => {
+      const stub = llm()
+      let captured = ""
+      let transformed = false
+      stub.push(reply("summary", (input) => (captured = JSON.stringify(input.messages))))
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const msg = yield* createUserMessage(session.id, "hello")
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+
+        yield* SessionCompaction.use.process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: false })
+
+        expect(captured).toContain("hook context")
+        expect(transformed).toBe(false)
+      }).pipe(
+        withCompaction({
+          llm: stub.layer,
+          plugin: transformGuardPlugin({ compacting: { context: ["hook context"] }, onTransform: () => (transformed = true) }),
+        }),
+      )
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
     "shrinks retained tail to fit preserve token budget",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
@@ -1433,7 +1597,7 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
-    "anchors repeated compactions with the previous summary",
+    "does not fall back to legacy previous summary for v2 provider input",
     () => {
       const stub = llm()
       let captured = ""
@@ -1464,9 +1628,8 @@ describe("session.compaction.process", () => {
         expect(parent).toBeTruthy()
         yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
 
-        expect(captured).toContain("<previous-summary>")
-        expect(captured).toContain("summary one")
-        expect(captured.match(/summary one/g)?.length).toBe(1)
+        expect(captured).not.toContain("<previous-summary>")
+        expect(captured).not.toContain("summary one")
         expect(captured).toContain("## Constraints & Preferences")
         expect(captured).toContain("## Progress")
       }).pipe(withCompaction({ llm: stub.layer }))
