@@ -1,12 +1,21 @@
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import type { JSONValue, SharedV3ProviderMetadata } from "@ai-sdk/provider"
+import { isMedia } from "@/util/media"
 import { DateTime } from "effect"
 import { convertToModelMessages, type ModelMessage, type UIMessage } from "ai"
 
 const PrunedToolOutput = "[Old tool result content cleared]"
 const InterruptedToolOutput = "[Tool execution was interrupted]"
 
-export async function toModelMessages(input: SessionMessage.Message[]): Promise<ModelMessage[]> {
+export type ToModelMessagesOptions = {
+  stripMedia?: boolean
+  toolOutputMaxChars?: number
+}
+
+export async function toModelMessages(
+  input: SessionMessage.Message[],
+  options?: ToModelMessagesOptions,
+): Promise<ModelMessage[]> {
   const toolNames = new Set<string>()
   const messages: UIMessage[] = []
 
@@ -17,12 +26,7 @@ export async function toModelMessages(input: SessionMessage.Message[]): Promise<
       // only user-side payload on the turn.
       const parts: UIMessage["parts"] = [
         ...(message.text === "" ? [] : [{ type: "text" as const, text: message.text }]),
-        ...(message.files ?? []).map((file) => ({
-          type: "file" as const,
-          url: file.uri,
-          mediaType: file.mime,
-          filename: file.name,
-        })),
+        ...(message.files ?? []).map((file) => userFilePart(file, options)),
       ]
       if (parts.length > 0) messages.push({ id: message.id, role: "user", parts })
       continue
@@ -54,7 +58,7 @@ export async function toModelMessages(input: SessionMessage.Message[]): Promise<
         }
 
         toolNames.add(content.name)
-        parts.push(toolPart(content))
+        parts.push(toolPart(content, options))
       }
       if (parts.length > 0) messages.push({ id: message.id, role: "assistant", parts })
     }
@@ -64,6 +68,21 @@ export async function toModelMessages(input: SessionMessage.Message[]): Promise<
     // @ts-expect-error convertToModelMessages only needs tools[name]?.toModelOutput here.
     tools: Object.fromEntries(Array.from(toolNames).map((toolName) => [toolName, { toModelOutput }])),
   })
+}
+
+function userFilePart(file: NonNullable<SessionMessage.User["files"]>[number], options: ToModelMessagesOptions | undefined) {
+  if (options?.stripMedia && isMedia(file.mime)) {
+    return {
+      type: "text" as const,
+      text: `[Attached ${file.mime}: ${file.name ?? "file"}]`,
+    }
+  }
+  return {
+    type: "file" as const,
+    url: file.uri,
+    mediaType: file.mime,
+    filename: file.name,
+  }
 }
 
 function chronological(input: SessionMessage.Message[]) {
@@ -86,7 +105,7 @@ function isMeaningfulAssistantContent(content: SessionMessage.AssistantContent) 
   return false
 }
 
-function toolPart(content: SessionMessage.AssistantTool): UIMessage["parts"][number] {
+function toolPart(content: SessionMessage.AssistantTool, options: ToModelMessagesOptions | undefined): UIMessage["parts"][number] {
   const metadata = providerMetadata(content.provider?.metadata)
   const base = {
     type: `tool-${content.name}` as `tool-${string}`,
@@ -100,7 +119,7 @@ function toolPart(content: SessionMessage.AssistantTool): UIMessage["parts"][num
     return {
       ...base,
       state: "output-available",
-      output: content.time.pruned ? PrunedToolOutput : toolOutput(content.state.content),
+      output: content.time.pruned ? PrunedToolOutput : toolOutput(content.state.content, options),
     }
   }
 
@@ -140,17 +159,26 @@ function isJSONValue(input: unknown): input is JSONValue {
   return isJSONObject(input)
 }
 
-function toolOutput(content: SessionMessage.ToolStateCompleted["content"]) {
-  const text = content
-    .filter((item) => item.type === "text")
-    .map((item) => item.text)
-    .join("")
-  const attachments = content
-    .filter((item) => item.type === "file")
-    .map((item) => ({ mime: item.mime, url: item.uri, filename: item.name }))
+function toolOutput(content: SessionMessage.ToolStateCompleted["content"], options: ToModelMessagesOptions | undefined) {
+  const text = truncateToolOutput(
+    content
+      .filter((item) => item.type === "text")
+      .map((item) => item.text)
+      .join(""),
+    options?.toolOutputMaxChars,
+  )
+  const attachments = options?.stripMedia
+    ? []
+    : content.filter((item) => item.type === "file").map((item) => ({ mime: item.mime, url: item.uri, filename: item.name }))
 
   if (attachments.length === 0) return text
   return { text, attachments }
+}
+
+function truncateToolOutput(text: string, maxChars?: number) {
+  if (!maxChars || maxChars <= 0 || text.length <= maxChars) return text
+  const omitted = text.length - maxChars
+  return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
 }
 
 function toModelOutput(options: { output: unknown }) {
