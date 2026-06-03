@@ -169,6 +169,34 @@ describe("session.message-v2-model.toModelMessages", () => {
     ])
   })
 
+  test("ignores assistant tool display title when converting model context", async () => {
+    expect(await MessageV2Model.toModelMessages([assistant("assistant", 1, [completedTool({ title: "List files" })])])).toStrictEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { cmd: "ls" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "text", value: "ok" },
+          },
+        ],
+      },
+    ])
+  })
+
   test("converts completed tool file content from ToolOutput.FileContent without attachments field", async () => {
     expect(
       await MessageV2Model.toModelMessages([

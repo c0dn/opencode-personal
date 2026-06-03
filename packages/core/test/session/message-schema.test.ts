@@ -47,4 +47,41 @@ describe("SessionMessage schema", () => {
     ])
     expect(tool.state).not.toHaveProperty("attachments")
   })
+
+  test("decodes optional assistant tool display title at tool level", () => {
+    const message = Schema.decodeUnknownSync(SessionMessage.Message)({
+      id: "evt_assistant",
+      type: "assistant",
+      agent: "build",
+      model: {
+        providerID: ProviderV2.ID.make("test"),
+        id: ModelV2.ID.make("test-model"),
+      },
+      content: [
+        {
+          type: "tool",
+          id: "evt_tool",
+          callID: "call_1",
+          name: "read",
+          title: "Read file",
+          state: {
+            status: "completed",
+            input: { file: "README.md" },
+            content: [{ type: "text", text: "ok" }],
+            structured: {},
+          },
+          time: { created: 1, completed: 2 },
+        },
+      ],
+      time: { created: 1, completed: 2 },
+    })
+
+    expect(message.type).toBe("assistant")
+    if (message.type !== "assistant") return
+    const tool = message.content[0]
+    expect(tool?.type).toBe("tool")
+    if (tool?.type !== "tool") return
+    expect(tool.title).toBe("Read file")
+    expect(tool.state).not.toHaveProperty("title")
+  })
 })

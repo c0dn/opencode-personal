@@ -1083,6 +1083,7 @@ export type GlobalEvent = {
           timestamp: number
           sessionID: string
           callID: string
+          title?: string
           structured: {
             [key: string]: unknown
           }
@@ -3499,6 +3500,7 @@ export type SyncEventSessionNextToolSuccess = {
     timestamp: number
     sessionID: string
     callID: string
+    title?: string
     structured: {
       [key: string]: unknown
     }
@@ -3840,6 +3842,7 @@ export type SessionMessageAssistantTool = {
   id: string
   callID: string
   name: string
+  title?: string
   provider?: {
     executed: boolean
     metadata?: {
@@ -4510,6 +4513,7 @@ export type EventSessionNextToolSuccess = {
     timestamp: number
     sessionID: string
     callID: string
+    title?: string
     structured: {
       [key: string]: unknown
     }

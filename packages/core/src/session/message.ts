@@ -99,6 +99,7 @@ export class AssistantTool extends Schema.Class<AssistantTool>("Session.Message.
   id: ID,
   callID: Schema.String,
   name: Schema.String,
+  title: Schema.String.pipe(Schema.optional),
   provider: Schema.Struct({
     executed: Schema.Boolean,
     metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),

@@ -478,6 +478,7 @@ export namespace Tool {
     schema: {
       ...Base,
       callID: Schema.String,
+      title: Schema.String.pipe(Schema.optional),
       structured: ToolOutput.Structured,
       content: Schema.Array(ToolOutput.Content),
       provider: Schema.Struct({

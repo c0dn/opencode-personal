@@ -835,6 +835,11 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
         const seen = (yield* database.db.select().from(EventTable).all().pipe(Effect.orDie))
           .filter((evt) => (evt.data as { sessionID?: string }).sessionID === chat.id)
           .map((evt) => evt.type)
+        const toolSuccess = (yield* database.db.select().from(EventTable).all().pipe(Effect.orDie)).find(
+          (evt) =>
+            (evt.data as { sessionID?: string }).sessionID === chat.id &&
+            evt.type.startsWith(SessionEvent.Tool.Success.type),
+        )
 
         expect(handle.message.error).toBeUndefined()
         expect(value).toBe("continue")
@@ -845,6 +850,7 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
         expect(seen.some((type) => type.startsWith(SessionEvent.Tool.Called.type))).toBe(true)
         expect(seen.some((type) => type.startsWith(SessionEvent.Tool.Success.type))).toBe(true)
         expect(seen.some((type) => type.startsWith(SessionEvent.Step.Ended.type))).toBe(true)
+        expect((toolSuccess?.data as { title?: string } | undefined)?.title).toBe("Weather lookup")
         expect(call?.callID).toBe("call_1")
         expect(call?.tool).toBe("lookup")
         expect(call?.state.status).toBe("completed")
@@ -879,6 +885,7 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
         const v2Tool = v2Assistant?.content.find((item): item is SessionMessage.AssistantTool => item.type === "tool")
         expect(v2Tool?.state.status).toBe("completed")
         if (v2Tool?.state.status !== "completed") return
+        expect(v2Tool.title).toBe("Weather lookup")
         expect(v2Tool.state.content).toEqual([
           { type: "text", text: "result:weather" },
           { type: "file", mime: "text/plain", name: "weather.txt", uri: "data:text/plain;base64,cmFpbg==" },

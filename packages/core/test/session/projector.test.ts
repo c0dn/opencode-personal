@@ -147,6 +147,7 @@ function publishTranscript() {
         timestamp: at(70),
         callID: "call_1",
         structured: {},
+        title: "Shell command",
         content: [
           new ToolOutput.TextContent({ type: "text", text: "/tmp" }),
           new ToolOutput.FileContent({
@@ -280,6 +281,7 @@ describe("SessionProjector", () => {
         if (tool?.type !== "tool") return
         expect(tool.state.status).toBe("completed")
         if (tool.state.status !== "completed") return
+        expect(tool.title).toBe("Shell command")
         expect(tool.state.content).toEqual([
           { type: "text", text: "/tmp" },
           { type: "file", uri: "data:image/png;base64,AAAA", mime: "image/png", name: "image.png" },

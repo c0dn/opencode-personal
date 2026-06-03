@@ -13343,6 +13343,9 @@
                       "callID": {
                         "type": "string"
                       },
+                      "title": {
+                        "type": "string"
+                      },
                       "structured": {
                         "type": "object"
                       },
@@ -19909,6 +19912,9 @@
               "callID": {
                 "type": "string"
               },
+              "title": {
+                "type": "string"
+              },
               "structured": {
                 "type": "object"
               },
@@ -20982,6 +20988,9 @@
             "type": "string"
           },
           "name": {
+            "type": "string"
+          },
+          "title": {
             "type": "string"
           },
           "provider": {
@@ -22538,6 +22547,9 @@
                 "pattern": "^ses"
               },
               "callID": {
+                "type": "string"
+              },
+              "title": {
                 "type": "string"
               },
               "structured": {

@@ -355,6 +355,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
                 const match = latestTool(draft, event.data.callID)
                 if (match && match.state.status === "running") {
                   match.provider = event.data.provider
+                  if (event.data.title !== undefined) match.title = event.data.title
                   match.time.completed = event.data.timestamp
                   match.state = new SessionMessage.ToolStateCompleted({
                     status: "completed",

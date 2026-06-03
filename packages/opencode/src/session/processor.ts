@@ -496,6 +496,7 @@ export const layer = Layer.effect(
             yield* events.publish(SessionEvent.Tool.Success, {
               sessionID: ctx.sessionID,
               callID: value.id,
+              title: output.title,
               structured: output.metadata,
               content: [
                 new ToolOutput.TextContent({
