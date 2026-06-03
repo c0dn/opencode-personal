@@ -79,20 +79,20 @@ Likely files to add or extend:
 - `packages/core/test/session/event-identity.test.ts`
 - `packages/core/test/session/projector.test.ts`
 - `packages/opencode/test/v2/session-message-updater.test.ts`
-- compatibility-adapter tests near the current session/message API tests
+- canonical v2 session/message API tests near the current server tests
 
 Required unit tests:
 
 - user-message events create canonical user message IDs from the publishing `evt_*` ID or explicit stable event-carried entity ID
 - assistant message, durable part, shell, compaction, and final tool-result events produce stable event-derived IDs
 - parent, message, part, and tool-result references remain stable after encode/decode and replay
-- legacy `msg_*` and `prt_*` IDs are emitted only by adapters and never stored in canonical v2 transcript state
+- legacy `msg_*` and `prt_*` IDs are never stored in canonical v2 transcript state or new public v2 payloads
 
 Required integration tests:
 
 - run a minimal prompt transcript through the session processor and compare canonical EventV2 identity with the rebuilt transcript
 - replay the same event history into a fresh state and assert identical IDs and references
-- verify legacy API consumers can still receive adapter IDs without changing canonical state
+- verify v2 API consumers receive canonical v2 IDs; legacy API behavior is version-bound and not preserved by a v2-to-legacy adapter
 
 Regression, failure-injection, and concurrency cases:
 
@@ -380,3 +380,202 @@ bun --cwd packages/opencode typecheck
 - Do not use `GlobalBus` tests to prove durable behavior. Durable behavior must
   be asserted through EventV2 storage, replay, mailbox tables, or sync history as
   appropriate.
+
+## V2 Transcript Consumer Migration — No Adapter Test Plan
+
+This transcript-specific test plan supplements the EventV2 phases above. The
+consumer migration target is a no-adapter v2 cutover: old clients move with
+server versions, so tests should not preserve legacy HTTP wire shape, old
+cursors, `parts(messageID)`, or synthetic legacy-compatible `msg_*` / `prt_*`
+IDs.
+
+### Shared rules
+
+- Permanent tests assert canonical v2 semantic behavior directly.
+- Transitional legacy-oracle tests may compare normalized legacy helper output
+  against v2 helpers before a caller is cut over, but their filenames and plan
+  notes must mark them as transitional.
+- Post-cutover tests must use observable v2 gates, retries, or explicit errors
+  for ambiguous/failed backfill instead of falling back to legacy readers.
+- Core mapper/backfill fixtures stay in `packages/core/test/session/*`.
+  Opencode consumer fixtures stay in `packages/opencode/test/session/*`; core
+  tests must not import opencode test support.
+- Every phase still needs plan-critic before implementation, focused package
+  checks, `workplan_validate` when the workplan/specs change, and code-vet
+  before commit.
+
+The `T*` phases below are transcript-specific groupings. They map to the more
+granular commit-sized phases in `v2-transcript-migration-contract.md`: T3 covers
+prompt and compaction gates, and T5 covers destructive plus display/payload
+gates.
+
+### Transcript phase T0 — Policy and fixture plan
+
+Likely files to add or extend:
+
+- `packages/opencode/specs/v2-transcript-migration-contract.md`
+- `packages/opencode/specs/event-v2-test-plan.md`
+- `.opencode/workplan/legacy-session-backfill.{json,md}`
+
+Required checks:
+
+- the contract states that old clients do not connect to newer servers
+- no v2-to-legacy adapter, old cursor preservation, or legacy part-shape parity
+  is planned
+- fallback language is explicitly transitional only; post-cutover behavior is a
+  v2 gate/error/retry policy
+- permanent and transitional tests have separate ownership and retirement paths
+
+Commit gate example:
+
+```bash
+bun --cwd packages/opencode typecheck
+```
+
+### Transcript phase T1 — Backfill safety gates
+
+Likely files to add or extend:
+
+- `packages/core/test/session/message-backfill.test.ts`
+- `packages/core/test/session/message-backfill.contract.test.ts`
+- `packages/core/test/session/session-v2-message-backfill.test.ts`
+- `packages/opencode/test/server/httpapi-session.test.ts`
+
+Required tests:
+
+- deterministic canonical v2 IDs and no raw legacy IDs in encoded/public v2
+  payloads
+- marker/remediation, idempotency, partial retry, non-backfill preservation, and
+  mixed equal-timestamp cutoff ambiguity
+- patch, task request, snapshot-boundary, retry, tool, and compaction mapping
+  coverage
+- v2 HTTP route visibility for backfilled sessions
+
+Commit gate example:
+
+```bash
+bun --cwd packages/core test test/session/message-backfill.test.ts test/session/message-backfill.contract.test.ts test/session/session-v2-message-backfill.test.ts
+bun --cwd packages/core typecheck
+bun --cwd packages/opencode test test/server/httpapi-session.test.ts
+bun --cwd packages/opencode typecheck
+```
+
+### Transcript phase T2 — Leaf helper semantic tests
+
+Likely files to add or extend:
+
+- `packages/opencode/test/session/transcript-semantic.fixture.ts`
+- `packages/opencode/test/session/message-v2-legacy-parity.transitional.test.ts`
+- `packages/opencode/test/session/message-v2-model.test.ts`
+- `packages/opencode/test/session/message-v2-context.test.ts`
+
+Required tests:
+
+- permanent v2 expected-output coverage for model messages and context filtering
+- transitional normalized parity against `MessageV2` while the legacy helper
+  still exists
+- user text/files/agents, assistant text/reasoning/tools/errors, patch ignore
+  behavior, task request ignore behavior, compaction anchors/includes, latest
+  terminal assistant, and same-timestamp ordering
+
+Commit gate example:
+
+```bash
+bun --cwd packages/opencode test test/session/message-v2-legacy-parity.transitional.test.ts test/session/message-v2-model.test.ts test/session/message-v2-context.test.ts test/session/message-v2.test.ts
+bun --cwd packages/opencode typecheck
+```
+
+### Transcript phase T3 — Prompt and compaction cutover gates
+
+Likely files to add or extend:
+
+- `packages/opencode/test/session/prompt.test.ts`
+- `packages/opencode/test/session/compaction.test.ts`
+- `packages/opencode/test/session/message-v2-model.test.ts`
+- `packages/opencode/test/session/message-v2-context.test.ts`
+
+Required tests:
+
+- provider-visible prompt content matches the semantic fixture after v2 backfill
+- task requests and patch content do not become direct provider intent
+- completed compaction pairs, include translation, incomplete pair skipping, and
+  ambiguous-backfill gate behavior are covered
+
+Commit gate example:
+
+```bash
+bun --cwd packages/opencode test test/session/message-v2-model.test.ts test/session/message-v2-context.test.ts test/session/prompt.test.ts test/session/compaction.test.ts
+bun --cwd packages/opencode typecheck
+```
+
+### Transcript phase T4 — Public v2 payload and old-wire deletion gates
+
+Likely files to add or extend:
+
+- `packages/opencode/test/server/httpapi-session.test.ts`
+- `packages/opencode/test/server/httpapi-public-openapi.test.ts`
+- generated SDK/OpenAPI validation when public schemas change
+
+Required tests:
+
+- v2 route ordering, v2 cursor pagination, canonical IDs, patch/taskRequests,
+  snapshot boundaries, and no raw legacy IDs
+- old legacy routes are removed or return explicit unsupported behavior only at
+  the final cutover; do not test legacy cursor or part compatibility
+
+Commit gate example:
+
+```bash
+bun --cwd packages/opencode test test/server/httpapi-session.test.ts test/server/httpapi-public-openapi.test.ts
+bun --cwd packages/opencode typecheck
+bun --cwd packages/sdk/js typecheck # only when generated SDK/OpenAPI changes
+```
+
+### Transcript phase T5 — Destructive and display/payload gates
+
+Likely files to add or extend:
+
+- `packages/opencode/test/session/summary-v2-parity.test.ts`
+- `packages/opencode/test/session/revert-compact.test.ts`
+- share/export/import/replay/ACP/TUI tests near existing owners
+
+Required tests:
+
+- summary/diff snapshot and assistant patch behavior
+- revert/remove/update/fork target behavior and rollback safety
+- v2 export/import/share redaction, replay ordering, ACP/TUI display policy,
+  task request visibility, patch visibility, and no legacy part IDs
+
+Commit gate example:
+
+```bash
+bun --cwd packages/opencode test test/session/summary-v2-parity.test.ts test/session/revert-compact.test.ts
+bun --cwd packages/opencode typecheck
+```
+
+### Transcript phase T6 — Stop legacy writes/readers
+
+Likely files to add or extend:
+
+- `packages/opencode/test/session/processor-effect.test.ts`
+- `packages/opencode/test/session/prompt.test.ts`
+- `packages/opencode/test/server/httpapi-session.test.ts`
+- core backfill tests for old database migration regressions
+
+Required tests:
+
+- new runs write canonical v2 rows and no migrated consumer needs fresh legacy
+  transcript rows
+- v2 routes and migrated consumers still pass after legacy helper tests are
+  deleted or replaced
+- old local databases remain covered by backfill tests until the final storage
+  removal plan is complete
+
+Commit gate example:
+
+```bash
+bun --cwd packages/core test test/session/message-backfill.test.ts test/session/message-backfill.contract.test.ts test/session/session-v2-message-backfill.test.ts
+bun --cwd packages/core typecheck
+bun --cwd packages/opencode test test/session/processor-effect.test.ts test/session/prompt.test.ts test/server/httpapi-session.test.ts test/session/message-v2-model.test.ts test/session/message-v2-context.test.ts
+bun --cwd packages/opencode typecheck
+```
