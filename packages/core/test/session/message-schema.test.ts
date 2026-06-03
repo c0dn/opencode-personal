@@ -84,4 +84,30 @@ describe("SessionMessage schema", () => {
     expect(tool.title).toBe("Read file")
     expect(tool.state).not.toHaveProperty("title")
   })
+
+  test("roundtrips assistant patch content", () => {
+    const message = Schema.decodeUnknownSync(SessionMessage.Message)({
+      id: "evt_assistant",
+      type: "assistant",
+      agent: "build",
+      model: {
+        providerID: ProviderV2.ID.make("test"),
+        id: ModelV2.ID.make("test-model"),
+      },
+      content: [
+        {
+          type: "patch",
+          id: "evt_patch",
+          hash: "abc123",
+          files: ["README.md", "src/index.ts"],
+        },
+      ],
+      time: { created: 1, completed: 2 },
+    })
+
+    expect(Schema.encodeSync(SessionMessage.Message)(message)).toMatchObject({
+      type: "assistant",
+      content: [{ type: "patch", id: "evt_patch", hash: "abc123", files: ["README.md", "src/index.ts"] }],
+    })
+  })
 })

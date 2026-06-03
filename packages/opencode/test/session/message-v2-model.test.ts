@@ -65,6 +65,16 @@ function completedTool(input?: Partial<SessionMessage.AssistantTool>): SessionMe
   })
 }
 
+function patch(input?: Partial<SessionMessage.AssistantPatch>): SessionMessage.AssistantPatch {
+  return new SessionMessage.AssistantPatch({
+    id: id("patch"),
+    type: "patch",
+    hash: "abc123",
+    files: ["README.md"],
+    ...input,
+  })
+}
+
 describe("session.message-v2-model.toModelMessages", () => {
   test("converts user text and files", async () => {
     expect(
@@ -107,6 +117,21 @@ describe("session.message-v2-model.toModelMessages", () => {
         ],
       },
     ])
+  })
+
+  test("ignores patch-only assistant turns instead of producing tool messages", async () => {
+    expect(await MessageV2Model.toModelMessages([assistant("assistant", 1, [patch()])])).toStrictEqual([])
+  })
+
+  test("ignores mixed assistant patch content while preserving text", async () => {
+    expect(
+      await MessageV2Model.toModelMessages([
+        assistant("assistant", 1, [
+          patch(),
+          new SessionMessage.AssistantText({ id: id("text"), type: "text", text: "answer" }),
+        ]),
+      ]),
+    ).toStrictEqual([{ role: "assistant", content: [{ type: "text", text: "answer" }] }])
   })
 
   test("skips non-aborted errored assistant turns", async () => {

@@ -205,12 +205,11 @@ function mapAssistant(
   stats: Stats,
 ) {
   const parts = sortedParts(entry.parts)
-  const mappedContentParts = parts.filter(
-    (part): part is SessionLegacy.TextPart | SessionLegacy.ReasoningPart | SessionLegacy.ToolPart =>
-      part.type === "text" || part.type === "reasoning" || part.type === "tool",
-  )
-  const content: SessionMessage.AssistantContent[] = mappedContentParts.flatMap((part, contentOrdinal): SessionMessage.AssistantContent[] => {
+  let legacyContentOrdinal = 0
+  let patchContentOrdinal = 0
+  const content: SessionMessage.AssistantContent[] = parts.flatMap((part): SessionMessage.AssistantContent[] => {
     if (part.type === "text") {
+      const contentOrdinal = legacyContentOrdinal++
       if (part.ignored || part.synthetic) {
         addStat(stats.degraded, part.type, part.synthetic ? "synthetic_embedded_unsupported" : "ignored_text_omitted")
         return []
@@ -224,7 +223,10 @@ function mapAssistant(
         }),
       ]
     }
-    if (part.type === "tool") return [mapToolPart(part, entry, sessionID, messageOrdinal, contentOrdinal, stats)]
+    if (part.type === "tool") return [mapToolPart(part, entry, sessionID, messageOrdinal, legacyContentOrdinal++, stats)]
+    if (part.type === "patch") return mapPatchPart(part, entry, sessionID, messageOrdinal, patchContentOrdinal++, stats)
+    if (part.type !== "reasoning") return []
+    const contentOrdinal = legacyContentOrdinal++
     addStat(stats.mapped, part.type, "assistant_reasoning")
     return [
       new SessionMessage.AssistantReasoning({
@@ -255,7 +257,7 @@ function mapAssistant(
     })
 
   parts
-    .filter((part) => part.type !== "text" && part.type !== "reasoning" && part.type !== "tool" && part.type !== "retry" && part.type !== "step-start" && part.type !== "step-finish")
+    .filter((part) => part.type !== "text" && part.type !== "reasoning" && part.type !== "tool" && part.type !== "patch" && part.type !== "retry" && part.type !== "step-start" && part.type !== "step-finish")
     .forEach((part) => addUnsupportedPartStat(part, stats, "assistant"))
   if (entry.info.structured !== undefined) addStat(stats.degraded, "assistant", "assistant_structured_schema_missing")
   addStat(stats.degraded, "assistant", "assistant_mode_schema_missing")
@@ -302,6 +304,33 @@ function mapAssistant(
       completed: entry.info.time.completed ? DateTime.makeUnsafe(entry.info.time.completed) : undefined,
     },
   })
+}
+
+function mapPatchPart(
+  part: SessionLegacy.PatchPart,
+  entry: { info: SessionLegacy.Assistant },
+  sessionID: SessionSchema.ID | string,
+  messageOrdinal: number,
+  contentOrdinal: number,
+  stats: Stats,
+) {
+  if (!isValidPatch(part)) {
+    addStat(stats.skipped, part.type, "patch_malformed")
+    return []
+  }
+  addStat(stats.mapped, part.type, "assistant_patch")
+  return [
+    new SessionMessage.AssistantPatch({
+      type: "patch",
+      id: contentID(sessionID, entry.info.id, part.id, "assistant_patch", messageOrdinal, contentOrdinal),
+      hash: part.hash,
+      files: part.files,
+    }),
+  ]
+}
+
+function isValidPatch(part: SessionLegacy.PatchPart) {
+  return typeof part.hash === "string" && Array.isArray(part.files) && part.files.every((file) => typeof file === "string")
 }
 
 function mapToolPart(
@@ -508,7 +537,7 @@ function stringRecord(value: unknown) {
 
 function addUnsupportedPartStat(part: SessionLegacy.Part, stats: Stats, location: "assistant" | "user") {
   if (part.type === "subtask") return addStat(stats.skipped, part.type, "subtask_schema_missing")
-  if (part.type === "patch") return addStat(stats.skipped, part.type, "patch_schema_missing")
+  if (part.type === "patch") return addStat(stats.skipped, part.type, "patch_parentage_unsupported")
   if (part.type === "tool") return addStat(stats.skipped, part.type, "tool_mapping_excluded")
   if (part.type === "retry") return addStat(stats.skipped, part.type, location === "user" ? "retry_user_unsupported" : "retry_no_active_assistant")
   if (part.type === "compaction") return addStat(stats.skipped, part.type, "compaction_mapping_excluded")

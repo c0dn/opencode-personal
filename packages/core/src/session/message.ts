@@ -126,7 +126,14 @@ export class AssistantReasoning extends Schema.Class<AssistantReasoning>("Sessio
   text: Schema.String,
 }) {}
 
-export const AssistantContent = Schema.Union([AssistantText, AssistantReasoning, AssistantTool]).pipe(
+export class AssistantPatch extends Schema.Class<AssistantPatch>("Session.Message.Assistant.Patch")({
+  type: Schema.Literal("patch"),
+  id: ID,
+  hash: Schema.String,
+  files: Schema.String.pipe(Schema.Array),
+}) {}
+
+export const AssistantContent = Schema.Union([AssistantText, AssistantReasoning, AssistantTool, AssistantPatch]).pipe(
   Schema.toTaggedUnion("type"),
 )
 export type AssistantContent = Schema.Schema.Type<typeof AssistantContent>

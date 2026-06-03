@@ -21045,6 +21045,29 @@
         "required": ["type", "id", "name", "state", "time"],
         "additionalProperties": false
       },
+      "SessionMessageAssistantPatch": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["patch"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "hash": {
+            "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["type", "id", "hash", "files"],
+        "additionalProperties": false
+      },
       "SessionMessageAssistant": {
         "type": "object",
         "properties": {
@@ -21102,6 +21125,9 @@
                 },
                 {
                   "$ref": "#/components/schemas/SessionMessageAssistantTool"
+                },
+                {
+                  "$ref": "#/components/schemas/SessionMessageAssistantPatch"
                 }
               ]
             }

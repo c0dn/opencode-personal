@@ -98,6 +98,17 @@ function subtask(messageID: string, id: string): SessionLegacy.SubtaskPart {
   }
 }
 
+function patch(messageID: string, id: string): SessionLegacy.PatchPart {
+  return {
+    id: SessionLegacy.PartID.make(id),
+    sessionID,
+    messageID: SessionLegacy.MessageID.make(messageID),
+    type: "patch",
+    hash: "abc123",
+    files: ["README.md"],
+  }
+}
+
 function completedTool(messageID: string, id: string): SessionLegacy.ToolPart {
   return {
     id: SessionLegacy.PartID.make(id),
@@ -350,6 +361,52 @@ describe("SessionMessageBackfillService contract", () => {
         expect(statCount(result.stats.skipped, "subtask_schema_missing")).toBe(1)
         expect(yield* markerExists(v1MarkerName)).toBe(true)
         expect(yield* markerExists(v2MarkerName)).toBe(false)
+      }),
+    )
+  })
+
+  test("assistant patch-only legacy session completes and writes v2 marker", async () => {
+    const dbPath = await makeDbPath()
+    const entry = assistant("msg_patch_only", 10, [patch("msg_patch_only", "prt_patch")])
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy([entry])
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+        const rows = yield* readV2Rows()
+        const decoded = rows.map((row) => decodeMessage({ ...row.data, id: row.id, type: row.type }))
+
+        expect(result.status).toBe("completed")
+        if (result.status !== "completed") throw new Error("expected completed")
+        expect(statCount(result.stats.mapped, "assistant_patch")).toBe(1)
+        expect(decoded[0]).toMatchObject({ type: "assistant", content: [{ type: "patch", hash: "abc123", files: ["README.md"] }] })
+        expect(yield* markerExists(v1MarkerName)).toBe(true)
+        expect(yield* markerExists(v2MarkerName)).toBe(true)
+        assertNoLegacyIDs(rows)
+      }),
+    )
+  })
+
+  test("user-owned patch is final unsupported and still writes v2 marker", async () => {
+    const dbPath = await makeDbPath()
+    const entry = user("msg_user_patch", 10, "hello")
+    entry.parts.push(patch("msg_user_patch", "prt_patch"))
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy([entry])
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+
+        expect(result.status).toBe("completed")
+        if (result.status !== "completed") throw new Error("expected completed")
+        expect(statCount(result.stats.skipped, "patch_parentage_unsupported")).toBe(1)
+        expect(yield* markerExists(v2MarkerName)).toBe(true)
       }),
     )
   })

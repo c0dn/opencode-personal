@@ -182,6 +182,17 @@ function patch(messageID: string, id: string): SessionLegacy.PatchPart {
   }
 }
 
+function malformedPatch(messageID: string, id: string): SessionLegacy.PatchPart {
+  return {
+    id: SessionLegacy.PartID.make(id),
+    sessionID,
+    messageID: SessionLegacy.MessageID.make(messageID),
+    type: "patch",
+    hash: 123,
+    files: ["README.md"],
+  } as unknown as SessionLegacy.PatchPart
+}
+
 function retry(messageID: string, id: string, attempt = 1, created = 1): SessionLegacy.RetryPart {
   return {
     id: SessionLegacy.PartID.make(id),
@@ -353,7 +364,7 @@ describe("SessionMessageBackfill", () => {
 
     expect(statCount(result.stats.mapped, "tool", "assistant_tool_pending")).toBe(1)
     expect(statCount(result.stats.skipped, "tool", "tool_mapping_excluded")).toBe(0)
-    expect(statCount(result.stats.skipped, "patch", "patch_schema_missing")).toBe(1)
+    expect(statCount(result.stats.mapped, "patch", "assistant_patch")).toBe(1)
     expect(statCount(result.stats.mapped, "retry", "assistant_retry")).toBe(1)
     expect(statCount(result.stats.skipped, "retry", "retry_mapping_excluded")).toBe(0)
     expect(statCount(result.stats.skipped, "compaction", "compaction_mapping_excluded")).toBe(1)
@@ -362,7 +373,7 @@ describe("SessionMessageBackfill", () => {
     expect(statCount(result.stats.degraded, "assistant", "assistant_mode_schema_missing")).toBe(1)
   })
 
-  test("does not add patch, standalone snapshot, subtask, or tool title output in this mapper slice", () => {
+  test("maps assistant patch content but does not add standalone snapshot, subtask, or tool title output", () => {
     const snapshot: SessionLegacy.SnapshotPart = {
       id: SessionLegacy.PartID.make("prt_snapshot"),
       sessionID,
@@ -378,15 +389,85 @@ describe("SessionMessageBackfill", () => {
 
     expect(message?.type).toBe("assistant")
     if (message?.type !== "assistant") throw new Error("expected assistant")
-    expect(message.content.map((content) => content.type)).toEqual(["tool"])
+    expect(message.content.map((content) => content.type)).toEqual(["patch", "tool"])
     expect(JSON.stringify(encodeMessage(message))).not.toContain("standalone")
-    expect(JSON.stringify(encodeMessage(message))).not.toContain("abc123")
+    expect(JSON.stringify(encodeMessage(message))).toContain("abc123")
     expect(JSON.stringify(encodeMessage(message))).not.toContain("check this")
     expect(JSON.stringify(encodeMessage(message))).not.toContain("Run command")
-    expect(statCount(result.stats.skipped, "patch", "patch_schema_missing")).toBe(1)
+    expect(statCount(result.stats.mapped, "patch", "assistant_patch")).toBe(1)
     expect(statCount(result.stats.skipped, "snapshot", "standalone_snapshot_unsupported")).toBe(1)
     expect(statCount(result.stats.skipped, "subtask", "subtask_schema_missing")).toBe(1)
     expect(statCount(result.stats.degraded, "tool", "tool_title_schema_missing")).toBe(1)
+  })
+
+  test("maps assistant PatchPart to patch content with deterministic ID and no raw legacy IDs", () => {
+    const result = SessionMessageBackfill.mapLegacyMessages(
+      [assistant("msg_patch", 1, [patch("msg_patch", "prt_patch")])],
+      { sessionID },
+    )
+    const message = result.messages[0]
+
+    expect(message?.type).toBe("assistant")
+    if (message?.type !== "assistant") throw new Error("expected assistant")
+    expect(message.content).toEqual([
+      {
+        type: "patch",
+        id: expect.stringMatching(/^evt_legacy_backfill_c_00000000_00000000_[0-9a-f]{24}$/),
+        hash: "abc123",
+        files: ["README.md"],
+      },
+    ])
+    expect(statCount(result.stats.mapped, "patch", "assistant_patch")).toBe(1)
+    assertNoLegacyIDs(encodeMessage(message))
+  })
+
+  test("keeps existing assistant content IDs stable when patch appears before or between content", () => {
+    const withoutPatch = SessionMessageBackfill.mapLegacyMessages(
+      [assistant("msg_patch_stable", 1, [text("msg_patch_stable", "prt_b", "answer"), reasoning("msg_patch_stable", "prt_d", "why"), tool("msg_patch_stable", "prt_f")])],
+      { sessionID },
+    )
+    const withPatch = SessionMessageBackfill.mapLegacyMessages(
+      [assistant("msg_patch_stable", 1, [patch("msg_patch_stable", "prt_a"), text("msg_patch_stable", "prt_b", "answer"), patch("msg_patch_stable", "prt_c"), reasoning("msg_patch_stable", "prt_d", "why"), patch("msg_patch_stable", "prt_e"), tool("msg_patch_stable", "prt_f")])],
+      { sessionID },
+    )
+    const oldMessage = withoutPatch.messages[0]
+    const newMessage = withPatch.messages[0]
+
+    expect(oldMessage?.type).toBe("assistant")
+    expect(newMessage?.type).toBe("assistant")
+    if (oldMessage?.type !== "assistant" || newMessage?.type !== "assistant") throw new Error("expected assistants")
+    const oldIDs = oldMessage.content.filter((content) => content.type !== "patch").map((content) => content.id)
+    const newIDs = newMessage.content.filter((content) => content.type !== "patch").map((content) => content.id)
+    expect(newMessage.content.map((content) => content.type)).toEqual(["patch", "text", "patch", "reasoning", "patch", "tool"])
+    expect(newIDs).toEqual(oldIDs)
+  })
+
+  test("skips user-owned patch with final parentage unsupported stat and no patch content", () => {
+    const result = SessionMessageBackfill.mapLegacyMessages(
+      [user("msg_user_patch", 1, [text("msg_user_patch", "prt_text", "hello"), patch("msg_user_patch", "prt_patch")])],
+      { sessionID },
+    )
+    const message = result.messages[0]
+
+    expect(message).toMatchObject({ type: "user", text: "hello" })
+    if (!message) throw new Error("expected message")
+    expect(JSON.stringify(encodeMessage(message))).not.toContain("abc123")
+    expect(statCount(result.stats.skipped, "patch", "patch_parentage_unsupported")).toBe(1)
+    expect(statCount(result.stats.skipped, "patch", "patch_schema_missing")).toBe(0)
+  })
+
+  test("skips malformed assistant patch with explicit malformed stat", () => {
+    const result = SessionMessageBackfill.mapLegacyMessages(
+      [assistant("msg_bad_patch", 1, [malformedPatch("msg_bad_patch", "prt_bad_patch"), text("msg_bad_patch", "prt_text", "answer")])],
+      { sessionID },
+    )
+    const message = result.messages[0]
+
+    expect(message?.type).toBe("assistant")
+    if (message?.type !== "assistant") throw new Error("expected assistant")
+    expect(message.content.map((content) => content.type)).toEqual(["text"])
+    expect(statCount(result.stats.skipped, "patch", "patch_malformed")).toBe(1)
+    expect(JSON.stringify(encodeMessage(message))).not.toContain("prt_bad_patch")
   })
 
   test("folds completed auto compaction marker and summary assistant into one compaction row", () => {

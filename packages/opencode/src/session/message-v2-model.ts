@@ -44,6 +44,12 @@ export async function toModelMessages(input: SessionMessage.Message[]): Promise<
           continue
         }
 
+        if (content.type === "patch") {
+          // Patch content is transcript/display data only. It is intentionally
+          // excluded from provider model context and must not become a tool call.
+          continue
+        }
+
         toolNames.add(content.name)
         parts.push(toolPart(content))
       }

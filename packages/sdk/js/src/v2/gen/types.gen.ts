@@ -3862,6 +3862,13 @@ export type SessionMessageAssistantTool = {
   }
 }
 
+export type SessionMessageAssistantPatch = {
+  type: "patch"
+  id: string
+  hash: string
+  files: Array<string>
+}
+
 export type SessionMessageAssistantRetry = {
   attempt: number
   error: SessionNextRetryError
@@ -3886,7 +3893,12 @@ export type SessionMessageAssistant = {
     providerID: string
     variant?: string
   }
-  content: Array<SessionMessageAssistantText | SessionMessageAssistantReasoning | SessionMessageAssistantTool>
+  content: Array<
+    | SessionMessageAssistantText
+    | SessionMessageAssistantReasoning
+    | SessionMessageAssistantTool
+    | SessionMessageAssistantPatch
+  >
   snapshot?: {
     start?: string
     end?: string
