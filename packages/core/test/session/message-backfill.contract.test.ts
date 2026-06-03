@@ -19,7 +19,8 @@ const tmp = new Array<string>()
 const sessionID = SessionSchema.ID.make("ses_message_backfill_contract")
 const providerID = ProviderV2.ID.make("provider")
 const modelID = ProviderV2.ModelID.make("model")
-const markerName = `legacy-session-message-backfill/v1/${sessionID}`
+const v1MarkerName = `legacy-session-message-backfill/v1/${sessionID}`
+const v2MarkerName = `legacy-session-message-backfill/v2/${sessionID}`
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
 const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Message)
 
@@ -55,6 +56,26 @@ function user(id: string, created: number, value: string): SessionLegacy.WithPar
   }
 }
 
+function assistant(id: string, created: number, parts: SessionLegacy.Part[]): SessionLegacy.WithParts {
+  return {
+    info: {
+      id: SessionLegacy.MessageID.make(id),
+      sessionID,
+      role: "assistant",
+      parentID: SessionLegacy.MessageID.make("msg_parent"),
+      time: { created, completed: created + 10 },
+      providerID,
+      modelID,
+      mode: "build",
+      agent: "build",
+      path: { cwd: "/tmp/work", root: "/tmp/work" },
+      cost: 0.12,
+      tokens: { input: 1, output: 2, reasoning: 3, cache: { read: 4, write: 5 } },
+    },
+    parts,
+  }
+}
+
 function text(messageID: string, id: string, value: string): SessionLegacy.TextPart {
   return {
     id: SessionLegacy.PartID.make(id),
@@ -62,6 +83,37 @@ function text(messageID: string, id: string, value: string): SessionLegacy.TextP
     messageID: SessionLegacy.MessageID.make(messageID),
     type: "text",
     text: value,
+  }
+}
+
+function subtask(messageID: string, id: string): SessionLegacy.SubtaskPart {
+  return {
+    id: SessionLegacy.PartID.make(id),
+    sessionID,
+    messageID: SessionLegacy.MessageID.make(messageID),
+    type: "subtask",
+    prompt: "check this",
+    description: "review",
+    agent: "reviewer",
+  }
+}
+
+function completedTool(messageID: string, id: string): SessionLegacy.ToolPart {
+  return {
+    id: SessionLegacy.PartID.make(id),
+    sessionID,
+    messageID: SessionLegacy.MessageID.make(messageID),
+    type: "tool",
+    callID: "call_1",
+    tool: "bash",
+    state: {
+      status: "completed",
+      input: { cmd: "pwd" },
+      output: "done",
+      title: "Run command",
+      metadata: {},
+      time: { start: 12, end: 13 },
+    },
   }
 }
 
@@ -107,10 +159,10 @@ function seedV2(message: SessionMessage.Message) {
   })
 }
 
-function seedMarker() {
+function seedMarker(name = v1MarkerName) {
   return Effect.gen(function* () {
     const { db } = yield* Database.Service
-    yield* db.insert(DataMigrationTable).values({ name: markerName, time_completed: 1 }).run()
+    yield* db.insert(DataMigrationTable).values({ name, time_completed: 1 }).run()
   })
 }
 
@@ -126,10 +178,10 @@ function readV2Rows() {
   })
 }
 
-function markerExists() {
+function markerExists(name = v1MarkerName) {
   return Effect.gen(function* () {
     const { db } = yield* Database.Service
-    return !!(yield* db.select().from(DataMigrationTable).where(eq(DataMigrationTable.name, markerName)).get())
+    return !!(yield* db.select().from(DataMigrationTable).where(eq(DataMigrationTable.name, name)).get())
   })
 }
 
@@ -182,6 +234,7 @@ describe("SessionMessageBackfillService contract", () => {
         expect(result.inserted).toBe(2)
         expect(result.repaired).toBe(0)
         expect(yield* markerExists()).toBe(true)
+        expect(yield* markerExists(v2MarkerName)).toBe(true)
         expect(rows.map((row) => decodeMessage({ ...row.data, id: row.id, type: row.type }).type)).toEqual(["user", "user"])
         expect(rows.map((row) => row.id)).toEqual(expectedRows(entries).map((row) => row.id))
         assertNoLegacyIDs(rows)
@@ -209,7 +262,7 @@ describe("SessionMessageBackfillService contract", () => {
     )
   })
 
-  test("marker exists: returns already_completed and does not trip marker insert trigger", async () => {
+  test("v2 marker exists: returns already_completed and does not trip marker insert trigger", async () => {
     const dbPath = await makeDbPath()
 
     await run(
@@ -217,13 +270,189 @@ describe("SessionMessageBackfillService contract", () => {
       Effect.gen(function* () {
         yield* seedSession()
         yield* seedLegacy([user("msg_marked", 10, "already marked")])
-        yield* seedMarker()
+        yield* seedMarker(v2MarkerName)
         yield* failBackfillMarkerInsert()
 
         const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
 
         expect(result.status).toBe("already_completed")
         expect(yield* readV2Rows()).toEqual([])
+      }),
+    )
+  })
+
+  test("v1 marker alone upgrades, materializes rows, and writes v2 marker when no deferred inputs", async () => {
+    const dbPath = await makeDbPath()
+    const entries = [user("msg_v1_upgrade", 10, "upgrade me")]
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy(entries)
+        yield* seedMarker(v1MarkerName)
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+        const rows = yield* readV2Rows()
+
+        expect(result.status).toBe("completed")
+        if (result.status !== "completed") throw new Error("expected completed")
+        expect(result.inserted).toBe(1)
+        expect(result.repaired).toBe(0)
+        expect(yield* markerExists(v1MarkerName)).toBe(true)
+        expect(yield* markerExists(v2MarkerName)).toBe(true)
+        expect(rows.map((row) => row.id)).toEqual(expectedRows(entries).map((row) => row.id))
+      }),
+    )
+  })
+
+  test("v1 marker with exact existing rows writes v2 marker without duplicate or repair churn", async () => {
+    const dbPath = await makeDbPath()
+    const entries = [user("msg_v1_existing", 10, "existing")]
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy(entries)
+        yield* seedMarker(v1MarkerName)
+        yield* dbInsertSessionMessage(expectedRows(entries)[0]!)
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+        const rows = yield* readV2Rows()
+
+        expect(result.status).toBe("completed")
+        if (result.status !== "completed") throw new Error("expected completed")
+        expect(result.inserted).toBe(0)
+        expect(result.repaired).toBe(0)
+        expect(rows).toHaveLength(1)
+        expect(yield* markerExists(v2MarkerName)).toBe(true)
+      }),
+    )
+  })
+
+  test("deferred inputs keep v1 marker, skip v2 marker, and return upgrade_pending", async () => {
+    const dbPath = await makeDbPath()
+    const entry = user("msg_deferred", 10, "deferred")
+    entry.parts.push(subtask("msg_deferred", "prt_deferred_subtask"))
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy([entry])
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+
+        expect(result.status).toBe("upgrade_pending")
+        if (result.status !== "upgrade_pending") throw new Error("expected upgrade_pending")
+        expect(result.inserted).toBe(1)
+        expect(statCount(result.stats.skipped, "subtask_schema_missing")).toBe(1)
+        expect(yield* markerExists(v1MarkerName)).toBe(true)
+        expect(yield* markerExists(v2MarkerName)).toBe(false)
+      }),
+    )
+  })
+
+  test("completed tool title keeps upgrade pending and withholds v2 marker", async () => {
+    const dbPath = await makeDbPath()
+    const entry = assistant("msg_tool_title_deferred", 10, [completedTool("msg_tool_title_deferred", "prt_tool_title")])
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy([entry])
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+
+        expect(result.status).toBe("upgrade_pending")
+        if (result.status !== "upgrade_pending") throw new Error("expected upgrade_pending")
+        expect(result.inserted).toBe(1)
+        expect(statCount(result.stats.degraded, "tool_title_schema_missing")).toBe(1)
+        expect(yield* markerExists(v1MarkerName)).toBe(true)
+        expect(yield* markerExists(v2MarkerName)).toBe(false)
+      }),
+    )
+  })
+
+  test("deferred re-entry skips exact migration rows without duplicate or upsert churn", async () => {
+    const dbPath = await makeDbPath()
+    const entry = user("msg_deferred_reentry", 10, "deferred reentry")
+    entry.parts.push(subtask("msg_deferred_reentry", "prt_deferred_reentry_subtask"))
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy([entry])
+
+        const first = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+        const rowsAfterFirst = yield* readV2Rows()
+        const second = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+        const rowsAfterSecond = yield* readV2Rows()
+
+        expect(first.status).toBe("upgrade_pending")
+        expect(second.status).toBe("upgrade_pending")
+        if (second.status !== "upgrade_pending") throw new Error("expected upgrade_pending")
+        expect(second.inserted).toBe(0)
+        expect(second.repaired).toBe(0)
+        expect(rowsAfterFirst).toHaveLength(1)
+        expect(rowsAfterSecond).toEqual(rowsAfterFirst)
+        expect(yield* markerExists(v1MarkerName)).toBe(true)
+        expect(yield* markerExists(v2MarkerName)).toBe(false)
+      }),
+    )
+  })
+
+  test("v1 marker with deferred exact rows keeps v1 marker and withholds v2 marker", async () => {
+    const dbPath = await makeDbPath()
+    const entry = user("msg_v1_deferred_existing", 10, "v1 deferred")
+    entry.parts.push(subtask("msg_v1_deferred_existing", "prt_v1_deferred_subtask"))
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy([entry])
+        yield* seedMarker(v1MarkerName)
+        yield* dbInsertSessionMessage(expectedRows([entry])[0]!)
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+        const rows = yield* readV2Rows()
+
+        expect(result.status).toBe("upgrade_pending")
+        if (result.status !== "upgrade_pending") throw new Error("expected upgrade_pending")
+        expect(result.inserted).toBe(0)
+        expect(result.repaired).toBe(0)
+        expect(rows).toHaveLength(1)
+        expect(yield* markerExists(v1MarkerName)).toBe(true)
+        expect(yield* markerExists(v2MarkerName)).toBe(false)
+      }),
+    )
+  })
+
+  test("missing legacy source after v1 marker preserves rows and does not write v2 marker", async () => {
+    const dbPath = await makeDbPath()
+    const existing = v2Row(liveUser("evt_legacy_backfill_m_existing", 10, "preserved"))
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedMarker(v1MarkerName)
+        yield* dbInsertSessionMessage(existing)
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+        const rows = yield* readV2Rows()
+
+        expect(result.status).toBe("upgrade_unavailable")
+        if (result.status !== "upgrade_unavailable") throw new Error("expected upgrade_unavailable")
+        expect(statCount(result.stats.skipped, "legacy_source_unavailable")).toBe(1)
+        expect(rows).toHaveLength(1)
+        expect(rows[0]?.id).toBe(existing.id)
+        expect(rows[0]?.data).toEqual(existing.data)
+        expect(yield* markerExists(v2MarkerName)).toBe(false)
       }),
     )
   })
@@ -246,6 +475,7 @@ describe("SessionMessageBackfillService contract", () => {
         expect(result.reason).toBe("mixed_cutoff_ambiguous")
         expect(statCount(result.stats.skipped, "mixed_cutoff_ambiguous")).toBe(1)
         expect(yield* markerExists()).toBe(false)
+        expect(yield* markerExists(v2MarkerName)).toBe(false)
         expect(rows.map((row) => row.id)).toEqual([SessionMessage.ID.make("evt_live_equal")])
       }),
     )
@@ -270,6 +500,7 @@ describe("SessionMessageBackfillService contract", () => {
         expect(result.inserted).toBe(1)
         expect(statCount(result.stats.skipped, "legacy_newer_than_cutoff_omitted")).toBe(1)
         expect(yield* markerExists()).toBe(true)
+        expect(yield* markerExists(v2MarkerName)).toBe(true)
         expect(rows.map((row) => row.id)).toEqual([expectedRows([older])[0]?.id, SessionMessage.ID.make("evt_live_newer")])
       }),
     )
@@ -299,9 +530,9 @@ describe("SessionMessageBackfillService contract", () => {
     )
   })
 
-  test("deterministic ID collision aborts and leaves existing row unchanged", async () => {
+  test("migration-owned differing expected row repairs instead of aborting", async () => {
     const dbPath = await makeDbPath()
-    const entry = user("msg_collision", 10, "expected")
+    const entry = user("msg_repair", 10, "expected")
 
     await run(
       dbPath,
@@ -309,20 +540,42 @@ describe("SessionMessageBackfillService contract", () => {
         yield* seedSession()
         yield* seedLegacy([entry])
         const expected = expectedRows([entry])[0]!
-        const conflicting = { ...expected, data: { ...expected.data, text: "different" } }
-        yield* dbInsertSessionMessage(conflicting)
+        const stale = { ...expected, data: { ...expected.data, text: "stale" } }
+        yield* dbInsertSessionMessage(stale)
 
         const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
         const rows = yield* readV2Rows()
 
-        expect(result.status).toBe("aborted")
-        if (result.status !== "aborted") throw new Error("expected aborted")
-        expect(result.reason).toBe("deterministic_id_collision")
-        expect(statCount(result.stats.skipped, "deterministic_id_collision")).toBe(1)
-        expect(yield* markerExists()).toBe(false)
-        expect(rows).toHaveLength(1)
-        expect(rows[0]?.id).toBe(conflicting.id)
-        expect(rows[0]?.data).toEqual(conflicting.data)
+        expect(result.status).toBe("completed")
+        if (result.status !== "completed") throw new Error("expected completed")
+        expect(result.inserted).toBe(0)
+        expect(result.repaired).toBe(1)
+        expect(rows[0]?.data).toEqual(expected.data)
+        expect(yield* markerExists(v2MarkerName)).toBe(true)
+      }),
+    )
+  })
+
+  test("non-backfill rows are preserved while expected migration rows are written", async () => {
+    const dbPath = await makeDbPath()
+    const entry = user("msg_non_backfill_protection", 10, "expected")
+    const live = liveUser("evt_live_preserved", 50, "live")
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy([entry])
+        yield* seedV2(live)
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+        const rows = yield* readV2Rows()
+
+        expect(result.status).toBe("completed")
+        if (result.status !== "completed") throw new Error("expected completed")
+        expect(result.inserted).toBe(1)
+        expect(rows.map((row) => row.id)).toEqual([expectedRows([entry])[0]?.id, live.id])
+        expect(decodeMessage({ ...rows[1]!.data, id: rows[1]!.id, type: rows[1]!.type })).toEqual(live)
       }),
     )
   })
@@ -335,13 +588,13 @@ function dbInsertSessionMessage(row: typeof SessionMessageTable.$inferInsert) {
   })
 }
 
-function failBackfillMarkerInsert() {
+function failBackfillMarkerInsert(name = v1MarkerName) {
   return Effect.gen(function* () {
     const { db } = yield* Database.Service
     yield* db.run(sql`
       CREATE TEMP TRIGGER fail_backfill_marker
       BEFORE INSERT ON data_migration
-      WHEN NEW.name = ${sql.raw(sqlString(markerName))}
+      WHEN NEW.name = ${sql.raw(sqlString(name))}
       BEGIN
         SELECT RAISE(ABORT, 'backfill marker failed');
       END

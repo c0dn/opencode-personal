@@ -10,7 +10,10 @@ import { SessionMessageBackfill } from "./message-backfill"
 import { MessageTable, PartTable, SessionMessageTable } from "./sql"
 import { SessionSchema } from "./schema"
 
-const markerPrefix = "legacy-session-message-backfill/v1/"
+export const v1MarkerPrefix = "legacy-session-message-backfill/v1/"
+export const v2MarkerPrefix = "legacy-session-message-backfill/v2/"
+// Reserved prefix for migration-owned rows; there is no private provenance column
+// to distinguish safe repair targets from live projector/API rows.
 const backfillIDPrefix = "evt_legacy_backfill_"
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
 type Transaction = Parameters<Parameters<Database.Interface["db"]["transaction"]>[0]>[0]
@@ -19,30 +22,23 @@ export type AbortReason = "mixed_cutoff_ambiguous" | "deterministic_id_collision
 
 export type Result =
   | { status: "completed"; stats: SessionMessageBackfill.Stats; inserted: number; repaired: number }
+  | { status: "upgrade_pending"; stats: SessionMessageBackfill.Stats; inserted: number; repaired: number }
+  | { status: "upgrade_unavailable"; stats: SessionMessageBackfill.Stats; inserted: number; repaired: number }
   | { status: "already_completed" }
   | { status: "aborted"; reason: AbortReason; stats: SessionMessageBackfill.Stats }
 
 export const ensureLegacySessionMessagesBackfilled = Effect.fn("SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled")(
   function* (sessionID: SessionSchema.ID | string) {
     const { db } = yield* Database.Service
-    const marker = `${markerPrefix}${sessionID}`
-    const markerExists = yield* db
-      .select({ name: DataMigrationTable.name })
-      .from(DataMigrationTable)
-      .where(eq(DataMigrationTable.name, marker))
-      .get()
-    if (markerExists) return { status: "already_completed" } as Result
+    const marker = markerNames(sessionID)
+    if (yield* hasMarker(db, marker.v2)) return { status: "already_completed" } as Result
 
     return yield* db
       .transaction(
         (tx) =>
           Effect.gen(function* () {
-            const existingMarker = yield* tx
-              .select({ name: DataMigrationTable.name })
-              .from(DataMigrationTable)
-              .where(eq(DataMigrationTable.name, marker))
-              .get()
-            if (existingMarker) return { status: "already_completed" } as Result
+            if (yield* hasMarker(tx, marker.v2)) return { status: "already_completed" } as Result
+            const hasV1Marker = yield* hasMarker(tx, marker.v1)
 
             const cutoff = yield* tx
               .select({ id: SessionMessageTable.id, time_created: SessionMessageTable.time_created })
@@ -58,6 +54,14 @@ export const ensureLegacySessionMessagesBackfilled = Effect.fn("SessionMessageBa
               .get()
 
             const legacyMessages = yield* hydrateLegacyMessages(sessionID, tx)
+            if (hasV1Marker && legacyMessages.length === 0) {
+              return {
+                status: "upgrade_unavailable",
+                stats: { mapped: [], degraded: [], skipped: [{ type: "backfill", reason: "legacy_source_unavailable", count: 1 }] },
+                inserted: 0,
+                repaired: 0,
+              } as Result
+            }
             if (cutoff && legacyMessages.some((message) => message.info.time.created === cutoff.time_created)) {
               return abort("mixed_cutoff_ambiguous", { mapped: [], degraded: [], skipped: [] })
             }
@@ -79,12 +83,12 @@ export const ensureLegacySessionMessagesBackfilled = Effect.fn("SessionMessageBa
                   .from(SessionMessageTable)
                   .where(inArray(SessionMessageTable.id, rows.map((row) => row.id)))
                   .all()
-            const collision = existingRows.find(
-              (row) => !rows.some((expected) => expected.id === row.id && targetRowsMatch(expected, row)),
-            )
+            const collision = existingRows.find((row) => !isBackfillRow(row.id))
             if (collision) return abort("deterministic_id_collision", mapped.stats)
+            const targetRowsAlreadyExact =
+              rows.length > 0 && existingRows.length === rows.length && existingRows.every((row) => rowMatchesTarget(row, rows))
 
-            if (rows.length > 0) {
+            if (rows.length > 0 && !targetRowsAlreadyExact) {
               yield* tx
                 .insert(SessionMessageTable)
                 .values(rows)
@@ -99,12 +103,14 @@ export const ensureLegacySessionMessagesBackfilled = Effect.fn("SessionMessageBa
                 })
                 .run()
             }
-            yield* tx.insert(DataMigrationTable).values({ name: marker, time_completed: Date.now() }).run()
+            if (!hasV1Marker) yield* writeMarker(tx, marker.v1)
+            const status = hasDeferredV2Inputs(mapped.stats) ? "upgrade_pending" : "completed"
+            if (status === "completed") yield* writeMarker(tx, marker.v2)
             return {
-              status: "completed",
+              status,
               stats: mapped.stats,
-              inserted: rows.length - existingRows.length,
-              repaired: existingRows.length,
+              inserted: targetRowsAlreadyExact ? 0 : rows.length - existingRows.length,
+              repaired: targetRowsAlreadyExact ? 0 : existingRows.length,
             } as Result
           }),
         { behavior: "immediate" },
@@ -117,7 +123,7 @@ export const ensureLegacySessionMessagesBackfilled = Effect.fn("SessionMessageBa
 function logResult(sessionID: SessionSchema.ID | string, result: Result) {
   if (result.status === "already_completed") return Effect.void
   if (
-    result.status === "completed" &&
+    (result.status === "completed" || result.status === "upgrade_pending" || result.status === "upgrade_unavailable") &&
     result.inserted === 0 &&
     result.repaired === 0 &&
     result.stats.degraded.length === 0 &&
@@ -130,14 +136,57 @@ function logResult(sessionID: SessionSchema.ID | string, result: Result) {
     Effect.annotateLogs({
       sessionID,
       status: result.status,
-      inserted: result.status === "completed" ? result.inserted : 0,
-      repaired: result.status === "completed" ? result.repaired : 0,
+      inserted: "inserted" in result ? result.inserted : 0,
+      repaired: "repaired" in result ? result.repaired : 0,
       ...(result.status === "aborted" ? { reason: result.reason } : {}),
       mapped: summarizeStats(result.stats.mapped),
       degraded: summarizeStats(result.stats.degraded),
       skipped: summarizeStats(result.stats.skipped),
     }),
   )
+}
+
+function markerNames(sessionID: SessionSchema.ID | string) {
+  return { v1: `${v1MarkerPrefix}${sessionID}`, v2: `${v2MarkerPrefix}${sessionID}` }
+}
+
+function hasMarker(db: Transaction | Database.Interface["db"], marker: string) {
+  return Effect.gen(function* () {
+    return !!(yield* db.select({ name: DataMigrationTable.name }).from(DataMigrationTable).where(eq(DataMigrationTable.name, marker)).get())
+  })
+}
+
+function writeMarker(db: Transaction, marker: string) {
+  return db.insert(DataMigrationTable).values({ name: marker, time_completed: Date.now() }).run()
+}
+
+function isBackfillRow(id: string) {
+  return id.startsWith(backfillIDPrefix)
+}
+
+function rowMatchesTarget(row: typeof SessionMessageTable.$inferSelect, targets: (typeof SessionMessageTable.$inferInsert)[]) {
+  const target = targets.find((candidate) => candidate.id === row.id)
+  return (
+    !!target &&
+    row.session_id === target.session_id &&
+    row.type === target.type &&
+    row.time_created === target.time_created &&
+    JSON.stringify(row.data) === JSON.stringify(target.data)
+  )
+}
+
+const deferredV2Reasons = new Set([
+  "patch_schema_missing",
+  "patch_parentage_unsupported",
+  "standalone_snapshot_unsupported",
+  "snapshot_parentage_unsupported",
+  "subtask_schema_missing",
+  "subtask_parentage_unsupported",
+  "tool_title_schema_missing",
+])
+
+function hasDeferredV2Inputs(stats: SessionMessageBackfill.Stats) {
+  return [...stats.skipped, ...stats.degraded].some((stat) => deferredV2Reasons.has(stat.reason) && stat.count > 0)
 }
 
 function summarizeStats(stats: SessionMessageBackfill.Stat[]) {
@@ -183,18 +232,6 @@ function targetRow(sessionID: SessionSchema.ID | string, message: SessionMessage
     time_created: DateTime.toEpochMillis(message.time.created),
     data,
   }
-}
-
-function targetRowsMatch(
-  expected: typeof SessionMessageTable.$inferInsert,
-  row: typeof SessionMessageTable.$inferSelect,
-) {
-  return (
-    expected.session_id === row.session_id &&
-    expected.type === row.type &&
-    expected.time_created === row.time_created &&
-    JSON.stringify(expected.data) === JSON.stringify(row.data)
-  )
 }
 
 function abort(reason: AbortReason, stats: SessionMessageBackfill.Stats): Result {

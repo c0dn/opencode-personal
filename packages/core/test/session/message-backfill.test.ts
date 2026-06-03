@@ -252,6 +252,23 @@ describe("SessionMessageBackfill", () => {
     expect(left.messages[1]?.id).toMatch(/^evt_legacy_backfill_m_00000001_[0-9a-f]{24}$/)
   })
 
+  test("keeps representative v1 deterministic IDs byte-for-byte stable", () => {
+    const result = SessionMessageBackfill.mapLegacyMessages(
+      [
+        user("msg_stable_user", 1, [text("msg_stable_user", "prt_stable_user", "hello")]),
+        assistant("msg_stable_assistant", 2, [text("msg_stable_assistant", "prt_stable_text", "world")]),
+      ],
+      { sessionID },
+    )
+    const assistantMessage = result.messages[1]
+
+    expect(result.messages[0]?.id).toBe(SessionMessage.ID.make("evt_legacy_backfill_m_00000000_ca2709e84f668009b65ff9a7"))
+    expect(assistantMessage?.id).toBe(SessionMessage.ID.make("evt_legacy_backfill_m_00000001_b6473c41563007007cc01f82"))
+    expect(assistantMessage?.type).toBe("assistant")
+    if (assistantMessage?.type !== "assistant") throw new Error("expected assistant")
+    expect(assistantMessage.content[0]?.id).toBe(SessionMessage.ID.make("evt_legacy_backfill_c_00000001_00000000_4da5bc44904f862f722db13e"))
+  })
+
   test("does not leak raw legacy IDs in encoded canonical output", () => {
     const result = SessionMessageBackfill.mapLegacyMessages(
       [assistant("msg_secret", 1, [text("msg_secret", "prt_secret", "visible")])],
@@ -343,6 +360,33 @@ describe("SessionMessageBackfill", () => {
     expect(statCount(result.stats.skipped, "subtask", "subtask_schema_missing")).toBe(1)
     expect(statCount(result.stats.degraded, "step-finish", "assistant_finish_conflict")).toBe(1)
     expect(statCount(result.stats.degraded, "assistant", "assistant_mode_schema_missing")).toBe(1)
+  })
+
+  test("does not add patch, standalone snapshot, subtask, or tool title output in this mapper slice", () => {
+    const snapshot: SessionLegacy.SnapshotPart = {
+      id: SessionLegacy.PartID.make("prt_snapshot"),
+      sessionID,
+      messageID: SessionLegacy.MessageID.make("msg_no_new_outputs"),
+      type: "snapshot",
+      snapshot: "standalone",
+    }
+    const result = SessionMessageBackfill.mapLegacyMessages(
+      [assistant("msg_no_new_outputs", 1, [runningTool("msg_no_new_outputs", "prt_tool_title"), patch("msg_no_new_outputs", "prt_patch"), snapshot, subtask("msg_no_new_outputs", "prt_subtask")])],
+      { sessionID },
+    )
+    const message = result.messages[0]
+
+    expect(message?.type).toBe("assistant")
+    if (message?.type !== "assistant") throw new Error("expected assistant")
+    expect(message.content.map((content) => content.type)).toEqual(["tool"])
+    expect(JSON.stringify(encodeMessage(message))).not.toContain("standalone")
+    expect(JSON.stringify(encodeMessage(message))).not.toContain("abc123")
+    expect(JSON.stringify(encodeMessage(message))).not.toContain("check this")
+    expect(JSON.stringify(encodeMessage(message))).not.toContain("Run command")
+    expect(statCount(result.stats.skipped, "patch", "patch_schema_missing")).toBe(1)
+    expect(statCount(result.stats.skipped, "snapshot", "standalone_snapshot_unsupported")).toBe(1)
+    expect(statCount(result.stats.skipped, "subtask", "subtask_schema_missing")).toBe(1)
+    expect(statCount(result.stats.degraded, "tool", "tool_title_schema_missing")).toBe(1)
   })
 
   test("folds completed auto compaction marker and summary assistant into one compaction row", () => {
