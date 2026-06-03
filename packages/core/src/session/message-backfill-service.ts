@@ -175,13 +175,14 @@ function rowMatchesTarget(row: typeof SessionMessageTable.$inferSelect, targets:
   )
 }
 
-const deferredV2Reasons = new Set([
+export const pendingUpgradeReasons = [
   "patch_schema_missing",
   "tool_title_schema_missing",
-])
+] as const
+const pendingUpgradeReasonSet = new Set<string>(pendingUpgradeReasons)
 
 function hasDeferredV2Inputs(stats: SessionMessageBackfill.Stats) {
-  return [...stats.skipped, ...stats.degraded].some((stat) => deferredV2Reasons.has(stat.reason) && stat.count > 0)
+  return [...stats.skipped, ...stats.degraded].some((stat) => pendingUpgradeReasonSet.has(stat.reason) && stat.count > 0)
 }
 
 function summarizeStats(stats: SessionMessageBackfill.Stat[]) {
