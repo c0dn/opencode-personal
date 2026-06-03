@@ -91,6 +91,8 @@ Only completed legacy compaction marker + paired summary assistant records map t
 
 For live EventV2 projection, `session.next.compaction.started` records only pending lifecycle state and must not create a canonical `SessionMessage.Compaction` row. `session.next.compaction.delta` is non-canonical; `session.next.compaction.ended` is authoritative and materializes exactly one completed row from the matching latest pending Started event: row ID and `time.created` come from Started, `reason` comes from Started, and `summary`/`include` come from Ended. Ended events without a matching pending Started are no-ops and must not create anchors.
 
+Overflow-aware v2 compaction process selection is a pure canonical helper only. It consumes already-loaded canonical v2 rows, uses `(time.created, id)` ordering and existing v2 compaction/include visibility rules, and never reads DB/readiness, legacy transcript, plugin, provider prompt, or model-conversion state. Production wiring must either provide a canonical visible user `overflowReplayStartID` to replay from, or explicitly choose no replay/gate; the helper must not infer replay IDs from legacy `tail_start_id` or other non-canonical sources.
+
 ## Consumer Fidelity Matrix
 
 Readiness categories are deliberately conservative: `already-canonical-v2`, `ready-for-leaf-semantic-tests`, `transitional-legacy-oracle`, `high-risk-core-helper-blocked`, `destructive-semantics-blocked`, `v2-payload-policy-blocked`, and `ready-for-controlled-v2-cutover`.

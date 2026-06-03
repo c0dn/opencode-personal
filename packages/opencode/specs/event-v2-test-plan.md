@@ -500,6 +500,16 @@ Required tests:
 - task requests and patch content do not become direct provider intent
 - completed compaction pairs, include translation, incomplete pair skipping, and
   ambiguous-backfill gate behavior are covered
+- pure v2 process-selection helper tests cover normal selection delegation and
+  overflow replay selection only by canonical visible user ID
+- overflow process-selection tests cover no-replay reasons and canonical
+  equal-timestamp ordering
+- overflow process-selection tests cover prior and repeated compaction
+  summaries/includes
+- process-selection source-purity guard prevents DB, legacy, plugin,
+  session-compaction, and provider/model conversion dependencies
+- production compaction wiring remains blocked until canonical replay policy and
+  post-cutover gates are explicit
 
 Commit gate example:
 
