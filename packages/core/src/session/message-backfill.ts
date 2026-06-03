@@ -258,7 +258,7 @@ function mapAssistant(
 
   parts
     .filter((part) => part.type !== "text" && part.type !== "reasoning" && part.type !== "tool" && part.type !== "patch" && part.type !== "retry" && part.type !== "step-start" && part.type !== "step-finish")
-    .forEach((part) => addUnsupportedPartStat(part, stats, "assistant"))
+    .forEach((part) => addUnsupportedPartStat(part, stats, "assistant", entry.info.id))
   if (entry.info.structured !== undefined) addStat(stats.degraded, "assistant", "assistant_structured_schema_missing")
   addStat(stats.degraded, "assistant", "assistant_mode_schema_missing")
   addStat(stats.degraded, "assistant", "assistant_path_schema_missing")
@@ -535,13 +535,23 @@ function stringRecord(value: unknown) {
   return entries.length > 0 ? Object.fromEntries(entries) : undefined
 }
 
-function addUnsupportedPartStat(part: SessionLegacy.Part, stats: Stats, location: "assistant" | "user") {
+function addUnsupportedPartStat(
+  part: SessionLegacy.Part,
+  stats: Stats,
+  location: "assistant" | "user",
+  messageID?: SessionLegacy.MessageID,
+) {
   if (part.type === "subtask") return addStat(stats.skipped, part.type, "subtask_schema_missing")
   if (part.type === "patch") return addStat(stats.skipped, part.type, "patch_parentage_unsupported")
   if (part.type === "tool") return addStat(stats.skipped, part.type, "tool_mapping_excluded")
   if (part.type === "retry") return addStat(stats.skipped, part.type, location === "user" ? "retry_user_unsupported" : "retry_no_active_assistant")
   if (part.type === "compaction") return addStat(stats.skipped, part.type, "compaction_mapping_excluded")
-  if (part.type === "snapshot") return addStat(stats.skipped, part.type, "standalone_snapshot_unsupported")
+  if (part.type === "snapshot") {
+    const reason = location === "assistant" && part.messageID === messageID
+      ? "standalone_snapshot_unsupported"
+      : "snapshot_parentage_unsupported"
+    return addStat(stats.skipped, part.type, reason)
+  }
   if (part.type === "file") return addStat(stats.skipped, part.type, "assistant_file_location_schema_missing")
   if (part.type === "agent") return addStat(stats.degraded, part.type, "assistant_agent_metadata_schema_missing")
   return addStat(stats.skipped, part.type, "part_mapping_unsupported")

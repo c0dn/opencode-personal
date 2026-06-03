@@ -109,6 +109,16 @@ function patch(messageID: string, id: string): SessionLegacy.PatchPart {
   }
 }
 
+function snapshot(messageID: string, id: string): SessionLegacy.SnapshotPart {
+  return {
+    id: SessionLegacy.PartID.make(id),
+    sessionID,
+    messageID: SessionLegacy.MessageID.make(messageID),
+    type: "snapshot",
+    snapshot: "standalone",
+  }
+}
+
 function completedTool(messageID: string, id: string): SessionLegacy.ToolPart {
   return {
     id: SessionLegacy.PartID.make(id),
@@ -409,6 +419,43 @@ describe("SessionMessageBackfillService contract", () => {
         expect(yield* markerExists(v2MarkerName)).toBe(true)
       }),
     )
+  })
+
+  test("standalone snapshot-only legacy sessions complete with explicit stats and v2 marker", async () => {
+    const cases = [
+      {
+        entry: assistant("msg_assistant_snapshot", 10, [snapshot("msg_assistant_snapshot", "prt_assistant_snapshot")]),
+        reason: "standalone_snapshot_unsupported",
+      },
+      {
+        entry: user("msg_user_snapshot", 10, "hello snapshot"),
+        reason: "snapshot_parentage_unsupported",
+      },
+    ]
+    cases[1]!.entry.parts.push(snapshot("msg_user_snapshot", "prt_user_snapshot"))
+
+    for (const { entry, reason } of cases) {
+      const dbPath = await makeDbPath()
+      await run(
+        dbPath,
+        Effect.gen(function* () {
+          yield* seedSession()
+          yield* seedLegacy([entry])
+
+          const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+          const rows = yield* readV2Rows()
+          const decoded = rows.map((row) => decodeMessage({ ...row.data, id: row.id, type: row.type }))
+
+          expect(result.status).toBe("completed")
+          if (result.status !== "completed") throw new Error("expected completed")
+          expect(result.inserted).toBe(1)
+          expect(statCount(result.stats.skipped, reason)).toBe(1)
+          expect(JSON.stringify(decoded)).not.toContain("standalone")
+          expect(yield* markerExists(v1MarkerName)).toBe(true)
+          expect(yield* markerExists(v2MarkerName)).toBe(true)
+        }),
+      )
+    }
   })
 
   test("completed tool title keeps upgrade pending and withholds v2 marker", async () => {

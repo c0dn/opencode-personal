@@ -182,6 +182,16 @@ function patch(messageID: string, id: string): SessionLegacy.PatchPart {
   }
 }
 
+function snapshot(messageID: string, id: string, value = "standalone"): SessionLegacy.SnapshotPart {
+  return {
+    id: SessionLegacy.PartID.make(id),
+    sessionID,
+    messageID: SessionLegacy.MessageID.make(messageID),
+    type: "snapshot",
+    snapshot: value,
+  }
+}
+
 function malformedPatch(messageID: string, id: string): SessionLegacy.PatchPart {
   return {
     id: SessionLegacy.PartID.make(id),
@@ -374,15 +384,8 @@ describe("SessionMessageBackfill", () => {
   })
 
   test("maps assistant patch content but does not add standalone snapshot, subtask, or tool title output", () => {
-    const snapshot: SessionLegacy.SnapshotPart = {
-      id: SessionLegacy.PartID.make("prt_snapshot"),
-      sessionID,
-      messageID: SessionLegacy.MessageID.make("msg_no_new_outputs"),
-      type: "snapshot",
-      snapshot: "standalone",
-    }
     const result = SessionMessageBackfill.mapLegacyMessages(
-      [assistant("msg_no_new_outputs", 1, [runningTool("msg_no_new_outputs", "prt_tool_title"), patch("msg_no_new_outputs", "prt_patch"), snapshot, subtask("msg_no_new_outputs", "prt_subtask")])],
+      [assistant("msg_no_new_outputs", 1, [runningTool("msg_no_new_outputs", "prt_tool_title"), patch("msg_no_new_outputs", "prt_patch"), snapshot("msg_no_new_outputs", "prt_snapshot"), subtask("msg_no_new_outputs", "prt_subtask")])],
       { sessionID },
     )
     const message = result.messages[0]
@@ -390,6 +393,7 @@ describe("SessionMessageBackfill", () => {
     expect(message?.type).toBe("assistant")
     if (message?.type !== "assistant") throw new Error("expected assistant")
     expect(message.content.map((content) => content.type)).toEqual(["patch", "tool"])
+    expect(message.snapshot).toBeUndefined()
     expect(JSON.stringify(encodeMessage(message))).not.toContain("standalone")
     expect(JSON.stringify(encodeMessage(message))).toContain("abc123")
     expect(JSON.stringify(encodeMessage(message))).not.toContain("check this")
@@ -398,6 +402,35 @@ describe("SessionMessageBackfill", () => {
     expect(statCount(result.stats.skipped, "snapshot", "standalone_snapshot_unsupported")).toBe(1)
     expect(statCount(result.stats.skipped, "subtask", "subtask_schema_missing")).toBe(1)
     expect(statCount(result.stats.degraded, "tool", "tool_title_schema_missing")).toBe(1)
+  })
+
+  test("reports standalone snapshot parentage without mapping assistant snapshot fields", () => {
+    const assistantResult = SessionMessageBackfill.mapLegacyMessages(
+      [assistant("msg_snapshot_assistant", 1, [snapshot("msg_snapshot_assistant", "prt_snapshot_assistant")])],
+      { sessionID },
+    )
+    const userResult = SessionMessageBackfill.mapLegacyMessages(
+      [user("msg_snapshot_user", 1, [snapshot("msg_snapshot_user", "prt_snapshot_user")])],
+      { sessionID },
+    )
+    const mismatchedResult = SessionMessageBackfill.mapLegacyMessages(
+      [assistant("msg_snapshot_mismatch", 1, [snapshot("msg_other", "prt_snapshot_mismatch")])],
+      { sessionID },
+    )
+    const assistantMessage = assistantResult.messages[0]
+    const mismatchedMessage = mismatchedResult.messages[0]
+
+    expect(assistantMessage?.type).toBe("assistant")
+    expect(mismatchedMessage?.type).toBe("assistant")
+    if (assistantMessage?.type !== "assistant" || mismatchedMessage?.type !== "assistant") throw new Error("expected assistant")
+    expect(assistantMessage.snapshot).toBeUndefined()
+    expect(mismatchedMessage.snapshot).toBeUndefined()
+    expect(JSON.stringify(encodeMessage(assistantMessage))).not.toContain("standalone")
+    expect(JSON.stringify(encodeMessage(mismatchedMessage))).not.toContain("standalone")
+    expect(statCount(assistantResult.stats.skipped, "snapshot", "standalone_snapshot_unsupported")).toBe(1)
+    expect(statCount(assistantResult.stats.skipped, "snapshot", "snapshot_parentage_unsupported")).toBe(0)
+    expect(statCount(userResult.stats.skipped, "snapshot", "snapshot_parentage_unsupported")).toBe(1)
+    expect(statCount(mismatchedResult.stats.skipped, "snapshot", "snapshot_parentage_unsupported")).toBe(1)
   })
 
   test("maps assistant PatchPart to patch content with deterministic ID and no raw legacy IDs", () => {
