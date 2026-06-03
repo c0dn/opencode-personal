@@ -27,6 +27,59 @@ afterEach(async () => {
 })
 
 describe("session.prompt-v2-context", () => {
+  test("returns canonical context rows after legacy backfill", async () => {
+    const dbPath = await makeDbPath()
+    const userEntry = user("msg_user", 10, "hello from legacy")
+    userEntry.parts.push(file("msg_user", "prt_user_file"), subtask("msg_user", "prt_user_task"))
+    const assistantEntry = assistant("msg_assistant", 20, [
+      reasoning("msg_assistant", "prt_reasoning", "thinking from legacy"),
+      text("msg_assistant", "prt_answer", "answer from legacy"),
+      completedTool("msg_assistant", "prt_tool"),
+      patch("msg_assistant", "prt_patch"),
+    ])
+
+    const context = await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy([userEntry, assistantEntry])
+        return yield* PromptV2Context.messages(sessionID)
+      }),
+    )
+
+    expect(context.map((message) => message.type)).toStrictEqual(["user", "assistant"])
+    const userMessage = context[0]
+    const assistantMessage = context[1]
+    if (userMessage?.type !== "user") throw new Error("expected user context row")
+    if (assistantMessage?.type !== "assistant") throw new Error("expected assistant context row")
+
+    expect(userMessage.text).toBe("hello from legacy")
+    expect(userMessage.files).toStrictEqual([
+      expect.objectContaining({ mime: "text/plain", name: "note.txt", uri: "data:text/plain;base64,aGVsbG8=" }),
+    ])
+    expect(userMessage.taskRequests).toStrictEqual([
+      expect.objectContaining({ type: "task-request", prompt: "do not send this to provider", agent: "reviewer" }),
+    ])
+
+    expect(assistantMessage.content.map((content) => content.type).sort()).toStrictEqual([
+      "patch",
+      "reasoning",
+      "text",
+      "tool",
+    ])
+    expect(assistantMessage.content).toContainEqual(expect.objectContaining({ type: "text", text: "answer from legacy" }))
+    expect(assistantMessage.content).toContainEqual(expect.objectContaining({ type: "patch", hash: "abc123" }))
+    expect(assistantMessage.content).toContainEqual(
+      expect.objectContaining({
+        type: "tool",
+        callID: "call_1",
+        name: "bash",
+        state: expect.objectContaining({ status: "completed", content: [expect.objectContaining({ type: "text", text: "done" })] }),
+      }),
+    )
+    assertNoLegacyIDs(context)
+  })
+
   test("backfills a real DB legacy-only transcript before returning provider model messages", async () => {
     const dbPath = await makeDbPath()
     const userEntry = user("msg_user", 10, "hello from legacy")
@@ -91,6 +144,26 @@ describe("session.prompt-v2-context", () => {
     expect(error).toMatchObject({ status: "aborted", reason: "mixed_cutoff_ambiguous" })
   })
 
+  test("messages fails for ambiguous mixed cutoff", async () => {
+    const dbPath = await makeDbPath()
+
+    const exit = await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy([user("msg_older", 10, "older"), user("msg_equal", 50, "equal boundary")])
+        yield* seedV2(liveUser("evt_live_equal", 50, "live"))
+        return yield* PromptV2Context.messages(sessionID).pipe(Effect.exit)
+      }),
+    )
+
+    expect(Exit.isFailure(exit)).toBe(true)
+    if (Exit.isSuccess(exit)) throw new Error("expected failure")
+    const error = Cause.squash(exit.cause)
+    expect(error).toBeInstanceOf(BackfillNotReadyError)
+    expect(error).toMatchObject({ status: "aborted", reason: "mixed_cutoff_ambiguous" })
+  })
+
   test("fails before model conversion when upgrade is unavailable", async () => {
     const dbPath = await makeDbPath()
 
@@ -100,6 +173,25 @@ describe("session.prompt-v2-context", () => {
         yield* seedSession()
         yield* seedMarker(v1MarkerName)
         return yield* PromptV2Context.toModelMessages(sessionID).pipe(Effect.exit)
+      }),
+    )
+
+    expect(Exit.isFailure(exit)).toBe(true)
+    if (Exit.isSuccess(exit)) throw new Error("expected failure")
+    const error = Cause.squash(exit.cause)
+    expect(error).toBeInstanceOf(BackfillNotReadyError)
+    expect(error).toMatchObject({ status: "upgrade_unavailable", reason: "legacy_source_unavailable" })
+  })
+
+  test("messages fails when upgrade is unavailable", async () => {
+    const dbPath = await makeDbPath()
+
+    const exit = await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedMarker(v1MarkerName)
+        return yield* PromptV2Context.messages(sessionID).pipe(Effect.exit)
       }),
     )
 
