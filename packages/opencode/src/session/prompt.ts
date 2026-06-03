@@ -50,6 +50,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionMailbox } from "@opencode-ai/core/session/mailbox"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -59,9 +60,10 @@ import * as DateTime from "effect/DateTime"
 import { eq } from "drizzle-orm"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { referencePromptMetadata, referenceTextPart } from "./prompt/reference"
-import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+import { BackfillNotReadyError, PromptV2Context } from "./prompt-v2-context"
+import { PromptV2ProviderInput } from "./prompt-v2-provider-input"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -92,7 +94,7 @@ export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionLegacy.WithParts, Image.Error>
   readonly promptAsync: (input: PromptInput) => Effect.Effect<void>
-  readonly loop: (input: LoopInput) => Effect.Effect<SessionLegacy.WithParts>
+  readonly loop: (input: LoopInput) => Effect.Effect<SessionLegacy.WithParts, BackfillNotReadyError>
   readonly shell: (input: ShellInput) => Effect.Effect<SessionLegacy.WithParts, Session.BusyError>
   readonly command: (input: CommandInput) => Effect.Effect<SessionLegacy.WithParts, Image.Error>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
@@ -513,6 +515,7 @@ export const layer = Layer.effect(
               throw error
             }
             const model = input.model ?? agent.model ?? (yield* currentModel(input.sessionID))
+            yield* ensurePromptV2BackfillReady(input.sessionID)
             const userMsg: SessionLegacy.User = {
               id: input.messageID ?? MessageID.ascending(),
               sessionID: input.sessionID,
@@ -1230,9 +1233,12 @@ export const layer = Layer.effect(
     const prompt: (input: PromptInput) => Effect.Effect<SessionLegacy.WithParts, Image.Error> = Effect.fn(
       "SessionPrompt.prompt",
     )(function* (input: PromptInput) {
+      // noReply still creates a live user row that may be followed by a later loop;
+      // gate first so the live row cannot race the lazy backfill cutoff.
+      yield* ensurePromptV2BackfillReady(input.sessionID).pipe(Effect.catch(Effect.die))
       const message = yield* applyPromptInput(input)
       if (input.noReply === true) return message
-      return yield* loop({ sessionID: input.sessionID })
+      return yield* loop({ sessionID: input.sessionID }).pipe(Effect.catch(Effect.die))
     })
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -1243,7 +1249,24 @@ export const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
-    const runLoop: (sessionID: SessionID) => Effect.Effect<SessionLegacy.WithParts> = Effect.fn("SessionPrompt.run")(
+    const ensurePromptV2BackfillReady = Effect.fnUntraced(function* (sessionID: SessionID) {
+      return yield* PromptV2Context.messages(sessionID).pipe(
+        Effect.catch((error) => (error instanceof BackfillNotReadyError ? Effect.fail(error) : Effect.die(error))),
+        Effect.provideService(Database.Service, database),
+        Effect.provide(SessionV2.defaultLayer),
+        Effect.asVoid,
+      )
+    })
+
+    const readCanonicalContext = Effect.fnUntraced(function* (sessionID: SessionID) {
+      return yield* PromptV2Context.messages(sessionID).pipe(
+        Effect.catch((error) => (error instanceof BackfillNotReadyError ? Effect.fail(error) : Effect.die(error))),
+        Effect.provideService(Database.Service, database),
+        Effect.provide(SessionV2.defaultLayer),
+      )
+    })
+
+    const runLoop: (sessionID: SessionID) => Effect.Effect<SessionLegacy.WithParts, BackfillNotReadyError> = Effect.fn("SessionPrompt.run")(
       function* (sessionID: SessionID) {
         const ctx = yield* InstanceState.context
         const slog = elog.with({ sessionID })
@@ -1295,23 +1318,27 @@ export const layer = Layer.effect(
           }
 
           step++
-          if (step === 1)
+          const forkTitleIfFirstStep = Effect.fnUntraced(function* () {
+            if (step !== 1) return
             yield* title({
               session,
               modelID: lastUser.model.modelID,
               providerID: lastUser.model.providerID,
               history: msgs,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
+          })
 
           const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
           const task = tasks.pop()
 
           if (task?.type === "subtask") {
+            yield* forkTitleIfFirstStep()
             yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
             continue
           }
 
           if (task?.type === "compaction") {
+            yield* forkTitleIfFirstStep()
             const result = yield* compaction.process({
               messages: msgs,
               parentID: lastUser.id,
@@ -1328,6 +1355,7 @@ export const layer = Layer.effect(
             lastFinished.summary !== true &&
             (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
           ) {
+            yield* forkTitleIfFirstStep()
             yield* compaction.create({ sessionID, agent: lastUser.agent, model: lastUser.model, auto: true })
             continue
           }
@@ -1342,11 +1370,29 @@ export const layer = Layer.effect(
           }
           const maxSteps = agent.steps ?? Infinity
           const isLastStep = step >= maxSteps
-          msgs = yield* SessionReminders.apply({ messages: msgs, agent, session }).pipe(
-            Effect.provideService(RuntimeFlags.Service, flags),
-            Effect.provideService(AppFileSystem.Service, fsys),
-            Effect.provideService(Session.Service, sessions),
+          const canonicalContext = yield* readCanonicalContext(sessionID)
+          const plan = yield* Effect.gen(function* () {
+            if (!flags.experimentalPlanMode) return undefined
+            const planPath = Session.plan(session, ctx)
+            const exists = yield* fsys.existsSafe(planPath)
+            if (agent.name === "plan" && lastAssistant?.agent !== "plan" && !exists) {
+              yield* fsys.ensureDir(path.dirname(planPath)).pipe(Effect.orDie)
+            }
+            return { path: planPath, exists }
+          })
+          const v2ModelMsgs = yield* Effect.promise(() =>
+            PromptV2ProviderInput.toProviderMessages(
+              {
+                messages: canonicalContext,
+                agentName: agent.name,
+                step,
+                experimentalPlanMode: flags.experimentalPlanMode,
+                plan,
+              },
+              { model },
+            ),
           )
+          yield* forkTitleIfFirstStep()
 
           const msg: SessionLegacy.Assistant = {
             id: MessageID.ascending(),
@@ -1416,31 +1462,10 @@ export const layer = Layer.effect(
             if (step === 1)
               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
 
-            if (step > 1 && lastFinished) {
-              for (const m of msgs) {
-                if (m.info.role !== "user" || m.info.id <= lastFinished.id) continue
-                for (const p of m.parts) {
-                  if (p.type !== "text" || p.ignored || p.synthetic) continue
-                  if (!p.text.trim()) continue
-                  p.text = [
-                    "<system-reminder>",
-                    "The user sent the following message:",
-                    p.text,
-                    "",
-                    "Please address this message and continue with your tasks.",
-                    "</system-reminder>",
-                  ].join("\n")
-                }
-              }
-            }
-
-            yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-
-            const [skills, env, instructions, modelMsgs] = yield* Effect.all([
+            const [skills, env, instructions] = yield* Effect.all([
               sys.skills(agent),
               sys.environment(model),
               instruction.system().pipe(Effect.orDie),
-              MessageV2.toModelMessagesEffect(msgs, model),
             ])
             const system = [...env, ...instructions, ...(skills ? [skills] : [])]
             const format = lastUser.format ?? { type: "text" as const }
@@ -1452,7 +1477,7 @@ export const layer = Layer.effect(
               sessionID,
               parentSessionID: session.parentID,
               system,
-              messages: [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])],
+              messages: [...v2ModelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])],
               tools,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
@@ -1524,7 +1549,7 @@ export const layer = Layer.effect(
       return yield* Schema.decodeUnknownEffect(PromptInput)(prompt)
     })
 
-    const drainMailbox: (sessionID: SessionID) => Effect.Effect<SessionLegacy.WithParts> = Effect.fn(
+    const drainMailbox: (sessionID: SessionID) => Effect.Effect<SessionLegacy.WithParts, BackfillNotReadyError> = Effect.fn(
       "SessionPrompt.drainMailbox",
     )(function* (sessionID: SessionID) {
       let last: SessionLegacy.WithParts | undefined
@@ -1541,7 +1566,10 @@ export const layer = Layer.effect(
               ),
             ),
           )
-          const created = yield* applyPromptInput(input).pipe(
+          const created = yield* Effect.gen(function* () {
+            yield* ensurePromptV2BackfillReady(input.sessionID)
+            return yield* applyPromptInput(input)
+          }).pipe(
             Effect.catchCause((cause) =>
               mailbox.failed({ id: message.id, error: Cause.pretty(cause) }).pipe(
                 Effect.orDie,
@@ -1562,7 +1590,7 @@ export const layer = Layer.effect(
       return yield* lastAssistant(sessionID)
     })
 
-    const loop: (input: LoopInput) => Effect.Effect<SessionLegacy.WithParts> = Effect.fn("SessionPrompt.loop")(
+    const loop: (input: LoopInput) => Effect.Effect<SessionLegacy.WithParts, BackfillNotReadyError> = Effect.fn("SessionPrompt.loop")(
       function* (input: LoopInput) {
         return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
       },
@@ -1606,7 +1634,12 @@ export const layer = Layer.effect(
       "SessionPrompt.shell",
     )(function* (input: ShellInput) {
       const ready = yield* Latch.make()
-      return yield* state.startShell(input.sessionID, lastAssistant(input.sessionID), shellImpl(input, ready), ready)
+      return yield* state.startShell(
+        input.sessionID,
+        lastAssistant(input.sessionID),
+        shellImpl(input, ready).pipe(Effect.catch(Effect.die)),
+        ready,
+      )
     })
 
     const command = Effect.fn("SessionPrompt.command")(function* (input: CommandInput) {
@@ -1763,6 +1796,7 @@ export const defaultLayer = Layer.suspend(() =>
       Layer.mergeAll(
         Agent.defaultLayer,
         Database.defaultLayer,
+        SessionV2.defaultLayer,
         SystemPrompt.defaultLayer,
         LLM.defaultLayer,
         Reference.defaultLayer,

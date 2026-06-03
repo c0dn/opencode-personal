@@ -1,6 +1,6 @@
 import { InstanceState } from "@/effect/instance-state"
 import { SessionLegacy } from "@opencode-ai/core/session/legacy"
-import { Runner } from "@/effect/runner"
+import { Runner, Busy as RunnerBusy } from "@/effect/runner"
 import { BackgroundJob } from "@/background/job"
 import { Effect, Latch, Layer, Scope, Context } from "effect"
 import { Session } from "./session"
@@ -11,11 +11,11 @@ import { SessionStatus } from "./status"
 export interface Interface {
   readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
-  readonly ensureRunning: (
+  readonly ensureRunning: <E>(
     sessionID: SessionID,
     onInterrupt: Effect.Effect<SessionLegacy.WithParts>,
-    work: Effect.Effect<SessionLegacy.WithParts>,
-  ) => Effect.Effect<SessionLegacy.WithParts>
+    work: Effect.Effect<SessionLegacy.WithParts, E>,
+  ) => Effect.Effect<SessionLegacy.WithParts, E>
   readonly startShell: (
     sessionID: SessionID,
     onInterrupt: Effect.Effect<SessionLegacy.WithParts>,
@@ -35,7 +35,7 @@ export const layer = Layer.effect(
     const state = yield* InstanceState.make(
       Effect.fn("SessionRunState.state")(function* () {
         const scope = yield* Scope.Scope
-        const runners = new Map<SessionID, Runner.Runner<SessionLegacy.WithParts>>()
+        const runners = new Map<SessionID, Runner.Runner<SessionLegacy.WithParts, unknown>>()
         yield* Effect.addFinalizer(
           Effect.fnUntraced(function* () {
             yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
@@ -56,7 +56,7 @@ export const layer = Layer.effect(
       const data = yield* InstanceState.get(state)
       const existing = data.runners.get(sessionID)
       if (existing) return existing
-      const next = Runner.make<SessionLegacy.WithParts>(data.scope, {
+      const next = Runner.make<SessionLegacy.WithParts, unknown>(data.scope, {
         onIdle: Effect.gen(function* () {
           data.runners.delete(sessionID)
           yield* status.set(sessionID, { type: "idle" })
@@ -85,13 +85,18 @@ export const layer = Layer.effect(
       yield* existing.cancel
     })
 
-    const ensureRunning = Effect.fn("SessionRunState.ensureRunning")(function* (
-      sessionID: SessionID,
-      onInterrupt: Effect.Effect<SessionLegacy.WithParts>,
-      work: Effect.Effect<SessionLegacy.WithParts>,
-    ) {
-      return yield* (yield* runner(sessionID, onInterrupt)).ensureRunning(work)
-    })
+    const ensureRunning: Interface["ensureRunning"] = (sessionID, onInterrupt, work) =>
+      Effect.gen(function* () {
+        // A Runner is stored per session and coalesces concurrent callers onto the
+        // active run. That means every active prompt run for a session must share
+        // the same work error type. The map stores runners as `unknown` because
+        // TypeScript cannot express the per-session generic, and callers recover
+        // their `E` here at the boundary where the current work is registered.
+        const result = (yield* runner(sessionID, onInterrupt)).ensureRunning(
+          work as Effect.Effect<SessionLegacy.WithParts, unknown>,
+        ) as typeof work
+        return yield* result
+      })
 
     const startShell = Effect.fn("SessionRunState.startShell")(function* (
       sessionID: SessionID,
@@ -99,8 +104,11 @@ export const layer = Layer.effect(
       work: Effect.Effect<SessionLegacy.WithParts>,
       ready?: Latch.Latch,
     ) {
-      return yield* (yield* runner(sessionID, onInterrupt))
-        .startShell(work, ready)
+      const result = (yield* runner(sessionID, onInterrupt)).startShell(
+        work,
+        ready,
+      ) as Effect.Effect<SessionLegacy.WithParts, RunnerBusy>
+      return yield* result
         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
     })
 

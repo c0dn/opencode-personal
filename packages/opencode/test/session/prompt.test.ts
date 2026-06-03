@@ -1,4 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node"
+import { DataMigrationTable } from "@opencode-ai/core/data-migration.sql"
 import { SessionLegacy } from "@opencode-ai/core/session/legacy"
 import { SessionMailbox } from "@opencode-ai/core/session/mailbox"
 import { Database } from "@opencode-ai/core/database/database"
@@ -7,7 +8,8 @@ import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { FetchHttpClient } from "effect/unstable/http"
 import { expect } from "bun:test"
-import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema } from "effect"
+import * as DateTime from "effect/DateTime"
 import path from "path"
 import { fileURLToPath, pathToFileURL } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -41,6 +43,7 @@ import { SessionRunState } from "../../src/session/run-state"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { Skill } from "../../src/skill"
 import { SystemPrompt } from "../../src/session/system"
 import { Shell } from "../../src/shell/shell"
@@ -58,6 +61,7 @@ import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 import { reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+import { BackfillNotReadyError, PromptV2Context } from "../../src/session/prompt-v2-context"
 
 void Log.init({ print: false })
 
@@ -74,6 +78,17 @@ const ref = {
   providerID: ProviderV2.ID.make("test"),
   modelID: ProviderV2.ModelID.make("test-model"),
 }
+const encodeSessionMessage = Schema.encodeSync(SessionMessage.Message)
+
+let transformHookCalls = 0
+const transformCountingPlugin = Layer.mock(Plugin.Service)({
+  trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
+    if (name === "experimental.chat.messages.transform") transformHookCalls++
+    return Effect.succeed(output)
+  },
+  list: () => Effect.succeed([]),
+  init: () => Effect.void,
+})
 
 function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
   return Effect.acquireUseRelease(
@@ -172,16 +187,17 @@ const blockingProcessor = Layer.succeed(
   }),
 )
 
-function makePrompt(input?: { processor?: "blocking" }) {
+function makePrompt(input?: { processor?: "blocking"; plugin?: Layer.Layer<Plugin.Service> }) {
   const deps = Layer.mergeAll(
     Session.defaultLayer,
+    SessionV2.defaultLayer,
     Snapshot.defaultLayer,
     LLM.defaultLayer,
     Env.defaultLayer,
     AgentSvc.defaultLayer,
     Command.defaultLayer,
     Permission.defaultLayer,
-    Plugin.defaultLayer,
+    input?.plugin ?? Plugin.defaultLayer,
     Config.defaultLayer,
     ProviderSvc.defaultLayer,
     lsp,
@@ -242,16 +258,17 @@ function makePrompt(input?: { processor?: "blocking" }) {
   )
 }
 
-function makeHttp(input?: { processor?: "blocking" }) {
+function makeHttp(input?: { processor?: "blocking"; plugin?: Layer.Layer<Plugin.Service> }) {
   return Layer.mergeAll(TestLLMServer.layer, makePrompt(input))
 }
 
-function makeHttpNoLLMServer(input?: { processor?: "blocking" }) {
+function makeHttpNoLLMServer(input?: { processor?: "blocking"; plugin?: Layer.Layer<Plugin.Service> }) {
   return makePrompt(input)
 }
 
 const it = testEffect(makeHttp())
 const noLLMServer = testEffect(makeHttpNoLLMServer())
+const transformCounting = testEffect(makeHttp({ plugin: transformCountingPlugin }))
 const raceNoLLMServer = testEffect(makeHttpNoLLMServer({ processor: "blocking" }))
 const unix = process.platform !== "win32" ? it.instance : it.instance.skip
 const unixNoLLMServer = process.platform !== "win32" ? noLLMServer.instance : noLLMServer.instance.skip
@@ -374,7 +391,12 @@ const succeedVoid = (deferred: Deferred.Deferred<void>) => {
   Effect.runSync(Deferred.succeed(deferred, void 0).pipe(Effect.ignore))
 }
 
-const user = Effect.fn("test.user")(function* (sessionID: SessionID, text: string) {
+const gateV2Backfill = Effect.fn("test.gateV2Backfill")(function* (sessionID: SessionID) {
+  yield* PromptV2Context.messages(sessionID).pipe(Effect.asVoid)
+})
+
+const user = Effect.fn("test.user")(function* (sessionID: SessionID, text: string, input?: { pregate?: boolean }) {
+  if (input?.pregate !== false) yield* gateV2Backfill(sessionID)
   const session = yield* Session.Service
   const msg = yield* session.updateMessage({
     id: MessageID.ascending(),
@@ -449,6 +471,83 @@ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
 })
 
 // Loop semantics
+
+transformCounting.instance(
+  "normal assistant fails typed when v2 provider input backfill is not ready",
+  () =>
+    Effect.gen(function* () {
+      transformHookCalls = 0
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const { db } = yield* Database.Service
+      const chat = yield* sessions.create({})
+      const initialTitle = chat.title
+      const msg = yield* user(chat.id, "hello", { pregate: false })
+
+      yield* db
+        .insert(DataMigrationTable)
+        .values({ name: `legacy-session-message-backfill/v1/${chat.id}`, time_completed: Date.now() })
+        .run()
+      yield* db
+        .insert(SessionMessageTable)
+        .values({
+          id: SessionMessage.ID.make("evt_prompt_loop_live_equal_boundary"),
+          session_id: SessionV2.ID.make(chat.id),
+          type: "user",
+          time_created: msg.time.created,
+          data: encodeSessionMessage(
+            new SessionMessage.User({
+              id: SessionMessage.ID.make("evt_prompt_loop_live_equal_boundary"),
+              type: "user",
+              text: "live boundary",
+              files: [],
+              agents: [],
+              references: [],
+              time: { created: DateTime.makeUnsafe(msg.time.created) },
+            }),
+          ),
+        })
+        .run()
+
+      const exit = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.exit)
+      const all = yield* sessions.messages({ sessionID: chat.id })
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause)
+        expect(error).toBeInstanceOf(BackfillNotReadyError)
+        expect(error).toMatchObject({ status: "aborted", reason: "mixed_cutoff_ambiguous" })
+      }
+      expect(all.some((item) => item.info.role === "assistant")).toBe(false)
+      expect(yield* llm.calls).toBe(0)
+      expect(transformHookCalls).toBe(0)
+      expect((yield* sessions.get(chat.id)).title).toBe(initialTitle)
+      const promptV2Marker = yield* db
+        .select()
+        .from(DataMigrationTable)
+        .where(eq(DataMigrationTable.name, `legacy-session-message-backfill/v2/${chat.id}`))
+        .get()
+      expect(promptV2Marker).toBeUndefined()
+    }),
+  { config: cfg },
+)
+
+transformCounting.instance("normal assistant skips legacy message transform hook", () =>
+  Effect.gen(function* () {
+    transformHookCalls = 0
+    const { llm } = yield* useServerConfig(providerCfg)
+    yield* llm.text("ok")
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+
+    yield* prompt.prompt({ sessionID: chat.id, agent: "build", parts: [{ type: "text", text: "hello" }] })
+
+    expect(transformHookCalls).toBe(0)
+    expect(yield* llm.calls).toBe(1)
+  }),
+)
 
 noLLMServer.instance(
   "loop exits immediately when last assistant has stop finish",
