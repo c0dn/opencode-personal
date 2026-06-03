@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { DateTime, Schema } from "effect"
+import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionLegacy } from "@opencode-ai/core/session/legacy"
 import { SessionMessageBackfill } from "@opencode-ai/core/session/message-backfill"
@@ -229,7 +230,7 @@ function compaction(messageID: string, id: string, input?: { auto?: boolean; tai
   }
 }
 
-function subtask(messageID: string, id: string): SessionLegacy.SubtaskPart {
+function subtask(messageID: string, id: string, input?: Partial<SessionLegacy.SubtaskPart>): SessionLegacy.SubtaskPart {
   return {
     id: SessionLegacy.PartID.make(id),
     sessionID,
@@ -238,6 +239,7 @@ function subtask(messageID: string, id: string): SessionLegacy.SubtaskPart {
     prompt: "check this",
     description: "review",
     agent: "reviewer",
+    ...input,
   }
 }
 
@@ -378,12 +380,12 @@ describe("SessionMessageBackfill", () => {
     expect(statCount(result.stats.mapped, "retry", "assistant_retry")).toBe(1)
     expect(statCount(result.stats.skipped, "retry", "retry_mapping_excluded")).toBe(0)
     expect(statCount(result.stats.skipped, "compaction", "compaction_mapping_excluded")).toBe(1)
-    expect(statCount(result.stats.skipped, "subtask", "subtask_schema_missing")).toBe(1)
+    expect(statCount(result.stats.skipped, "subtask", "subtask_parentage_unsupported")).toBe(1)
     expect(statCount(result.stats.degraded, "step-finish", "assistant_finish_conflict")).toBe(1)
     expect(statCount(result.stats.degraded, "assistant", "assistant_mode_schema_missing")).toBe(1)
   })
 
-  test("maps assistant patch content but does not add standalone snapshot, subtask, or tool title output", () => {
+  test("maps assistant patch content but does not add standalone snapshot, assistant subtask, or tool title output", () => {
     const result = SessionMessageBackfill.mapLegacyMessages(
       [assistant("msg_no_new_outputs", 1, [runningTool("msg_no_new_outputs", "prt_tool_title"), patch("msg_no_new_outputs", "prt_patch"), snapshot("msg_no_new_outputs", "prt_snapshot"), subtask("msg_no_new_outputs", "prt_subtask")])],
       { sessionID },
@@ -400,7 +402,7 @@ describe("SessionMessageBackfill", () => {
     expect(JSON.stringify(encodeMessage(message))).not.toContain("Run command")
     expect(statCount(result.stats.mapped, "patch", "assistant_patch")).toBe(1)
     expect(statCount(result.stats.skipped, "snapshot", "standalone_snapshot_unsupported")).toBe(1)
-    expect(statCount(result.stats.skipped, "subtask", "subtask_schema_missing")).toBe(1)
+    expect(statCount(result.stats.skipped, "subtask", "subtask_parentage_unsupported")).toBe(1)
     expect(statCount(result.stats.degraded, "tool", "tool_title_schema_missing")).toBe(1)
   })
 
@@ -487,6 +489,60 @@ describe("SessionMessageBackfill", () => {
     expect(JSON.stringify(encodeMessage(message))).not.toContain("abc123")
     expect(statCount(result.stats.skipped, "patch", "patch_parentage_unsupported")).toBe(1)
     expect(statCount(result.stats.skipped, "patch", "patch_schema_missing")).toBe(0)
+  })
+
+  test("maps user-owned subtask parts to taskRequests with deterministic IDs and no raw legacy IDs", () => {
+    const result = SessionMessageBackfill.mapLegacyMessages(
+      [
+        user("msg_task", 1, [
+          text("msg_task", "prt_text", "please"),
+          file("msg_task", "prt_file"),
+          agent("msg_task", "prt_agent"),
+          subtask("msg_task", "prt_task", {
+            prompt: "check this carefully",
+            description: "review the patch",
+            agent: "reviewer",
+            model: { providerID, modelID },
+            command: "review-code",
+          }),
+        ]),
+      ],
+      { sessionID },
+    )
+    const message = result.messages[0]
+
+    expect(message?.type).toBe("user")
+    if (message?.type !== "user") throw new Error("expected user")
+    expect(message.text).toBe("please")
+    expect(message.files).toHaveLength(1)
+    expect(message.agents).toEqual([{ name: "reviewer", source: { text: "@reviewer", start: 0, end: 9 } }])
+    const taskRequest = message.taskRequests?.[0]
+    expect(taskRequest?.id).toMatch(/^evt_legacy_backfill_c_00000000_00000000_[0-9a-f]{24}$/)
+    expect(taskRequest).toMatchObject({
+      type: "task-request",
+      prompt: "check this carefully",
+      description: "review the patch",
+      agent: "reviewer",
+      model: { providerID, id: ModelV2.ID.make(modelID) },
+      command: "review-code",
+    })
+    expect(statCount(result.stats.mapped, "subtask", "user_task_request")).toBe(1)
+    expect(statCount(result.stats.skipped, "subtask", "subtask_schema_missing")).toBe(0)
+    assertNoLegacyIDs(encodeMessage(message))
+  })
+
+  test("skips mismatched user subtask parentage without leaking prompt text", () => {
+    const result = SessionMessageBackfill.mapLegacyMessages(
+      [user("msg_task_mismatch", 1, [text("msg_task_mismatch", "prt_text", "hello"), subtask("msg_other", "prt_task")])],
+      { sessionID },
+    )
+    const message = result.messages[0]
+
+    expect(message).toMatchObject({ type: "user", text: "hello" })
+    if (!message) throw new Error("expected message")
+    expect(JSON.stringify(encodeMessage(message))).not.toContain("check this")
+    expect(statCount(result.stats.skipped, "subtask", "subtask_parentage_unsupported")).toBe(1)
+    expect(statCount(result.stats.skipped, "subtask", "subtask_schema_missing")).toBe(0)
   })
 
   test("skips malformed assistant patch with explicit malformed stat", () => {

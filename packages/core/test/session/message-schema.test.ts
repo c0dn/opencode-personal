@@ -110,4 +110,45 @@ describe("SessionMessage schema", () => {
       content: [{ type: "patch", id: "evt_patch", hash: "abc123", files: ["README.md", "src/index.ts"] }],
     })
   })
+
+  test("roundtrips user task requests", () => {
+    const message = Schema.decodeUnknownSync(SessionMessage.Message)({
+      id: "evt_user",
+      type: "user",
+      text: "",
+      files: [],
+      agents: [],
+      references: [],
+      taskRequests: [
+        {
+          type: "task-request",
+          id: "evt_task_request",
+          prompt: "review this",
+          description: "review",
+          agent: "reviewer",
+          model: {
+            providerID: ProviderV2.ID.make("test"),
+            id: ModelV2.ID.make("test-model"),
+          },
+          command: "review-code",
+        },
+      ],
+      time: { created: 1 },
+    })
+
+    expect(Schema.encodeSync(SessionMessage.Message)(message)).toMatchObject({
+      type: "user",
+      taskRequests: [
+        {
+          type: "task-request",
+          id: "evt_task_request",
+          prompt: "review this",
+          description: "review",
+          agent: "reviewer",
+          model: { providerID: "test", id: "test-model" },
+          command: "review-code",
+        },
+      ],
+    })
+  })
 })

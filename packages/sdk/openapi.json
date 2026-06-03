@@ -20758,12 +20758,60 @@
               "$ref": "#/components/schemas/PromptReferenceAttachment"
             }
           },
+          "taskRequests": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionMessageUserTaskRequest"
+            }
+          },
           "type": {
             "type": "string",
             "enum": ["user"]
           }
         },
         "required": ["id", "time", "text", "type"],
+        "additionalProperties": false
+      },
+      "SessionMessageUserTaskRequest": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["task-request"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "model": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "providerID": {
+                "type": "string"
+              },
+              "variant": {
+                "type": "string"
+              }
+            },
+            "required": ["id", "providerID"],
+            "additionalProperties": false
+          },
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": ["type", "id", "prompt", "description", "agent"],
         "additionalProperties": false
       },
       "SessionMessageSynthetic": {

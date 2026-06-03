@@ -12,6 +12,9 @@ export async function toModelMessages(input: SessionMessage.Message[]): Promise<
 
   for (const message of chronological(input)) {
     if (message.type === "user") {
+      // User task requests are transcript/task orchestration metadata, not provider
+      // prompt content. Keep them out of model context even when they are the
+      // only user-side payload on the turn.
       const parts: UIMessage["parts"] = [
         ...(message.text === "" ? [] : [{ type: "text" as const, text: message.text }]),
         ...(message.files ?? []).map((file) => ({

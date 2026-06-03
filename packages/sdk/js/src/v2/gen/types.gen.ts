@@ -3742,6 +3742,20 @@ export type SessionMessageModelSwitched = {
   }
 }
 
+export type SessionMessageUserTaskRequest = {
+  type: "task-request"
+  id: string
+  prompt: string
+  description: string
+  agent: string
+  model?: {
+    id: string
+    providerID: string
+    variant?: string
+  }
+  command?: string
+}
+
 export type SessionMessageUser = {
   id: string
   metadata?: {
@@ -3754,6 +3768,7 @@ export type SessionMessageUser = {
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
   references?: Array<PromptReferenceAttachment>
+  taskRequests?: Array<SessionMessageUserTaskRequest>
   type: "user"
 }
 

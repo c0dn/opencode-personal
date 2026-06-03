@@ -150,6 +150,7 @@ function mapUser(
   messageOrdinal: number,
   stats: Stats,
 ) {
+  const info = requireUserInfo(entry.info)
   const parts = sortedParts(entry.parts)
   const text = parts
     .filter((part): part is SessionLegacy.TextPart => part.type === "text" && !part.ignored && !part.synthetic)
@@ -178,23 +179,57 @@ function mapUser(
         source: part.source ? new Source({ text: part.source.value, start: part.source.start, end: part.source.end }) : undefined,
       })
     })
+  let taskRequestOrdinal = 0
+  const taskRequests = parts.flatMap((part): SessionMessage.UserTaskRequest[] => {
+    if (part.type !== "subtask") return []
+    if (part.messageID !== info.id) {
+      addStat(stats.skipped, part.type, "subtask_parentage_unsupported")
+      return []
+    }
+    addStat(stats.mapped, part.type, "user_task_request")
+    return [mapTaskRequestPart(part, info, sessionID, messageOrdinal, taskRequestOrdinal++)]
+  })
 
   parts
     .filter((part): part is SessionLegacy.TextPart => part.type === "text" && !!(part.ignored || part.synthetic))
     .forEach((part) => addStat(stats.degraded, part.type, part.synthetic ? "synthetic_embedded_unsupported" : "ignored_text_omitted"))
   parts
-    .filter((part) => part.type !== "text" && part.type !== "file" && part.type !== "agent")
+    .filter((part) => part.type !== "text" && part.type !== "file" && part.type !== "agent" && part.type !== "subtask")
     .forEach((part) => addUnsupportedPartStat(part, stats, "user"))
 
-  addStat(stats.mapped, entry.info.role, "user_message")
+  addStat(stats.mapped, info.role, "user_message")
   return new SessionMessage.User({
-    id: messageID(sessionID, entry.info.id, messageOrdinal),
+    id: messageID(sessionID, info.id, messageOrdinal),
     type: "user",
     text,
     files,
     agents,
     references: [],
-    time: { created: DateTime.makeUnsafe(entry.info.time.created) },
+    taskRequests: taskRequests.length > 0 ? taskRequests : undefined,
+    time: { created: DateTime.makeUnsafe(info.time.created) },
+  })
+}
+
+function requireUserInfo(info: SessionLegacy.Info): SessionLegacy.User {
+  if (info.role !== "user") throw new Error("expected legacy user message")
+  return info
+}
+
+function mapTaskRequestPart(
+  part: SessionLegacy.SubtaskPart,
+  entry: SessionLegacy.User,
+  sessionID: SessionSchema.ID | string,
+  messageOrdinal: number,
+  partOrdinal: number,
+) {
+  return new SessionMessage.UserTaskRequest({
+    type: "task-request",
+    id: contentID(sessionID, entry.id, part.id, "user_task_request", messageOrdinal, partOrdinal),
+    prompt: part.prompt,
+    description: part.description,
+    agent: part.agent,
+    model: part.model ? { providerID: part.model.providerID, id: ModelV2.ID.make(part.model.modelID) } : undefined,
+    command: part.command,
   })
 }
 
@@ -541,7 +576,7 @@ function addUnsupportedPartStat(
   location: "assistant" | "user",
   messageID?: SessionLegacy.MessageID,
 ) {
-  if (part.type === "subtask") return addStat(stats.skipped, part.type, "subtask_schema_missing")
+  if (part.type === "subtask") return addStat(stats.skipped, part.type, "subtask_parentage_unsupported")
   if (part.type === "patch") return addStat(stats.skipped, part.type, "patch_parentage_unsupported")
   if (part.type === "tool") return addStat(stats.skipped, part.type, "tool_mapping_excluded")
   if (part.type === "retry") return addStat(stats.skipped, part.type, location === "user" ? "retry_user_unsupported" : "retry_no_active_assistant")

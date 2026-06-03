@@ -177,8 +177,6 @@ function rowMatchesTarget(row: typeof SessionMessageTable.$inferSelect, targets:
 
 const deferredV2Reasons = new Set([
   "patch_schema_missing",
-  "subtask_schema_missing",
-  "subtask_parentage_unsupported",
   "tool_title_schema_missing",
 ])
 

@@ -95,6 +95,52 @@ describe("session.message-v2-model.toModelMessages", () => {
     ])
   })
 
+  test("ignores task-request-only user turns", async () => {
+    expect(
+      await MessageV2Model.toModelMessages([
+        user("task-request", 1, {
+          taskRequests: [
+            new SessionMessage.UserTaskRequest({
+              type: "task-request",
+              id: id("task-request-part"),
+              prompt: "do not send this to provider",
+              description: "review",
+              agent: "reviewer",
+            }),
+          ],
+        }),
+      ]),
+    ).toStrictEqual([])
+  })
+
+  test("ignores mixed user task requests while preserving text and files", async () => {
+    expect(
+      await MessageV2Model.toModelMessages([
+        user("mixed-task-request", 1, {
+          text: "hello",
+          files: [new FileAttachment({ uri: "data:text/plain;base64,aGk=", mime: "text/plain", name: "note.txt" })],
+          taskRequests: [
+            new SessionMessage.UserTaskRequest({
+              type: "task-request",
+              id: id("mixed-task-request-part"),
+              prompt: "do not send this to provider",
+              description: "review",
+              agent: "reviewer",
+            }),
+          ],
+        }),
+      ]),
+    ).toStrictEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "hello" },
+          { type: "file", mediaType: "text/plain", filename: "note.txt", data: "data:text/plain;base64,aGk=" },
+        ],
+      },
+    ])
+  })
+
   test("converts assistant text and reasoning", async () => {
     expect(
       await MessageV2Model.toModelMessages([

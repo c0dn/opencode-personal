@@ -95,6 +95,8 @@ function subtask(messageID: string, id: string): SessionLegacy.SubtaskPart {
     prompt: "check this",
     description: "review",
     agent: "reviewer",
+    model: { providerID, modelID },
+    command: "review-code",
   }
 }
 
@@ -352,10 +354,10 @@ describe("SessionMessageBackfillService contract", () => {
     )
   })
 
-  test("deferred inputs keep v1 marker, skip v2 marker, and return upgrade_pending", async () => {
+  test("user task-request-only session completes and writes v2 marker", async () => {
     const dbPath = await makeDbPath()
-    const entry = user("msg_deferred", 10, "deferred")
-    entry.parts.push(subtask("msg_deferred", "prt_deferred_subtask"))
+    const entry = user("msg_task_request_only", 10, "")
+    entry.parts.push(subtask("msg_task_request_only", "prt_task_request"))
 
     await run(
       dbPath,
@@ -365,12 +367,43 @@ describe("SessionMessageBackfillService contract", () => {
 
         const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
 
-        expect(result.status).toBe("upgrade_pending")
-        if (result.status !== "upgrade_pending") throw new Error("expected upgrade_pending")
+        const rows = yield* readV2Rows()
+        const decoded = rows.map((row) => decodeMessage({ ...row.data, id: row.id, type: row.type }))
+
+        expect(result.status).toBe("completed")
+        if (result.status !== "completed") throw new Error("expected completed")
         expect(result.inserted).toBe(1)
-        expect(statCount(result.stats.skipped, "subtask_schema_missing")).toBe(1)
+        expect(statCount(result.stats.mapped, "user_task_request")).toBe(1)
+        expect(statCount(result.stats.skipped, "subtask_schema_missing")).toBe(0)
+        expect(decoded[0]).toMatchObject({
+          type: "user",
+          text: "",
+          taskRequests: [{ type: "task-request", prompt: "check this", description: "review", agent: "reviewer", command: "review-code" }],
+        })
         expect(yield* markerExists(v1MarkerName)).toBe(true)
-        expect(yield* markerExists(v2MarkerName)).toBe(false)
+        expect(yield* markerExists(v2MarkerName)).toBe(true)
+        assertNoLegacyIDs(rows)
+      }),
+    )
+  })
+
+  test("parentage-unsupported subtask sessions complete and write v2 marker", async () => {
+    const dbPath = await makeDbPath()
+    const entry = assistant("msg_subtask_unsupported", 10, [subtask("msg_subtask_unsupported", "prt_subtask")])
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy([entry])
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+
+        expect(result.status).toBe("completed")
+        if (result.status !== "completed") throw new Error("expected completed")
+        expect(statCount(result.stats.skipped, "subtask_parentage_unsupported")).toBe(1)
+        expect(statCount(result.stats.skipped, "subtask_schema_missing")).toBe(0)
+        expect(yield* markerExists(v2MarkerName)).toBe(true)
       }),
     )
   })
@@ -480,7 +513,7 @@ describe("SessionMessageBackfillService contract", () => {
     )
   })
 
-  test("deferred re-entry skips exact migration rows without duplicate or upsert churn", async () => {
+  test("task request re-entry uses v2 marker without duplicate or upsert churn", async () => {
     const dbPath = await makeDbPath()
     const entry = user("msg_deferred_reentry", 10, "deferred reentry")
     entry.parts.push(subtask("msg_deferred_reentry", "prt_deferred_reentry_subtask"))
@@ -496,20 +529,18 @@ describe("SessionMessageBackfillService contract", () => {
         const second = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
         const rowsAfterSecond = yield* readV2Rows()
 
-        expect(first.status).toBe("upgrade_pending")
-        expect(second.status).toBe("upgrade_pending")
-        if (second.status !== "upgrade_pending") throw new Error("expected upgrade_pending")
-        expect(second.inserted).toBe(0)
-        expect(second.repaired).toBe(0)
+        expect(first.status).toBe("completed")
+        expect(second.status).toBe("already_completed")
+        if (first.status !== "completed") throw new Error("expected completed")
         expect(rowsAfterFirst).toHaveLength(1)
         expect(rowsAfterSecond).toEqual(rowsAfterFirst)
         expect(yield* markerExists(v1MarkerName)).toBe(true)
-        expect(yield* markerExists(v2MarkerName)).toBe(false)
+        expect(yield* markerExists(v2MarkerName)).toBe(true)
       }),
     )
   })
 
-  test("v1 marker with deferred exact rows keeps v1 marker and withholds v2 marker", async () => {
+  test("v1 marker with task-request exact rows writes v2 marker", async () => {
     const dbPath = await makeDbPath()
     const entry = user("msg_v1_deferred_existing", 10, "v1 deferred")
     entry.parts.push(subtask("msg_v1_deferred_existing", "prt_v1_deferred_subtask"))
@@ -525,13 +556,13 @@ describe("SessionMessageBackfillService contract", () => {
         const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
         const rows = yield* readV2Rows()
 
-        expect(result.status).toBe("upgrade_pending")
-        if (result.status !== "upgrade_pending") throw new Error("expected upgrade_pending")
+        expect(result.status).toBe("completed")
+        if (result.status !== "completed") throw new Error("expected completed")
         expect(result.inserted).toBe(0)
         expect(result.repaired).toBe(0)
         expect(rows).toHaveLength(1)
         expect(yield* markerExists(v1MarkerName)).toBe(true)
-        expect(yield* markerExists(v2MarkerName)).toBe(false)
+        expect(yield* markerExists(v2MarkerName)).toBe(true)
       }),
     )
   })

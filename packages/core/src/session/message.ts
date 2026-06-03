@@ -31,12 +31,23 @@ export class ModelSwitched extends Schema.Class<ModelSwitched>("Session.Message.
   model: ModelV2.Ref,
 }) {}
 
+export class UserTaskRequest extends Schema.Class<UserTaskRequest>("Session.Message.User.TaskRequest")({
+  type: Schema.Literal("task-request"),
+  id: ID,
+  prompt: Schema.String,
+  description: Schema.String,
+  agent: Schema.String,
+  model: ModelV2.Ref.pipe(Schema.optional),
+  command: Schema.String.pipe(Schema.optional),
+}) {}
+
 export class User extends Schema.Class<User>("Session.Message.User")({
   ...Base,
   text: Prompt.fields.text,
   files: Prompt.fields.files,
   agents: Prompt.fields.agents,
   references: Prompt.fields.references,
+  taskRequests: UserTaskRequest.pipe(Schema.Array, Schema.optional),
   type: Schema.Literal("user"),
   time: Schema.Struct({
     created: V2Schema.DateTimeUtcFromMillis,
