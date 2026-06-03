@@ -616,6 +616,32 @@ describe("SessionMessageBackfillService contract", () => {
     )
   })
 
+  test("mixed older and equal cutoff aborts without partially backfilling older eligible rows", async () => {
+    const dbPath = await makeDbPath()
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy([user("msg_older_ambiguous", 10, "older eligible"), user("msg_equal_ambiguous", 50, "equal boundary")])
+        yield* seedV2(liveUser("evt_live_equal_ambiguous", 50, "live"))
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+        const rows = yield* readV2Rows()
+
+        expect(result.status).toBe("aborted")
+        if (result.status !== "aborted") throw new Error("expected aborted")
+        expect(result.reason).toBe("mixed_cutoff_ambiguous")
+        expect(statCount(result.stats.skipped, "mixed_cutoff_ambiguous")).toBe(1)
+        expect(yield* markerExists(v1MarkerName)).toBe(false)
+        expect(yield* markerExists(v2MarkerName)).toBe(false)
+        expect(rows).toHaveLength(1)
+        expect(rows[0]?.id).toBe(SessionMessage.ID.make("evt_live_equal_ambiguous"))
+        expect(decodeMessage({ ...rows[0]!.data, id: rows[0]!.id, type: rows[0]!.type })).toEqual(liveUser("evt_live_equal_ambiguous", 50, "live"))
+      }),
+    )
+  })
+
   test("cutoff backfills only older legacy rows and writes marker", async () => {
     const dbPath = await makeDbPath()
     const older = user("msg_older", 10, "older")

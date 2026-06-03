@@ -301,6 +301,85 @@ describe("SessionMessageBackfill", () => {
     result.messages.forEach((message) => assertNoLegacyIDs(encodeMessage(message)))
   })
 
+  test("maps a rich mixed transcript deterministically without leaking legacy IDs", () => {
+    const task = user("msg_rich_task", 10, [
+      text("msg_rich_task", "prt_rich_task_text", "please review"),
+      subtask("msg_rich_task", "prt_rich_task_request", {
+        prompt: "review the generated patch",
+        description: "code review",
+        agent: "reviewer",
+        model: { providerID, modelID },
+        command: "review-code",
+      }),
+    ])
+    const richAssistant = assistant("msg_rich_assistant", 20, [
+      completedTool("msg_rich_assistant", "prt_rich_tool"),
+      stepFinish("msg_rich_assistant", "prt_rich_step_finish", "stop"),
+      patch("msg_rich_assistant", "prt_rich_patch"),
+      retry("msg_rich_assistant", "prt_rich_retry", 2, 19),
+      stepStart("msg_rich_assistant", "prt_rich_step_start"),
+    ])
+    const marker = user("msg_rich_compaction_marker", 30, [compaction("msg_rich_compaction_marker", "prt_rich_compaction", { auto: false, tail_start_id: "msg_rich_task" })])
+    const summary = assistant("msg_rich_compaction_summary", 40, [text("msg_rich_compaction_summary", "prt_rich_summary", "summary of prior work")])
+    if (summary.info.role !== "assistant") throw new Error("expected assistant summary")
+    summary.info.parentID = marker.info.id
+    summary.info.summary = true
+    summary.info.finish = "stop"
+    const entries = [richAssistant, summary, task, marker]
+
+    const first = SessionMessageBackfill.mapLegacyMessages(entries, { sessionID })
+    const repeated = SessionMessageBackfill.mapLegacyMessages(entries, { sessionID })
+    const shuffled = SessionMessageBackfill.mapLegacyMessages([marker, task, summary, richAssistant], { sessionID })
+    const [userMessage, assistantMessage, compactionMessage] = first.messages
+
+    expect(first.messages.map((message) => message.type)).toEqual(["user", "assistant", "compaction"])
+    expect(userMessage?.type).toBe("user")
+    expect(assistantMessage?.type).toBe("assistant")
+    expect(compactionMessage?.type).toBe("compaction")
+    if (userMessage?.type !== "user" || assistantMessage?.type !== "assistant" || compactionMessage?.type !== "compaction") throw new Error("expected mapped user, assistant, and compaction messages")
+
+    expect(userMessage.text).toBe("please review")
+    expect(userMessage.taskRequests).toMatchObject([
+      {
+        type: "task-request",
+        prompt: "review the generated patch",
+        description: "code review",
+        agent: "reviewer",
+        command: "review-code",
+      },
+    ])
+    expect(userMessage.taskRequests?.[0]?.id).toMatch(/^evt_legacy_backfill_c_00000000_00000000_[0-9a-f]{24}$/)
+
+    expect(assistantMessage.snapshot).toEqual({ start: "before", end: "after" })
+    expect(assistantMessage.retries).toHaveLength(1)
+    expect(assistantMessage.retries?.[0]).toMatchObject({ attempt: 2, error: { message: "retry 2", statusCode: 429, isRetryable: true } })
+    expect(DateTime.toEpochMillis(assistantMessage.retries![0]!.time.created)).toBe(19)
+    const patchContent = assistantMessage.content.find((content) => content.type === "patch")
+    expect(patchContent).toEqual({ type: "patch", id: expect.stringMatching(/^evt_legacy_backfill_c_00000001_00000000_[0-9a-f]{24}$/), hash: "abc123", files: ["README.md"] })
+    const toolContent = assistantMessage.content.find((content): content is SessionMessage.AssistantTool => content.type === "tool")
+    expect(toolContent?.state.status).toBe("completed")
+    if (!toolContent || toolContent.state.status !== "completed") throw new Error("expected completed tool")
+    expect(toolContent.state.content).toEqual([
+      { type: "text", text: "done" },
+      { type: "file", uri: "data:image/png;base64,AAAA", mime: "image/png", name: "image.png" },
+    ])
+    expect(toolContent.state.structured).toEqual({ exitCode: 0 })
+
+    expect(compactionMessage).toMatchObject({ reason: "manual", summary: "summary of prior work", include: userMessage.id })
+    expect(statCount(first.stats.mapped, "subtask", "user_task_request")).toBe(1)
+    expect(statCount(first.stats.mapped, "patch", "assistant_patch")).toBe(1)
+    expect(statCount(first.stats.mapped, "retry", "assistant_retry")).toBe(1)
+    expect(statCount(first.stats.mapped, "tool", "assistant_tool_completed")).toBe(1)
+    expect(statCount(first.stats.mapped, "file", "tool_file_content")).toBe(1)
+    expect(statCount(first.stats.mapped, "compaction", "compaction_message")).toBe(1)
+
+    expect(first.messages.map((message) => message.id)).toEqual(repeated.messages.map((message) => message.id))
+    expect(first.messages.map((message) => message.id)).toEqual(shuffled.messages.map((message) => message.id))
+    expect(first.messages.map((message) => encodeMessage(message))).toEqual(repeated.messages.map((message) => encodeMessage(message)))
+    expect(first.messages.map((message) => encodeMessage(message))).toEqual(shuffled.messages.map((message) => encodeMessage(message)))
+    first.messages.forEach((message) => assertNoLegacyIDs(encodeMessage(message)))
+  })
+
   test("maps user text, files, and agents", () => {
     const result = SessionMessageBackfill.mapLegacyMessages(
       [user("msg_user", 1, [text("msg_user", "prt_b", "line 2"), file("msg_user", "prt_c"), agent("msg_user", "prt_d"), text("msg_user", "prt_a", "line 1")])],
