@@ -34,6 +34,7 @@ import { Tool } from "@/tool/tool"
 import { Permission } from "@/permission"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
+import { MessageV2Model } from "./message-v2-model"
 import { Shell } from "@/shell/shell"
 import { ShellID } from "@/tool/shell/id"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
@@ -50,6 +51,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionMessage } from "@opencode-ai/core/session/message"
+import { SessionMessageBackfillService } from "@opencode-ai/core/session/message-backfill-service"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionMailbox } from "@opencode-ai/core/session/mailbox"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -57,13 +60,14 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { AgentAttachment, FileAttachment, Prompt, ReferenceAttachment, Source } from "@opencode-ai/core/session/prompt"
 import { Reference } from "@/reference/reference"
 import * as DateTime from "effect/DateTime"
-import { eq } from "drizzle-orm"
-import { SessionTable } from "@opencode-ai/core/session/sql"
+import { asc, eq } from "drizzle-orm"
+import { SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { referencePromptMetadata, referenceTextPart } from "./prompt/reference"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
 import { BackfillNotReadyError, PromptV2Context } from "./prompt-v2-context"
 import { PromptV2ProviderInput } from "./prompt-v2-provider-input"
+import { PromptV2Title } from "./prompt-v2-title"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -88,6 +92,19 @@ function isOrphanedInterruptedTool(part: SessionLegacy.ToolPart) {
   // cleanup() marks abandoned tool_use blocks this way after retries/aborts.
   // They are not pending work and must not trigger an assistant-prefill request.
   return part.state.status === "error" && part.state.metadata?.interrupted === true
+}
+
+function titleMessageFromCanonical(message: SessionMessage.Message): PromptV2Title.TitleMessage {
+  if (message.type === "user") {
+    return {
+      type: "user",
+      text: message.text,
+      files: message.files?.map((file) => ({ uri: file.uri, mime: file.mime, name: file.name })) ?? [],
+      taskRequests: message.taskRequests?.map((request) => ({ prompt: request.prompt })),
+    }
+  }
+  if (message.type === "synthetic") return { type: "synthetic" }
+  return { type: message.type }
 }
 
 export interface Interface {
@@ -243,26 +260,20 @@ export const layer = Layer.effect(
 
     const title = Effect.fn("SessionPrompt.ensureTitle")(function* (input: {
       session: Session.Info
-      history: SessionLegacy.WithParts[]
+      requestUser: SessionLegacy.User
       providerID: ProviderV2.ID
       modelID: ProviderV2.ModelID
     }) {
-      if (input.session.parentID) return
-      if (!Session.isDefaultTitle(input.session.title)) return
-
-      const real = (m: SessionLegacy.WithParts) =>
-        m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic)
-      const idx = input.history.findIndex(real)
-      if (idx === -1) return
-      if (input.history.filter(real).length !== 1) return
-
-      const context = input.history.slice(0, idx + 1)
-      const firstUser = context[idx]
-      if (!firstUser || firstUser.info.role !== "user") return
-      const firstInfo = firstUser.info
-
-      const subtasks = firstUser.parts.filter((p): p is SessionLegacy.SubtaskPart => p.type === "subtask")
-      const onlySubtasks = subtasks.length > 0 && firstUser.parts.every((p) => p.type === "subtask")
+      const titleInput = yield* readCanonicalTitleMessages(input.session.id)
+      const decision = PromptV2Title.decide({
+        readiness: titleInput.readiness,
+        session: {
+          parentID: input.session.parentID,
+          isDefaultTitle: Session.isDefaultTitle(input.session.title),
+        },
+        messages: titleInput.messages,
+      })
+      if (decision.type === "skip") return
 
       const ag = yield* agents.get("title")
       if (!ag) return
@@ -270,13 +281,11 @@ export const layer = Layer.effect(
         ? yield* provider.getModel(ag.model.providerID, ag.model.modelID)
         : ((yield* provider.getSmallModel(input.providerID)) ??
           (yield* provider.getModel(input.providerID, input.modelID)))
-      const msgs = onlySubtasks
-        ? [{ role: "user" as const, content: subtasks.map((p) => p.prompt).join("\n") }]
-        : yield* MessageV2.toModelMessagesEffect(context, mdl)
+      const msgs = yield* titleSourceToModelMessages(decision.source, input.requestUser, mdl)
       const text = yield* llm
         .stream({
           agent: ag,
-          user: firstInfo,
+          user: input.requestUser,
           system: [],
           small: true,
           tools: {},
@@ -301,6 +310,52 @@ export const layer = Layer.effect(
       yield* sessions
         .setTitle({ sessionID: input.session.id, title: t })
         .pipe(Effect.catchCause((cause) => elog.error("failed to generate title", { error: Cause.squash(cause) })))
+    })
+
+    const readCanonicalTitleMessages = Effect.fnUntraced(function* (sessionID: SessionID) {
+      const backfill = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID).pipe(
+        Effect.provideService(Database.Service, database),
+        Effect.exit,
+      )
+      if (Exit.isFailure(backfill)) {
+        yield* elog.warn("title backfill readiness check failed", { sessionID, error: Cause.pretty(backfill.cause) })
+        return { readiness: PromptV2Title.classifyBackfillTitleFailure(), messages: [] }
+      }
+
+      const readiness = PromptV2Title.classifyBackfillTitleReadiness(backfill.value)
+      if (readiness.status !== "ready") return { readiness, messages: [] }
+
+      const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
+      const rows = yield* db
+        .select()
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.session_id, SessionV2.ID.make(sessionID)))
+        .orderBy(asc(SessionMessageTable.time_created), asc(SessionMessageTable.id))
+        .all()
+        .pipe(Effect.orDie)
+      const canonical = yield* Effect.forEach(
+        rows,
+        (row) => decodeMessage({ ...row.data, id: row.id, type: row.type }).pipe(Effect.orDie),
+        { concurrency: 1 },
+      )
+      return { readiness, messages: canonical.map(titleMessageFromCanonical) }
+    })
+
+    const titleSourceToModelMessages = Effect.fnUntraced(function* (
+      source: PromptV2Title.GenerateSource,
+      requestUser: SessionLegacy.User,
+      model: Provider.Model,
+    ) {
+      const user = new SessionMessage.User({
+        id: SessionMessage.ID.make("evt_prompt_title_ephemeral_user"),
+        type: "user",
+        text: source.text,
+        files: source.files.map((file) => new FileAttachment({ uri: file.uri, mime: file.mime, name: file.name })),
+        agents: [],
+        references: [],
+        time: { created: DateTime.makeUnsafe(requestUser.time.created) },
+      })
+      return yield* Effect.promise(() => MessageV2Model.toModelMessages([user], { model }))
     })
 
     const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {
@@ -1324,7 +1379,7 @@ export const layer = Layer.effect(
               session,
               modelID: lastUser.model.modelID,
               providerID: lastUser.model.providerID,
-              history: msgs,
+              requestUser: lastUser,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
           })
 

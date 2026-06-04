@@ -395,6 +395,21 @@ const gateV2Backfill = Effect.fn("test.gateV2Backfill")(function* (sessionID: Se
   yield* PromptV2Context.messages(sessionID).pipe(Effect.asVoid)
 })
 
+function v2Row(sessionID: SessionID, message: SessionMessage.Message): typeof SessionMessageTable.$inferInsert {
+  const { id, type, ...data } = encodeSessionMessage(message)
+  return {
+    id: SessionMessage.ID.make(id),
+    session_id: SessionV2.ID.make(sessionID),
+    type,
+    time_created: DateTime.toEpochMillis(message.time.created),
+    data,
+  }
+}
+
+function titleRequest(input: readonly Record<string, unknown>[]) {
+  return input.find((body) => JSON.stringify(body).includes("Generate a title for this conversation"))
+}
+
 const user = Effect.fn("test.user")(function* (sessionID: SessionID, text: string, input?: { pregate?: boolean }) {
   if (input?.pregate !== false) yield* gateV2Backfill(sessionID)
   const session = yield* Session.Service
@@ -531,6 +546,225 @@ transformCounting.instance(
       expect(promptV2Marker).toBeUndefined()
     }),
   { config: cfg },
+)
+
+it.instance("production default-title path sets title from canonical v2 first user", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({})
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "canonical first title source" }],
+    })
+    yield* llm.text("assistant response")
+
+    yield* prompt.loop({ sessionID: chat.id })
+    yield* llm.wait(2)
+    yield* pollWithTimeout(
+      Effect.gen(function* () {
+        return (yield* sessions.get(chat.id)).title === "E2E Title" ? true : undefined
+      }),
+      "title was not generated",
+    )
+
+    const request = titleRequest(yield* llm.inputs)
+    expect(request).toBeDefined()
+    expect(JSON.stringify(request)).toContain("canonical first title source")
+  }),
+)
+
+it.instance("title source reads full canonical history before a compaction anchor", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const { db } = yield* Database.Service
+    const chat = yield* sessions.create({})
+
+    const first = yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "first before compaction anchor" }],
+    })
+    yield* db
+      .insert(SessionMessageTable)
+      .values(
+        v2Row(
+          chat.id,
+          new SessionMessage.Compaction({
+            id: SessionMessage.ID.make("evt_prompt_title_compaction_anchor"),
+            type: "compaction",
+            reason: "manual",
+            summary: "old summary",
+            include: SessionMessage.ID.make("evt_prompt_title_compaction_include"),
+            time: { created: DateTime.makeUnsafe(first.info.time.created + 1) },
+          }),
+        ),
+      )
+      .run()
+    yield* pollWithTimeout(
+      Effect.sync(() => (Date.now() > first.info.time.created + 1 ? true : undefined)),
+      "clock did not advance past compaction anchor",
+    )
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "second after compaction anchor" }],
+    })
+    yield* llm.text("assistant response")
+
+    yield* prompt.loop({ sessionID: chat.id })
+    yield* llm.wait(2)
+
+    const requestText = JSON.stringify(titleRequest(yield* llm.inputs))
+    expect(requestText).toContain("first before compaction anchor")
+    expect(requestText).not.toContain("second after compaction anchor")
+  }),
+)
+
+it.instance("ambiguous title readiness skips title LLM and title mutation", () =>
+  Effect.gen(function* () {
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const { db } = yield* Database.Service
+    const { llm } = yield* useServerConfig(providerCfg)
+    const chat = yield* sessions.create({})
+    const initialTitle = chat.title
+    const msg = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "user",
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      time: { created: Date.now() },
+    })
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: msg.id,
+      sessionID: chat.id,
+      type: "subtask",
+      prompt: "do not title this ambiguous source",
+      description: "ambiguous",
+      agent: "missing-title-agent",
+    })
+    yield* db.insert(DataMigrationTable).values({ name: `legacy-session-message-backfill/v1/${chat.id}`, time_completed: Date.now() }).run()
+    yield* db
+      .insert(SessionMessageTable)
+      .values(
+        v2Row(
+          chat.id,
+          new SessionMessage.User({
+            id: SessionMessage.ID.make("evt_prompt_title_equal_boundary"),
+            type: "user",
+            text: "equal boundary",
+            files: [],
+            agents: [],
+            references: [],
+            time: { created: DateTime.makeUnsafe(msg.time.created) },
+          }),
+        ),
+      )
+      .run()
+
+    const exit = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.exit)
+
+    expect(Exit.isFailure(exit)).toBe(true)
+    expect(yield* llm.calls).toBe(0)
+    expect((yield* sessions.get(chat.id)).title).toBe(initialTitle)
+  }),
+)
+
+it.instance("taskRequests-only canonical title source uses joined prompts", () =>
+  Effect.gen(function* () {
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const { db } = yield* Database.Service
+    const { llm } = yield* useServerConfig(providerCfg)
+    const chat = yield* sessions.create({})
+    yield* gateV2Backfill(chat.id)
+    const msg = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "user",
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      time: { created: Date.now() },
+    })
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: msg.id,
+      sessionID: chat.id,
+      type: "subtask",
+      prompt: "audit the runtime cache",
+      description: "audit",
+      agent: "missing-title-agent",
+    })
+    yield* db
+      .insert(SessionMessageTable)
+      .values(
+        v2Row(
+          chat.id,
+          new SessionMessage.User({
+            id: SessionMessage.ID.make("evt_prompt_title_task_requests_user"),
+            type: "user",
+            text: "",
+            files: [],
+            agents: [],
+            references: [],
+            taskRequests: [
+              new SessionMessage.UserTaskRequest({
+                id: SessionMessage.ID.make("evt_prompt_title_task_request_a"),
+                type: "task-request",
+                prompt: "audit the runtime cache",
+                description: "audit",
+                agent: "build",
+              }),
+              new SessionMessage.UserTaskRequest({
+                id: SessionMessage.ID.make("evt_prompt_title_task_request_b"),
+                type: "task-request",
+                prompt: "summarize the cache risk",
+                description: "summary",
+                agent: "build",
+              }),
+            ],
+            time: { created: DateTime.makeUnsafe(msg.time.created) },
+          }),
+        ),
+      )
+      .run()
+
+    const exit = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.exit)
+    yield* llm.wait(1)
+
+    expect(Exit.isFailure(exit)).toBe(true)
+    expect(yield* llm.calls).toBe(1)
+    const requestText = JSON.stringify(titleRequest(yield* llm.inputs))
+    expect(requestText).toContain("audit the runtime cache\\nsummarize the cache risk")
+  }),
+)
+
+it.instance("non-default titles skip title LLM", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+
+    yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: "hello" }] })
+    yield* llm.text("assistant response")
+    yield* prompt.loop({ sessionID: chat.id })
+
+    expect(yield* llm.calls).toBe(1)
+    expect(titleRequest(yield* llm.inputs)).toBeUndefined()
+    expect((yield* sessions.get(chat.id)).title).toBe("Pinned")
+  }),
 )
 
 transformCounting.instance("normal assistant skips legacy message transform hook", () =>
