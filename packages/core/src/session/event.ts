@@ -45,6 +45,10 @@ const options = {
   },
 } as const
 
+const liveOnlyOptions = {
+  legacySync: [options.sync],
+} as const
+
 const mailboxOptions = {
   sync: {
     aggregate: "sessionID",
@@ -372,7 +376,7 @@ export namespace Text {
 
   export const Delta = EventV2.define({
     type: "session.next.text.delta",
-    ...options,
+    ...liveOnlyOptions,
     schema: {
       ...Base,
       delta: Schema.String,
@@ -404,7 +408,7 @@ export namespace Reasoning {
 
   export const Delta = EventV2.define({
     type: "session.next.reasoning.delta",
-    ...options,
+    ...liveOnlyOptions,
     schema: {
       ...Base,
       reasoningID: Schema.String,
@@ -441,7 +445,7 @@ export namespace Tool {
 
     export const Delta = EventV2.define({
       type: "session.next.tool.input.delta",
-      ...options,
+      ...liveOnlyOptions,
       schema: {
         ...Base,
         callID: Schema.String,
@@ -479,7 +483,7 @@ export namespace Tool {
 
   export const Progress = EventV2.define({
     type: "session.next.tool.progress",
-    ...options,
+    ...liveOnlyOptions,
     schema: {
       ...Base,
       callID: Schema.String,
@@ -554,7 +558,7 @@ export namespace Compaction {
 
   export const Delta = EventV2.define({
     type: "session.next.compaction.delta",
-    ...options,
+    ...liveOnlyOptions,
     schema: {
       ...Base,
       text: Schema.String,
@@ -574,39 +578,41 @@ export namespace Compaction {
   export type Ended = typeof Ended.Type
 }
 
-export const All = Schema.Union(
-  [
-    AgentSwitched,
-    ModelSwitched,
-    Prompted,
-    Synthetic,
-    Shell.Started,
-    Shell.Ended,
-    Step.Started,
-    Step.Ended,
-    Step.Failed,
-    Text.Started,
-    Text.Delta,
-    Text.Ended,
-    Tool.Input.Started,
-    Tool.Input.Delta,
-    Tool.Input.Ended,
-    Tool.Called,
-    Tool.Progress,
-    Tool.Success,
-    Tool.Failed,
-    Reasoning.Started,
-    Reasoning.Delta,
-    Reasoning.Ended,
-    Retried,
-    Compaction.Started,
-    Compaction.Delta,
-    Compaction.Ended,
-  ],
-  {
-    mode: "oneOf",
-  },
-).pipe(Schema.toTaggedUnion("type"))
+const DurableDefinitions = [
+  AgentSwitched,
+  ModelSwitched,
+  Prompted,
+  Synthetic,
+  Shell.Started,
+  Shell.Ended,
+  Step.Started,
+  Step.Ended,
+  Step.Failed,
+  Text.Started,
+  Text.Ended,
+  Reasoning.Started,
+  Reasoning.Ended,
+  Tool.Input.Started,
+  Tool.Input.Ended,
+  Tool.Called,
+  Tool.Success,
+  Tool.Failed,
+  Retried,
+  Compaction.Started,
+  Compaction.Ended,
+] as const
+
+const EphemeralDefinitions = [Text.Delta, Reasoning.Delta, Tool.Input.Delta, Tool.Progress, Compaction.Delta] as const
+
+export const Durable = Schema.Union(DurableDefinitions, { mode: "oneOf" }).pipe(Schema.toTaggedUnion("type"))
+export type Durable = typeof Durable.Type
+
+export const Ephemeral = Schema.Union(EphemeralDefinitions, { mode: "oneOf" }).pipe(Schema.toTaggedUnion("type"))
+export type Ephemeral = typeof Ephemeral.Type
+
+export const All = Schema.Union([...DurableDefinitions, ...EphemeralDefinitions], { mode: "oneOf" }).pipe(
+  Schema.toTaggedUnion("type"),
+)
 export type Event = typeof All.Type
 export type Type = Event["type"]
 

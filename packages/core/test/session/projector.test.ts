@@ -387,7 +387,8 @@ describe("SessionProjector", () => {
       sourceDb,
       Effect.gen(function* () {
         yield* seedSession()
-        return (yield* publishTranscript()).map(serialized)
+        yield* publishTranscript()
+        return (yield* dbEvents()).map(serializedEventRow)
       }),
     )
 

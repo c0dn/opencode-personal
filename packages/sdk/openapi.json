@@ -15538,16 +15538,10 @@
                 "$ref": "#/components/schemas/SyncEventSessionNextTextStarted"
               },
               {
-                "$ref": "#/components/schemas/SyncEventSessionNextTextDelta"
-              },
-              {
                 "$ref": "#/components/schemas/SyncEventSessionNextTextEnded"
               },
               {
                 "$ref": "#/components/schemas/SyncEventSessionNextReasoningStarted"
-              },
-              {
-                "$ref": "#/components/schemas/SyncEventSessionNextReasoningDelta"
               },
               {
                 "$ref": "#/components/schemas/SyncEventSessionNextReasoningEnded"
@@ -15556,16 +15550,10 @@
                 "$ref": "#/components/schemas/SyncEventSessionNextToolInputStarted"
               },
               {
-                "$ref": "#/components/schemas/SyncEventSessionNextToolInputDelta"
-              },
-              {
                 "$ref": "#/components/schemas/SyncEventSessionNextToolInputEnded"
               },
               {
                 "$ref": "#/components/schemas/SyncEventSessionNextToolCalled"
-              },
-              {
-                "$ref": "#/components/schemas/SyncEventSessionNextToolProgress"
               },
               {
                 "$ref": "#/components/schemas/SyncEventSessionNextToolSuccess"
@@ -15578,9 +15566,6 @@
               },
               {
                 "$ref": "#/components/schemas/SyncEventSessionNextCompactionStarted"
-              },
-              {
-                "$ref": "#/components/schemas/SyncEventSessionNextCompactionDelta"
               },
               {
                 "$ref": "#/components/schemas/SyncEventSessionNextCompactionEnded"
@@ -20613,48 +20598,6 @@
         "required": ["type", "name", "id", "seq", "aggregateID", "data"],
         "additionalProperties": false
       },
-      "SyncEventSessionNextTextDelta": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["sync"]
-          },
-          "name": {
-            "type": "string",
-            "enum": ["session.next.text.delta.1"]
-          },
-          "id": {
-            "type": "string"
-          },
-          "seq": {
-            "type": "number"
-          },
-          "aggregateID": {
-            "type": "string",
-            "enum": ["sessionID"]
-          },
-          "data": {
-            "type": "object",
-            "properties": {
-              "timestamp": {
-                "type": "number"
-              },
-              "sessionID": {
-                "type": "string",
-                "pattern": "^ses"
-              },
-              "delta": {
-                "type": "string"
-              }
-            },
-            "required": ["timestamp", "sessionID", "delta"],
-            "additionalProperties": false
-          }
-        },
-        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
-        "additionalProperties": false
-      },
       "SyncEventSessionNextTextEnded": {
         "type": "object",
         "properties": {
@@ -20733,51 +20676,6 @@
               }
             },
             "required": ["timestamp", "sessionID", "reasoningID"],
-            "additionalProperties": false
-          }
-        },
-        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
-        "additionalProperties": false
-      },
-      "SyncEventSessionNextReasoningDelta": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["sync"]
-          },
-          "name": {
-            "type": "string",
-            "enum": ["session.next.reasoning.delta.1"]
-          },
-          "id": {
-            "type": "string"
-          },
-          "seq": {
-            "type": "number"
-          },
-          "aggregateID": {
-            "type": "string",
-            "enum": ["sessionID"]
-          },
-          "data": {
-            "type": "object",
-            "properties": {
-              "timestamp": {
-                "type": "number"
-              },
-              "sessionID": {
-                "type": "string",
-                "pattern": "^ses"
-              },
-              "reasoningID": {
-                "type": "string"
-              },
-              "delta": {
-                "type": "string"
-              }
-            },
-            "required": ["timestamp", "sessionID", "reasoningID", "delta"],
             "additionalProperties": false
           }
         },
@@ -20871,51 +20769,6 @@
               }
             },
             "required": ["timestamp", "sessionID", "callID", "name"],
-            "additionalProperties": false
-          }
-        },
-        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
-        "additionalProperties": false
-      },
-      "SyncEventSessionNextToolInputDelta": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["sync"]
-          },
-          "name": {
-            "type": "string",
-            "enum": ["session.next.tool.input.delta.1"]
-          },
-          "id": {
-            "type": "string"
-          },
-          "seq": {
-            "type": "number"
-          },
-          "aggregateID": {
-            "type": "string",
-            "enum": ["sessionID"]
-          },
-          "data": {
-            "type": "object",
-            "properties": {
-              "timestamp": {
-                "type": "number"
-              },
-              "sessionID": {
-                "type": "string",
-                "pattern": "^ses"
-              },
-              "callID": {
-                "type": "string"
-              },
-              "delta": {
-                "type": "string"
-              }
-            },
-            "required": ["timestamp", "sessionID", "callID", "delta"],
             "additionalProperties": false
           }
         },
@@ -21028,64 +20881,6 @@
               }
             },
             "required": ["timestamp", "sessionID", "callID", "tool", "input", "provider"],
-            "additionalProperties": false
-          }
-        },
-        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
-        "additionalProperties": false
-      },
-      "SyncEventSessionNextToolProgress": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["sync"]
-          },
-          "name": {
-            "type": "string",
-            "enum": ["session.next.tool.progress.1"]
-          },
-          "id": {
-            "type": "string"
-          },
-          "seq": {
-            "type": "number"
-          },
-          "aggregateID": {
-            "type": "string",
-            "enum": ["sessionID"]
-          },
-          "data": {
-            "type": "object",
-            "properties": {
-              "timestamp": {
-                "type": "number"
-              },
-              "sessionID": {
-                "type": "string",
-                "pattern": "^ses"
-              },
-              "callID": {
-                "type": "string"
-              },
-              "structured": {
-                "type": "object"
-              },
-              "content": {
-                "type": "array",
-                "items": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/ToolTextContent"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ToolFileContent"
-                    }
-                  ]
-                }
-              }
-            },
-            "required": ["timestamp", "sessionID", "callID", "structured", "content"],
             "additionalProperties": false
           }
         },
@@ -21318,48 +21113,6 @@
               }
             },
             "required": ["timestamp", "sessionID", "reason"],
-            "additionalProperties": false
-          }
-        },
-        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
-        "additionalProperties": false
-      },
-      "SyncEventSessionNextCompactionDelta": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["sync"]
-          },
-          "name": {
-            "type": "string",
-            "enum": ["session.next.compaction.delta.1"]
-          },
-          "id": {
-            "type": "string"
-          },
-          "seq": {
-            "type": "number"
-          },
-          "aggregateID": {
-            "type": "string",
-            "enum": ["sessionID"]
-          },
-          "data": {
-            "type": "object",
-            "properties": {
-              "timestamp": {
-                "type": "number"
-              },
-              "sessionID": {
-                "type": "string",
-                "pattern": "^ses"
-              },
-              "text": {
-                "type": "string"
-              }
-            },
-            "required": ["timestamp", "sessionID", "text"],
             "additionalProperties": false
           }
         },

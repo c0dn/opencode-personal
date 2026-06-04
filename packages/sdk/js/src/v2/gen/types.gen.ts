@@ -1604,21 +1604,16 @@ export type GlobalEvent = {
     | SyncEventSessionNextStepEnded
     | SyncEventSessionNextStepFailed
     | SyncEventSessionNextTextStarted
-    | SyncEventSessionNextTextDelta
     | SyncEventSessionNextTextEnded
     | SyncEventSessionNextReasoningStarted
-    | SyncEventSessionNextReasoningDelta
     | SyncEventSessionNextReasoningEnded
     | SyncEventSessionNextToolInputStarted
-    | SyncEventSessionNextToolInputDelta
     | SyncEventSessionNextToolInputEnded
     | SyncEventSessionNextToolCalled
-    | SyncEventSessionNextToolProgress
     | SyncEventSessionNextToolSuccess
     | SyncEventSessionNextToolFailed
     | SyncEventSessionNextRetried
     | SyncEventSessionNextCompactionStarted
-    | SyncEventSessionNextCompactionDelta
     | SyncEventSessionNextCompactionEnded
     | SyncEventSessionCreated
     | SyncEventSessionUpdated
@@ -3356,19 +3351,6 @@ export type SyncEventSessionNextTextStarted = {
   }
 }
 
-export type SyncEventSessionNextTextDelta = {
-  type: "sync"
-  name: "session.next.text.delta.1"
-  id: string
-  seq: number
-  aggregateID: "sessionID"
-  data: {
-    timestamp: number
-    sessionID: string
-    delta: string
-  }
-}
-
 export type SyncEventSessionNextTextEnded = {
   type: "sync"
   name: "session.next.text.ended.1"
@@ -3392,20 +3374,6 @@ export type SyncEventSessionNextReasoningStarted = {
     timestamp: number
     sessionID: string
     reasoningID: string
-  }
-}
-
-export type SyncEventSessionNextReasoningDelta = {
-  type: "sync"
-  name: "session.next.reasoning.delta.1"
-  id: string
-  seq: number
-  aggregateID: "sessionID"
-  data: {
-    timestamp: number
-    sessionID: string
-    reasoningID: string
-    delta: string
   }
 }
 
@@ -3435,20 +3403,6 @@ export type SyncEventSessionNextToolInputStarted = {
     assistantMessageID?: string
     callID: string
     name: string
-  }
-}
-
-export type SyncEventSessionNextToolInputDelta = {
-  type: "sync"
-  name: "session.next.tool.input.delta.1"
-  id: string
-  seq: number
-  aggregateID: "sessionID"
-  data: {
-    timestamp: number
-    sessionID: string
-    callID: string
-    delta: string
   }
 }
 
@@ -3488,23 +3442,6 @@ export type SyncEventSessionNextToolCalled = {
         [key: string]: unknown
       }
     }
-  }
-}
-
-export type SyncEventSessionNextToolProgress = {
-  type: "sync"
-  name: "session.next.tool.progress.1"
-  id: string
-  seq: number
-  aggregateID: "sessionID"
-  data: {
-    timestamp: number
-    sessionID: string
-    callID: string
-    structured: {
-      [key: string]: unknown
-    }
-    content: Array<ToolTextContent | ToolFileContent>
   }
 }
 
@@ -3584,19 +3521,6 @@ export type SyncEventSessionNextCompactionStarted = {
     timestamp: number
     sessionID: string
     reason: "auto" | "manual"
-  }
-}
-
-export type SyncEventSessionNextCompactionDelta = {
-  type: "sync"
-  name: "session.next.compaction.delta.1"
-  id: string
-  seq: number
-  aggregateID: "sessionID"
-  data: {
-    timestamp: number
-    sessionID: string
-    text: string
   }
 }
 

@@ -14,12 +14,15 @@ export const ID = Schema.String.pipe(
 )
 export type ID = typeof ID.Type
 
+export type SyncDefinition = {
+  readonly version: number
+  readonly aggregate: string
+}
+
 export type Definition<Type extends string = string, DataSchema extends Schema.Top = Schema.Top> = {
   readonly type: Type
-  readonly sync?: {
-    readonly version: number
-    readonly aggregate: string
-  }
+  readonly sync?: SyncDefinition
+  readonly legacySync?: readonly SyncDefinition[]
   readonly data: DataSchema
 }
 
@@ -72,7 +75,14 @@ export function versionedType(type: string, version: number) {
 }
 
 export const registry = new Map<string, Definition>()
-const syncRegistry = new Map<string, Definition & { readonly sync: NonNullable<Definition["sync"]> }>()
+type SyncRegistration = Definition & { readonly sync: SyncDefinition; readonly replayOnly?: boolean }
+const syncRegistry = new Map<string, SyncRegistration>()
+
+function registerSyncDefinition(definition: SyncRegistration) {
+  const versioned = versionedType(definition.type, definition.sync.version)
+  if (syncRegistry.has(versioned)) throw new DuplicateEventDefinitionError(versioned)
+  syncRegistry.set(versioned, definition)
+}
 
 function registerDefinition(definition: Definition) {
   const sync = definition.sync
@@ -80,25 +90,26 @@ function registerDefinition(definition: Definition) {
   if (sync === undefined) {
     if (registry.has(definition.type)) throw new DuplicateEventDefinitionError(definition.type)
     registry.set(definition.type, definition)
+    for (const legacySync of definition.legacySync ?? []) {
+      registerSyncDefinition({ ...definition, sync: legacySync, replayOnly: true })
+    }
     return
   }
-
-  const versioned = versionedType(definition.type, sync.version)
-  if (syncRegistry.has(versioned)) throw new DuplicateEventDefinitionError(versioned)
 
   const existing = registry.get(definition.type)
   const existingSync = existing?.sync
   if (existing !== undefined && existingSync === undefined) throw new DuplicateEventDefinitionError(definition.type)
   if (existingSync === undefined || sync.version >= existingSync.version) registry.set(definition.type, definition)
-  syncRegistry.set(versioned, definition as Definition & { readonly sync: NonNullable<Definition["sync"]> })
+  registerSyncDefinition(definition as SyncRegistration)
+  for (const legacySync of definition.legacySync ?? []) {
+    registerSyncDefinition({ ...definition, sync: legacySync, replayOnly: true })
+  }
 }
 
 export function define<const Type extends string, Fields extends Schema.Struct.Fields>(input: {
   readonly type: Type
-  readonly sync?: {
-    readonly version: number
-    readonly aggregate: string
-  }
+  readonly sync?: SyncDefinition
+  readonly legacySync?: readonly SyncDefinition[]
   readonly schema: Fields
 }): Schema.Schema<Payload<Definition<Type, Schema.Struct<Fields>>>> & Definition<Type, Schema.Struct<Fields>> {
   const Data = Schema.Struct(input.schema)
@@ -114,6 +125,7 @@ export function define<const Type extends string, Fields extends Schema.Struct.F
   const definition = Object.assign(Payload, {
     type: input.type,
     ...(input.sync === undefined ? {} : { sync: input.sync }),
+    ...(input.legacySync === undefined ? {} : { legacySync: input.legacySync }),
     data: Data,
   })
   registerDefinition(definition)
@@ -239,7 +251,7 @@ export const layer = Layer.effect(
     function commitSyncEvent(
       event: Payload,
       input?: { readonly seq: number; readonly aggregateID: string; readonly ownerID?: string },
-      resolvedDefinition?: Definition & { readonly sync: NonNullable<Definition["sync"]> },
+      resolvedDefinition?: SyncRegistration,
     ) {
       return Effect.gen(function* () {
         const definition = resolvedDefinition ?? registry.get(event.type)
@@ -285,8 +297,10 @@ export const layer = Layer.effect(
                         }),
                       )
                     }
-                    for (const projector of list) {
-                      yield* projector(event as Payload)
+                    if (!resolvedDefinition?.replayOnly) {
+                      for (const projector of list) {
+                        yield* projector(event as Payload)
+                      }
                     }
                     yield* db
                       .insert(EventSequenceTable)

@@ -1,9 +1,11 @@
 import { describe, expect } from "bun:test"
-import { Effect, Fiber, Layer, Schema, Stream } from "effect"
+import { DateTime, Effect, Fiber, Layer, Schema, Stream } from "effect"
 import { EventV2 } from "@opencode-ai/core/event"
 import { Database } from "@opencode-ai/core/database/database"
 import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
 import { Location } from "@opencode-ai/core/location"
+import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionSchema } from "@opencode-ai/core/session/schema"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { eq } from "drizzle-orm"
 import { location } from "./fixture/location"
@@ -86,6 +88,15 @@ EventV2.define({
     version: 1,
     aggregate: "id",
   },
+  schema: {
+    id: Schema.String,
+    text: Schema.String,
+  },
+})
+
+const LegacyReplayOnlyMessage = EventV2.define({
+  type: "test.legacy-replay-only",
+  legacySync: [{ version: 1, aggregate: "id" }],
   schema: {
     id: Schema.String,
     text: Schema.String,
@@ -255,6 +266,48 @@ describe("EventV2", () => {
     }),
   )
 
+  it.effect("does not insert sync rows when publishing replay-only legacy definitions", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const aggregateID = EventV2.ID.create()
+
+      const event = yield* events.publish(LegacyReplayOnlyMessage, { id: aggregateID, text: "live" })
+      const rows = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, aggregateID))
+        .all()
+        .pipe(Effect.orDie)
+
+      expect(event).not.toHaveProperty("version")
+      expect(rows).toHaveLength(0)
+    }),
+  )
+
+  it.effect("does not persist live-only session delta publishes", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const sessionID = SessionSchema.ID.make("ses_live_only_delta")
+
+      const event = yield* events.publish(SessionEvent.Text.Delta, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(1234),
+        delta: "partial",
+      })
+      const rows = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, sessionID))
+        .all()
+        .pipe(Effect.orDie)
+
+      expect(event).not.toHaveProperty("version")
+      expect(rows).toHaveLength(0)
+    }),
+  )
+
   it.effect("increments sync event seq per aggregate", () =>
     Effect.gen(function* () {
       const events = yield* EventV2.Service
@@ -365,6 +418,114 @@ describe("EventV2", () => {
       expect(rows).toHaveLength(1)
       expect(rows[0]?.type).toBe(EventV2.versionedType("test.replay-versioned", 1))
       expect(rows[0]?.data).toEqual({ id: aggregateID, text: "legacy" })
+    }),
+  )
+
+  it.effect("replay accepts legacy sync rows for current live-only definitions", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const aggregateID = EventV2.ID.create()
+      const received = new Array<EventV2.Payload>()
+      yield* events.project(LegacyReplayOnlyMessage, (event) =>
+        Effect.sync(() => {
+          received.push(event)
+        }),
+      )
+
+      yield* events.replay({
+        id: EventV2.ID.create(),
+        type: EventV2.versionedType(LegacyReplayOnlyMessage.type, 1),
+        seq: 0,
+        aggregateID,
+        data: { id: aggregateID, text: "legacy" },
+      })
+      const rows = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, aggregateID))
+        .all()
+        .pipe(Effect.orDie)
+      const sequence = yield* db
+        .select({ seq: EventSequenceTable.seq })
+        .from(EventSequenceTable)
+        .where(eq(EventSequenceTable.aggregate_id, aggregateID))
+        .get()
+        .pipe(Effect.orDie)
+
+      expect(rows).toHaveLength(1)
+      expect(rows[0]?.type).toBe(EventV2.versionedType(LegacyReplayOnlyMessage.type, 1))
+      expect(sequence).toEqual({ seq: 0 })
+      expect(received).toHaveLength(0)
+    }),
+  )
+
+  it.effect("replay accepts historical session live-only rows without projectors and preserves sequence", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2.Service
+      const { db } = yield* Database.Service
+      const sessionID = SessionSchema.ID.make("ses_legacy_live_only")
+
+      yield* events.replayAll([
+        {
+          id: EventV2.ID.create(),
+          type: EventV2.versionedType(SessionEvent.Text.Delta.type, 1),
+          seq: 0,
+          aggregateID: sessionID,
+          data: { sessionID, timestamp: 1, delta: "text" },
+        },
+        {
+          id: EventV2.ID.create(),
+          type: EventV2.versionedType(SessionEvent.Reasoning.Delta.type, 1),
+          seq: 1,
+          aggregateID: sessionID,
+          data: { sessionID, timestamp: 2, reasoningID: "rsn_1", delta: "reasoning" },
+        },
+        {
+          id: EventV2.ID.create(),
+          type: EventV2.versionedType(SessionEvent.Tool.Input.Delta.type, 1),
+          seq: 2,
+          aggregateID: sessionID,
+          data: { sessionID, timestamp: 3, callID: "call_1", delta: "input" },
+        },
+        {
+          id: EventV2.ID.create(),
+          type: EventV2.versionedType(SessionEvent.Compaction.Delta.type, 1),
+          seq: 3,
+          aggregateID: sessionID,
+          data: { sessionID, timestamp: 4, text: "summary partial" },
+        },
+        {
+          id: EventV2.ID.create(),
+          type: EventV2.versionedType(SessionEvent.Tool.Progress.type, 1),
+          seq: 4,
+          aggregateID: sessionID,
+          data: { sessionID, timestamp: 5, callID: "call_1", structured: {}, content: [] },
+        },
+      ])
+      const rows = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, sessionID))
+        .all()
+        .pipe(Effect.orDie)
+      const sequence = yield* db
+        .select({ seq: EventSequenceTable.seq })
+        .from(EventSequenceTable)
+        .where(eq(EventSequenceTable.aggregate_id, sessionID))
+        .get()
+        .pipe(Effect.orDie)
+      const ordered = rows.toSorted((left, right) => left.seq - right.seq)
+
+      expect(ordered.map((row) => row.seq)).toEqual([0, 1, 2, 3, 4])
+      expect(ordered.map((row) => row.type)).toEqual([
+        EventV2.versionedType(SessionEvent.Text.Delta.type, 1),
+        EventV2.versionedType(SessionEvent.Reasoning.Delta.type, 1),
+        EventV2.versionedType(SessionEvent.Tool.Input.Delta.type, 1),
+        EventV2.versionedType(SessionEvent.Compaction.Delta.type, 1),
+        EventV2.versionedType(SessionEvent.Tool.Progress.type, 1),
+      ])
+      expect(sequence).toEqual({ seq: 4 })
     }),
   )
 

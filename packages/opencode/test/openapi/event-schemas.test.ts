@@ -4,6 +4,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { DateTime, Schema } from "effect"
+import { OpenApi } from "effect/unstable/httpapi"
 import { OpenCodeHttpApi } from "../../src/server/routes/instance/httpapi/api"
 
 const requiredEventTypes = [
@@ -14,12 +15,23 @@ const requiredEventTypes = [
   "session.next.compaction.ended",
 ] as const
 
+const liveOnlyEventTypes = [
+  "session.next.text.delta",
+  "session.next.reasoning.delta",
+  "session.next.tool.input.delta",
+  "session.next.tool.progress",
+  "session.next.compaction.delta",
+] as const
+
 describe("OpenAPI EventV2 schemas", () => {
   test("snapshots EventV2 registry after HTTP API imports register event producers", () => {
     expect(OpenCodeHttpApi).toBeDefined()
 
     for (const type of requiredEventTypes) {
-      expect(EventV2.registry.get(type), `${type} should be present in the exported event schema registry`).toBeDefined()
+      expect(
+        EventV2.registry.get(type),
+        `${type} should be present in the exported event schema registry`,
+      ).toBeDefined()
     }
 
     const registryOrder = EventV2.definitions().map((definition) => definition.type)
@@ -29,35 +41,46 @@ describe("OpenAPI EventV2 schemas", () => {
     expect(requiredIndexes).toEqual([...requiredIndexes].sort((a, b) => a - b))
   })
 
+  test("keeps live-only events in global schemas but removes generated sync variants", () => {
+    const spec = JSON.stringify(OpenApi.fromApi(OpenCodeHttpApi))
+
+    for (const type of liveOnlyEventTypes) {
+      expect(spec, `${type} should remain available as a live event schema`).toContain(type)
+      expect(spec, `${type} should not expose a current SyncEvent variant`).not.toContain(`${type}.1`)
+    }
+  })
+
   test("keeps assistant message content as typed content entries with canonical evt ids", () => {
-    const encoded = Schema.encodeUnknownSync(SessionMessage.Message)(new SessionMessage.Assistant({
-      id: EventV2.ID.make("evt_assistant"),
-      type: "assistant",
-      agent: "general",
-      model: {
-        providerID: ProviderV2.ID.make("anthropic"),
-        id: ModelV2.ID.make("claude"),
-        variant: ModelV2.VariantID.make("default"),
-      },
-      content: [
-        new SessionMessage.AssistantText({ type: "text", id: EventV2.ID.make("evt_text"), text: "hello" }),
-        new SessionMessage.AssistantReasoning({
-          type: "reasoning",
-          id: EventV2.ID.make("evt_reasoning"),
-          reasoningID: "rsn_1",
-          text: "thinking",
-        }),
-        new SessionMessage.AssistantTool({
-          type: "tool",
-          id: EventV2.ID.make("evt_tool"),
-          callID: "call_1",
-          name: "read",
-          state: new SessionMessage.ToolStatePending({ status: "pending", input: "{}" }),
-          time: { created: DateTime.makeUnsafe(1234) },
-        }),
-      ],
-      time: { created: DateTime.makeUnsafe(1234) },
-    })) as Record<string, unknown>
+    const encoded = Schema.encodeUnknownSync(SessionMessage.Message)(
+      new SessionMessage.Assistant({
+        id: EventV2.ID.make("evt_assistant"),
+        type: "assistant",
+        agent: "general",
+        model: {
+          providerID: ProviderV2.ID.make("anthropic"),
+          id: ModelV2.ID.make("claude"),
+          variant: ModelV2.VariantID.make("default"),
+        },
+        content: [
+          new SessionMessage.AssistantText({ type: "text", id: EventV2.ID.make("evt_text"), text: "hello" }),
+          new SessionMessage.AssistantReasoning({
+            type: "reasoning",
+            id: EventV2.ID.make("evt_reasoning"),
+            reasoningID: "rsn_1",
+            text: "thinking",
+          }),
+          new SessionMessage.AssistantTool({
+            type: "tool",
+            id: EventV2.ID.make("evt_tool"),
+            callID: "call_1",
+            name: "read",
+            state: new SessionMessage.ToolStatePending({ status: "pending", input: "{}" }),
+            time: { created: DateTime.makeUnsafe(1234) },
+          }),
+        ],
+        time: { created: DateTime.makeUnsafe(1234) },
+      }),
+    ) as Record<string, unknown>
 
     expect(encoded).toMatchObject({ id: "evt_assistant", type: "assistant" })
     expect(encoded).not.toHaveProperty("parts")

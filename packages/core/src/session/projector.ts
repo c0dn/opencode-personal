@@ -336,7 +336,12 @@ function findLatestUnmatchedCompactionStarted(
     const rows = yield* db
       .select()
       .from(EventTable)
-      .where(and(eq(EventTable.aggregate_id, sessionID), inArray(EventTable.type, [compactionStartedType, compactionEndedType])))
+      .where(
+        and(
+          eq(EventTable.aggregate_id, sessionID),
+          inArray(EventTable.type, [compactionStartedType, compactionEndedType]),
+        ),
+      )
       .orderBy(asc(EventTable.seq))
       .all()
       .pipe(Effect.orDie)

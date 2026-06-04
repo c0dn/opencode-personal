@@ -32,6 +32,18 @@ const sessionNextTypes = [
   "session.next.compaction.ended",
 ] as const
 
+const liveOnlySessionNextTypes = [
+  "session.next.text.delta",
+  "session.next.reasoning.delta",
+  "session.next.tool.input.delta",
+  "session.next.tool.progress",
+  "session.next.compaction.delta",
+] as const
+
+const durableSessionNextTypes = sessionNextTypes.filter(
+  (type) => !liveOnlySessionNextTypes.includes(type as (typeof liveOnlySessionNextTypes)[number]),
+)
+
 describe("EventV2 registry", () => {
   test("registers the session.next catalog once in deterministic declaration order", () => {
     expect(SessionEvent.All).toBeDefined()
@@ -44,8 +56,8 @@ describe("EventV2 registry", () => {
     expect(new Set(registered).size).toBe(registered.length)
   })
 
-  test("session.next definitions expose stable sync metadata for OpenAPI and SDK generation", () => {
-    for (const type of sessionNextTypes) {
+  test("durable session.next definitions expose stable sync metadata for OpenAPI and SDK generation", () => {
+    for (const type of durableSessionNextTypes) {
       const definition = EventV2.registry.get(type)
 
       expect(definition, `${type} should be registered`).toBeDefined()
@@ -55,6 +67,25 @@ describe("EventV2 registry", () => {
       })
       expect(definition?.data, `${type} should expose a data schema`).toBeDefined()
     }
+  })
+
+  test("live-only session.next definitions stay registered without current sync and keep legacy replay metadata", () => {
+    for (const type of liveOnlySessionNextTypes) {
+      const definition = EventV2.registry.get(type)
+
+      expect(definition, `${type} should be registered`).toBeDefined()
+      expect(definition?.sync, `${type} should not persist current publishes`).toBeUndefined()
+      expect(definition?.legacySync, `${type} should accept historical v1 sync rows`).toEqual([
+        { aggregate: "sessionID", version: 1 },
+      ])
+      expect(definition?.data, `${type} should expose a live event data schema`).toBeDefined()
+    }
+  })
+
+  test("exports explicit durable, ephemeral, and combined session event unions", () => {
+    expect(SessionEvent.Durable).toBeDefined()
+    expect(SessionEvent.Ephemeral).toBeDefined()
+    expect(SessionEvent.All).toBeDefined()
   })
 
   test("rejects duplicate non-versioned event registration instead of silently changing generation order", () => {
