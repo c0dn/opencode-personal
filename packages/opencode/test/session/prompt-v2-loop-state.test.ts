@@ -13,13 +13,13 @@ const model = {
 }
 
 describe("session.prompt-v2-loop-state", () => {
-  test("orders canonical messages by time.created and id before computing latest outputs", () => {
+  test("maps canonical rows and computes normal stop exit eligibility", () => {
     const sameTimeB = user("b", 10)
     const latestAssistant = assistant("z", 30, { finish: "stop" })
     const latestUser = user("y", 20)
     const sameTimeA = assistant("a", 10)
 
-    const state = PromptV2LoopState.compute({ messages: [latestAssistant, sameTimeB, latestUser, sameTimeA] })
+    const state = computeCanonical([latestAssistant, sameTimeB, latestUser, sameTimeA])
 
     expect(state.orderedMessages.map((message) => message.id)).toStrictEqual([id("a"), id("b"), id("y"), id("z")])
     expect(state.latestUser?.id).toBe(latestUser.id)
@@ -48,20 +48,34 @@ describe("session.prompt-v2-loop-state", () => {
     ])
   })
 
-  test("requires explicit non-row input for pending compaction requests", () => {
+  test("documents pending legacy compaction/live requests are external to completed canonical rows", () => {
+    const ask = user("ask", 10)
+    const finished = assistant("finished", 20, { finish: "stop" })
+    const completedAnchor = compaction("completed_anchor", 30)
+
+    const rowsOnly = computeCanonical([ask, finished, completedAnchor])
+    expect(rowsOnly.exitEligibility).toStrictEqual({
+      eligible: true,
+      reason: "assistant-after-user-finished-without-tools",
+    })
+    expect(rowsOnly.pendingRequests).toStrictEqual([])
+    expect(rowsOnly.pendingCompactionPolicy).toBe("requires-explicit-pending-compaction-input")
+
+    const pendingCompaction = pendingCompactionRequest("pending_compaction", 40)
+    const shadow = computeCanonical([ask, finished, completedAnchor], { pendingCompactionRequests: [pendingCompaction] })
+    // U5a shadow coverage retires only when production prompt loop no longer calls
+    // legacy MessageV2 latest/filter helpers and pending compaction/orphan-tool policies are v2-native.
+    expect(shadow.exitEligibility).toStrictEqual(rowsOnly.exitEligibility)
+    expect(shadow.pendingRequests).toStrictEqual([{ type: "compaction", id: pendingCompaction.id, request: pendingCompaction }])
+  })
+
+  test("keeps pending compaction requests out of the queue before cutoff", () => {
     const finished = assistant("finished", 10, { finish: "stop" })
-    const completedAnchor = compaction("completed_anchor", 20)
+    const pendingCompaction = pendingCompactionRequest("pending_compaction", 5)
 
-    expect(PromptV2LoopState.compute({ messages: [finished, completedAnchor] }).pendingRequests).toStrictEqual([])
-    expect(PromptV2LoopState.compute({ messages: [finished, completedAnchor] }).pendingCompactionPolicy).toBe(
-      "requires-explicit-pending-compaction-input",
-    )
-
-    const pendingCompaction = pendingCompactionRequest("pending_compaction", 30)
     expect(
-      PromptV2LoopState.compute({ messages: [finished, completedAnchor], pendingCompactionRequests: [pendingCompaction] })
-        .pendingRequests,
-    ).toStrictEqual([{ type: "compaction", id: pendingCompaction.id, request: pendingCompaction }])
+      PromptV2LoopState.compute({ messages: [finished], pendingCompactionRequests: [pendingCompaction] }).pendingRequests,
+    ).toStrictEqual([])
   })
 
   test("orders pending task requests by canonical user row order and in-row taskRequests order", () => {
@@ -71,14 +85,12 @@ describe("session.prompt-v2-loop-state", () => {
     const sameTimeA = taskRequest("same time a")
     const sameTimeB = taskRequest("same time b")
 
-    const state = PromptV2LoopState.compute({
-      messages: [
-        user("z_later", 30, { taskRequests: [laterFirst, laterSecond] }),
-        user("b_same", 20, { taskRequests: [sameTimeB] }),
-        user("a_same", 20, { taskRequests: [sameTimeA] }),
-        user("earlier", 10, { taskRequests: [earlier] }),
-      ],
-    })
+    const state = computeCanonical([
+      user("z_later", 30, { taskRequests: [laterFirst, laterSecond] }),
+      user("b_same", 20, { taskRequests: [sameTimeB] }),
+      user("a_same", 20, { taskRequests: [sameTimeA] }),
+      user("earlier", 10, { taskRequests: [earlier] }),
+    ])
 
     expect(state.pendingRequests.map((item) => item.id)).toStrictEqual([
       earlier.id,
@@ -162,10 +174,8 @@ describe("session.prompt-v2-loop-state", () => {
     }
   })
 
-  test("provider-executed v2 tools do not block exit", () => {
-    const state = PromptV2LoopState.compute({
-      messages: [user("ask", 1), assistant("answer", 2, { finish: "stop", content: [tool("completed", true)] })],
-    })
+  test("provider-executed v2 tools mapped from canonical rows do not block exit", () => {
+    const state = computeCanonical([user("ask", 1), assistant("answer", 2, { finish: "stop", content: [tool("completed", true)] })])
 
     expect(state.exitEligibility).toStrictEqual({
       eligible: true,
@@ -173,13 +183,26 @@ describe("session.prompt-v2-loop-state", () => {
     })
   })
 
-  test("marks legacy interrupted orphan tool parity as unsupported without guessing", () => {
-    const state = PromptV2LoopState.compute({
-      messages: [user("ask", 1), assistant("answer", 2, { finish: "stop", content: [tool("error")] })],
+  test("unacknowledged v2 tools mapped from canonical rows block exit", () => {
+    const state = computeCanonical([user("ask", 1), assistant("answer", 2, { finish: "stop", content: [tool("running")] })])
+
+    expect(state.exitEligibility).toStrictEqual({
+      eligible: false,
+      reason: "assistant-has-unacknowledged-tools",
+      tools: [{ status: "running", providerExecuted: false, blocksExit: true }],
     })
+  })
+
+  test("documents interrupted orphan tools remain unsupported without canonical policy metadata", () => {
+    const state = computeCanonical([user("ask", 1), assistant("answer", 2, { finish: "stop", content: [tool("error")] })])
 
     expect(state.unsupported.interruptedOrphanTools).toBe("unsupported-v2-signal-missing")
     expect(PromptV2LoopState.InterruptedOrphanToolPolicy).toBe("unsupported-v2-signal-missing")
+    expect(state.exitEligibility).toStrictEqual({
+      eligible: false,
+      reason: "assistant-has-unacknowledged-tools",
+      tools: [{ status: "error", providerExecuted: false, blocksExit: true }],
+    })
   })
 
   test("source boundary stays pure and unwired", async () => {
@@ -209,6 +232,16 @@ function user(suffix: string, time: number, input?: Partial<SessionMessage.User>
     references: [],
     time: { created: DateTime.makeUnsafe(time) },
     ...input,
+  })
+}
+
+function computeCanonical(
+  messages: readonly SessionMessage.Message[],
+  input?: Pick<PromptV2LoopState.ComputeInput, "pendingCompactionRequests">,
+) {
+  return PromptV2LoopState.compute({
+    messages: PromptV2LoopState.fromSessionMessages(messages),
+    pendingCompactionRequests: input?.pendingCompactionRequests,
   })
 }
 

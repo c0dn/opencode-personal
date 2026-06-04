@@ -1,3 +1,4 @@
+import type { SessionMessage } from "@opencode-ai/core/session/message"
 import { DateTime } from "effect"
 
 export const PendingCompactionPolicy = "requires-explicit-pending-compaction-input" as const
@@ -112,6 +113,17 @@ export type ComputeInput = {
   pendingCompactionRequests?: readonly PendingCompactionRequest[]
 }
 
+export function fromSessionMessages(messages: readonly SessionMessage.Message[]): LoopMessage[] {
+  return messages.map(fromSessionMessage)
+}
+
+export function fromSessionMessage(message: SessionMessage.Message): LoopMessage {
+  if (message.type === "user") return fromUserMessage(message)
+  if (message.type === "assistant") return fromAssistantMessage(message)
+  if (message.type === "compaction") return fromCompactionMessage(message)
+  return fromBaseMessage(message)
+}
+
 export function compute(input: ComputeInput): LoopState {
   const orderedMessages = chronological(input.messages)
   const latestUser = latestUserMessage(orderedMessages)
@@ -133,6 +145,48 @@ export function compute(input: ComputeInput): LoopState {
     }),
     pendingCompactionPolicy: PendingCompactionPolicy,
     unsupported: { interruptedOrphanTools: InterruptedOrphanToolPolicy },
+  }
+}
+
+function fromUserMessage(message: SessionMessage.User): LoopUserMessage {
+  return {
+    ...fromBaseMessage(message),
+    type: "user",
+    taskRequests: message.taskRequests,
+  }
+}
+
+function fromAssistantMessage(message: SessionMessage.Assistant): LoopAssistantMessage {
+  return {
+    ...fromBaseMessage(message),
+    type: "assistant",
+    content: message.content.map(fromAssistantContent),
+    finish: message.finish,
+    error: message.error,
+  }
+}
+
+function fromAssistantContent(content: SessionMessage.AssistantContent): LoopAssistantMessage["content"][number] {
+  if (content.type !== "tool") return { type: content.type }
+  return {
+    type: "tool",
+    provider: content.provider ? { executed: content.provider.executed } : undefined,
+    state: { status: content.state.status },
+  }
+}
+
+function fromCompactionMessage(message: SessionMessage.Compaction): LoopCompactionMessage {
+  return {
+    ...fromBaseMessage(message),
+    type: "compaction",
+  }
+}
+
+function fromBaseMessage(message: SessionMessage.Message): LoopMessageBase {
+  return {
+    id: message.id,
+    type: message.type,
+    time: message.time,
   }
 }
 
