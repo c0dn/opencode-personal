@@ -2,11 +2,23 @@ import { Session } from "@/session/session"
 import { SessionLegacy } from "@opencode-ai/core/session/legacy"
 import { MessageV2 } from "../../session/message-v2"
 import { SessionID } from "../../session/schema"
+import { TranscriptV2PublicExport } from "../../session/transcript-v2-public-export"
 import { effectCmd, fail } from "../effect-cmd"
 import { UI } from "../ui"
 import * as prompts from "@clack/prompts"
 import { EOL } from "os"
 import { Effect } from "effect"
+
+export const SANITIZE_V2_ERROR =
+  "--sanitize is only supported with --format legacy. V2 export uses its fixed public redaction policy."
+
+type ExportFormat = "legacy" | "v2"
+
+export function validateExportOptions(args: { sanitize?: boolean; format?: ExportFormat }) {
+  const format = args.format ?? "legacy"
+  if (format === "v2" && args.sanitize) return SANITIZE_V2_ERROR
+  return undefined
+}
 
 function redact(kind: string, id: string, value: string) {
   return value.trim() ? `[redacted:${kind}:${id}]` : value
@@ -231,13 +243,22 @@ export const ExportCommand = effectCmd({
       .option("sanitize", {
         describe: "redact sensitive transcript and file data",
         type: "boolean",
+      })
+      .option("format", {
+        describe: "export payload format",
+        choices: ["legacy", "v2"] as const,
+        default: "legacy" as const,
       }),
   handler: Effect.fn("Cli.export")(function* (args) {
     return yield* run(args)
   }),
 })
 
-const run = Effect.fn("Cli.export.body")(function* (args: { sessionID?: string; sanitize?: boolean }) {
+const run = Effect.fn("Cli.export.body")(function* (args: { sessionID?: string; sanitize?: boolean; format?: ExportFormat }) {
+  const format = args.format ?? "legacy"
+  const optionError = validateExportOptions(args)
+  if (optionError) return yield* fail(optionError)
+
   const svc = yield* Session.Service
   let sessionID = args.sessionID ? SessionID.make(args.sessionID) : undefined
   process.stderr.write(`Exporting session: ${sessionID ?? "latest"}\n`)
@@ -276,6 +297,16 @@ const run = Effect.fn("Cli.export.body")(function* (args: { sessionID?: string; 
     sessionID = selectedSession
 
     prompts.outro("Exporting session...", { output: process.stderr })
+  }
+
+  if (format === "v2") {
+    const exportData = yield* TranscriptV2PublicExport.loadPublicTranscriptPayloadV2(sessionID!).pipe(
+      Effect.catch((error) => fail(error.message)),
+    )
+
+    process.stdout.write(JSON.stringify(exportData, null, 2))
+    process.stdout.write(EOL)
+    return
   }
 
   // Match legacy try/catch — catches both typed failures and defects
