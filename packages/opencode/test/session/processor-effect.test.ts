@@ -8,7 +8,7 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { expect, test } from "bun:test"
 import { tool } from "ai"
-import { Cause, Effect, Exit, Fiber, Layer, Schema } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { eq } from "drizzle-orm"
 import path from "path"
@@ -25,10 +25,12 @@ import { Session } from "@/session/session"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionProcessor } from "../../src/session/processor"
+import { SessionTools } from "../../src/session/tools"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { Snapshot } from "../../src/snapshot"
+import { MCP } from "@/mcp"
 import * as Log from "@opencode-ai/core/util/log"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
@@ -37,6 +39,8 @@ import { raw, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { LLMEvent } from "@opencode-ai/llm"
+import { ToolRegistry } from "@/tool/registry"
+import { Truncate } from "@/tool/truncate"
 
 void Log.init({ print: false })
 
@@ -880,6 +884,136 @@ it.live("session.processor effect tests compact on structured context overflow",
       }),
     { config: (url) => providerCfg(url) },
   ),
+)
+
+it.live("session.processor ensureAssistantMessageID is concurrent and idempotent", () =>
+  provideTmpdirServer(
+    ({ dir }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const database = yield* Database.Service
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "tool permission")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const ids = yield* Effect.all([handle.ensureAssistantMessageID(), handle.ensureAssistantMessageID()], {
+          concurrency: "unbounded",
+        })
+        const eventRows = (yield* database.db.select().from(EventTable).all().pipe(Effect.orDie)).filter(
+          (evt) =>
+            (evt.data as { sessionID?: string }).sessionID === chat.id &&
+            evt.type.startsWith(SessionEvent.Step.Started.type),
+        )
+
+        const id = ids[0]
+        if (!id) throw new Error("expected assistant message ID")
+        expect(String(id)).toBe(String(ids[1]))
+        expect(id.startsWith("evt_")).toBe(true)
+        expect(eventRows).toHaveLength(1)
+        expect(String(eventRows[0]!.id)).toBe(String(id))
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.effect("session.tools permission ask uses canonical v2 assistant message ID", () =>
+  Effect.gen(function* () {
+    const captured = yield* Deferred.make<Parameters<Permission.Interface["ask"]>[0]>()
+    const permission = Permission.Service.of({
+      ask: (input) => Deferred.succeed(captured, input),
+      reply: () => Effect.void,
+      list: () => Effect.succeed([]),
+    })
+    const plugin = Plugin.Service.of({
+      trigger: (_name, _input, output) => Effect.succeed(output),
+      list: () => Effect.succeed([]),
+      init: () => Effect.void,
+    })
+    const registry = ToolRegistry.Service.of({
+      ids: () => Effect.succeed([]),
+      all: () => Effect.succeed([]),
+      named: () => Effect.die("not used"),
+      tools: () =>
+        Effect.succeed([
+          {
+            id: "needs_permission",
+            description: "Needs permission",
+            parameters: Schema.Struct({ command: Schema.String }),
+            execute: (args: { command: string }, ctx) =>
+              ctx
+                .ask({ permission: "bash", patterns: ["*"], metadata: {}, always: [] })
+                .pipe(Effect.as({ title: "", metadata: {}, output: String(args.command) })),
+          },
+        ]),
+    })
+    const mcp = MCP.Service.of({
+      status: () => Effect.succeed({}),
+      clients: () => Effect.succeed({}),
+      tools: () => Effect.succeed({}),
+      prompts: () => Effect.succeed({}),
+      resources: () => Effect.succeed({}),
+      add: () => Effect.succeed({ status: {} }),
+      connect: () => Effect.void,
+      disconnect: () => Effect.void,
+      getPrompt: () => Effect.succeed(undefined),
+      readResource: () => Effect.succeed(undefined),
+      startAuth: () => Effect.die("not used"),
+      authenticate: () => Effect.die("not used"),
+      finishAuth: () => Effect.die("not used"),
+      removeAuth: () => Effect.void,
+      supportsOAuth: () => Effect.succeed(false),
+      hasStoredTokens: () => Effect.succeed(false),
+      getAuthStatus: () => Effect.succeed("not_authenticated"),
+    })
+    const truncate = Truncate.Service.of({
+      cleanup: () => Effect.void,
+      write: () => Effect.succeed(""),
+      output: (text) => Effect.succeed({ content: text, truncated: false }),
+      limits: () => Effect.succeed({ maxLines: 2000, maxBytes: 50 * 1024 }),
+    })
+    const legacyMessageID = MessageID.make("msg_permission_legacy")
+    const tools = yield* SessionTools.resolve({
+      agent: { ...agent(), permission: [{ permission: "bash", pattern: "*", action: "ask" }] },
+      model: {
+        id: "test-model",
+        providerID: ref.providerID,
+        api: { id: ref.modelID },
+      } as unknown as Provider.Model,
+      session: { id: SessionID.make("session_tools_permission"), permission: [] } as unknown as Session.Info,
+      processor: {
+        message: { id: legacyMessageID } as SessionLegacy.Assistant,
+        ensureAssistantMessageID: () => Effect.succeed("evt_step_permission"),
+        updateToolCall: () => Effect.succeed(undefined),
+        completeToolCall: () => Effect.void,
+      },
+      bypassAgentCheck: false,
+      messages: [],
+      promptOps: {} as never,
+    }).pipe(
+      Effect.provideService(Permission.Service, permission),
+      Effect.provideService(Plugin.Service, plugin),
+      Effect.provideService(ToolRegistry.Service, registry),
+      Effect.provideService(MCP.Service, mcp),
+      Effect.provideService(Truncate.Service, truncate),
+    )
+
+    const execute = tools.needs_permission.execute
+    if (!execute) throw new Error("expected generated tool execute")
+    yield* Effect.promise(() => execute({ command: "pwd" }, { toolCallId: "call-1" } as never))
+
+    expect(yield* Deferred.await(captured)).toMatchObject({
+      sessionID: "session_tools_permission",
+      tool: { messageID: "evt_step_permission", callID: "call-1" },
+      metadata: { input: { command: "pwd" } },
+    })
+  }),
 )
 
 it.live("session.processor effect tests complete AI SDK tool calls when native flag is off", () =>

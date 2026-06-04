@@ -211,6 +211,7 @@ function fake(
       return msg
     },
     outputText: () => outputText,
+    ensureAssistantMessageID: () => Effect.succeed(undefined),
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
     process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
@@ -237,6 +238,7 @@ const divergentSummaryLayer = Layer.effect(
             return input.assistantMessage
           },
           outputText: () => "current processor summary",
+          ensureAssistantMessageID: () => Effect.succeed(undefined),
           updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
           completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
           process: Effect.fn("TestSessionProcessor.process")(function* () {

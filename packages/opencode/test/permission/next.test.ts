@@ -2,6 +2,7 @@ import { test, expect } from "bun:test"
 import os from "os"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
+import { GlobalBus, type GlobalEvent } from "../../src/bus/global"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Database } from "@opencode-ai/core/database/database"
 import { Permission } from "../../src/permission"
@@ -651,11 +652,43 @@ it.instance(
 )
 
 it.instance(
-  "ask - publishes asked event",
+  "ask - accepts v2 event tool message IDs in pending request",
+  () =>
+    Effect.gen(function* () {
+      const fiber = yield* ask({
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: {},
+        always: ["ls"],
+        tool: {
+          messageID: "evt_permission_tool_ref",
+          callID: "call_test",
+        },
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      const items = yield* waitForPending(1)
+      expect(items[0].tool).toEqual({ messageID: "evt_permission_tool_ref", callID: "call_test" })
+
+      yield* rejectAll()
+      yield* Fiber.await(fiber)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - publishes asked event and GlobalBus fanout with v2 event tool message ID",
   () =>
     Effect.gen(function* () {
       const events = yield* EventV2Bridge.Service
       const seen = yield* Deferred.make<Permission.Request>()
+      const fanout = yield* Deferred.make<GlobalEvent>()
+      const on = (event: GlobalEvent) => {
+        if (event.payload?.type === Permission.Event.Asked.type) Deferred.doneUnsafe(fanout, Effect.succeed(event))
+      }
+      yield* Effect.sync(() => GlobalBus.on("event", on))
+      yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", on)))
       const unsub = yield* events.listen((event) => {
         if (event.type === Permission.Event.Asked.type)
           Deferred.doneUnsafe(seen, Effect.succeed(event.data as Permission.Request))
@@ -670,7 +703,7 @@ it.instance(
         metadata: { cmd: "ls" },
         always: ["ls"],
         tool: {
-          messageID: MessageID.make("msg_test"),
+          messageID: "evt_permission_tool_ref",
           callID: "call_test",
         },
         ruleset: [],
@@ -688,6 +721,28 @@ it.instance(
         sessionID: SessionID.make("session_test"),
         permission: "bash",
         patterns: ["ls"],
+        tool: {
+          messageID: "evt_permission_tool_ref",
+          callID: "call_test",
+        },
+      })
+      expect(
+        yield* Deferred.await(fanout).pipe(
+          Effect.timeoutOrElse({
+            duration: "1 second",
+            orElse: () => Effect.fail(new Error("timed out waiting for permission asked fanout event")),
+          }),
+        ),
+      ).toMatchObject({
+        payload: {
+          type: Permission.Event.Asked.type,
+          properties: {
+            tool: {
+              messageID: "evt_permission_tool_ref",
+              callID: "call_test",
+            },
+          },
+        },
       })
 
       yield* rejectAll()

@@ -29,6 +29,11 @@ export type Rule = Schema.Schema.Type<typeof Rule>
 export const Ruleset = Schema.Array(Rule).annotate({ identifier: "PermissionRuleset" })
 export type Ruleset = Schema.Schema.Type<typeof Ruleset>
 
+export const ToolMessageID = Schema.Union([MessageID, Schema.String.check(Schema.isStartsWith("evt_"))]).annotate({
+  identifier: "PermissionToolMessageID",
+})
+export type ToolMessageID = Schema.Schema.Type<typeof ToolMessageID>
+
 // Pure data; nothing checks class identity. As `Schema.Struct` + type alias,
 // `Permission.ask` can trust its already-typed input and skip the inner
 // `decodeUnknownSync` that would otherwise throw uncaught on any structural
@@ -42,7 +47,7 @@ export const Request = Schema.Struct({
   always: Schema.Array(Schema.String),
   tool: Schema.optional(
     Schema.Struct({
-      messageID: MessageID,
+      messageID: ToolMessageID,
       callID: Schema.String,
     }),
   ),

@@ -27,7 +27,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
   model: Provider.Model
   session: Session.Info
-  processor: Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
+  processor: Pick<
+    SessionProcessor.Handle,
+    "message" | "ensureAssistantMessageID" | "updateToolCall" | "completeToolCall"
+  >
   bypassAgentCheck: boolean
   messages: SessionLegacy.WithParts[]
   promptOps: TaskPromptOps
@@ -64,14 +67,17 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         }
       }),
     ask: (req) =>
-      permission
-        .ask({
+      Effect.gen(function* () {
+        const assistantMessageID = yield* input.processor.ensureAssistantMessageID()
+        const metadata = Object.hasOwn(req.metadata, "input") ? req.metadata : { ...req.metadata, input: args }
+        yield* permission.ask({
           ...req,
           sessionID: input.session.id,
-          tool: { messageID: input.processor.message.id, callID: options.toolCallId },
+          metadata,
+          tool: { messageID: assistantMessageID ?? input.processor.message.id, callID: options.toolCallId },
           ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
         })
-        .pipe(Effect.orDie),
+      }).pipe(Effect.orDie),
   })
 
   for (const item of yield* registry.tools({

@@ -38,6 +38,7 @@ export type Result = "compact" | "stop" | "continue"
 export interface Handle {
   readonly message: SessionLegacy.Assistant
   readonly outputText: () => string | undefined
+  readonly ensureAssistantMessageID: () => Effect.Effect<string | undefined>
   readonly updateToolCall: (
     toolCallID: string,
     update: (part: SessionLegacy.ToolPart) => SessionLegacy.ToolPart,
@@ -272,7 +273,7 @@ export const layer = Layer.effect(
         delete ctx.reasoningMap[reasoningID]
       })
 
-      const ensureV2AssistantMessage = Effect.fn("SessionProcessor.ensureV2AssistantMessage")(function* () {
+      const publishV2AssistantMessage = Effect.fn("SessionProcessor.publishV2AssistantMessage")(function* () {
         if (ctx.v2AssistantMessageID) return ctx.v2AssistantMessageID
         if (ctx.assistantMessage.summary) return undefined
         if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
@@ -289,6 +290,16 @@ export const layer = Layer.effect(
         })
         ctx.v2AssistantMessageID = event.id
         return ctx.v2AssistantMessageID
+      })
+      let cachedV2AssistantMessage = yield* Effect.cached(publishV2AssistantMessage())
+
+      const ensureV2AssistantMessage = Effect.fn("SessionProcessor.ensureV2AssistantMessage")(function* () {
+        return yield* cachedV2AssistantMessage
+      })
+
+      const resetV2AssistantMessage = Effect.fnUntraced(function* () {
+        ctx.v2AssistantMessageID = undefined
+        cachedV2AssistantMessage = yield* Effect.cached(publishV2AssistantMessage())
       })
 
       const ensureToolCall = Effect.fn("SessionProcessor.ensureToolCall")(function* (input: {
@@ -656,7 +667,7 @@ export const layer = Layer.effect(
             ) {
               ctx.needsCompaction = true
             }
-            ctx.v2AssistantMessageID = undefined
+            yield* resetV2AssistantMessage()
             return
           }
 
@@ -817,7 +828,7 @@ export const layer = Layer.effect(
             error: toAssistantError(error),
             timestamp: DateTime.makeUnsafe(Date.now()),
           })
-          ctx.v2AssistantMessageID = undefined
+          yield* resetV2AssistantMessage()
         }
         ctx.assistantMessage.error = error
         yield* events.publish(Session.Event.Error, {
@@ -904,6 +915,9 @@ export const layer = Layer.effect(
         outputText() {
           const text = ctx.outputText.join("\n\n")
           return text === "" ? undefined : text
+        },
+        ensureAssistantMessageID() {
+          return ensureV2AssistantMessage()
         },
         updateToolCall,
         completeToolCall,

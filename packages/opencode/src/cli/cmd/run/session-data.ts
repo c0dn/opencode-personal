@@ -313,13 +313,13 @@ function enrichPermission(data: SessionData, request: PermissionRequest): Permis
     return request
   }
 
-  const input = data.call.get(key(request.tool.messageID, request.tool.callID))
-  if (!input) {
+  const meta = request.metadata ?? {}
+  if (Object.hasOwn(meta, "input")) {
     return request
   }
 
-  const meta = request.metadata ?? {}
-  if (meta.input === input) {
+  const input = data.call.get(key(request.tool.messageID, request.tool.callID))
+  if (!input) {
     return request
   }
 
