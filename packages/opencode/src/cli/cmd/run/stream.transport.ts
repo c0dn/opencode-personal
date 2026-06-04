@@ -31,12 +31,14 @@ import {
 import { bootstrapSessionDataV2Display, replaySession, replaySessionV2 } from "./session-replay"
 import {
   bootstrapSubagentCalls,
+  bootstrapSubagentCallsV2Display,
   bootstrapSubagentData,
   clearFinishedSubagents,
   createSubagentData,
   listSubagentPermissions,
   listSubagentQuestions,
   listSubagentTabs,
+  recordSubagentDetailError,
   reduceSubagentData,
   sameSubagentTab,
   snapshotSelectedSubagentData,
@@ -688,37 +690,64 @@ function createLayer(input: StreamInput) {
           return rows
         })
 
-        const bootstrapSubagentHistory = Effect.fn("RunStreamTransport.bootstrapSubagentHistory")(function* (
-          sessions: string[],
-        ) {
-          yield* Effect.forEach(
-            sessions,
-            (sessionID) =>
-              messages(sessionID, SUBAGENT_CALL_BOOTSTRAP_LIMIT).pipe(
-                Effect.tap((messagesList) =>
-                  Effect.sync(() => {
-                    if (
-                      !bootstrapSubagentCalls({
-                        data: state.subagent,
-                        sessionID,
-                        messages: messagesList,
-                        thinking: input.thinking,
-                        limits: input.limits(),
-                      })
-                    ) {
-                      return
-                    }
-
-                    syncFooter([], undefined, currentSubagentState())
-                  }),
-                ),
-              ),
+        const childV2DisplayMessages = async (sessionID: string) => {
+          const response = await input.sdk.v2.session.messages(
             {
-              concurrency: 4,
-              discard: true,
+              sessionID,
+              limit: SUBAGENT_CALL_BOOTSTRAP_LIMIT,
+              order: "desc",
             },
+            { throwOnError: true, signal: abort.signal },
           )
-        })
+          return TranscriptV2Display.toDisplayTranscriptV2FromWire(requireV2ReplayItems(response), { status: "ready" })
+        }
+
+        const bootstrapSubagentHistory = (sessions: string[]) => {
+          let index = 0
+          const worker = async () => {
+            while (!closed && !abort.signal.aborted && !input.footer.isClosed) {
+              const sessionID = sessions[index]
+              index += 1
+              if (!sessionID) {
+                return
+              }
+
+              try {
+                const messagesList = await childV2DisplayMessages(sessionID)
+                if (closed || abort.signal.aborted || input.footer.isClosed) {
+                  return
+                }
+
+                if (
+                  !bootstrapSubagentCallsV2Display({
+                    data: state.subagent,
+                    sessionID,
+                    messages: messagesList,
+                    thinking: input.thinking,
+                    limits: input.limits(),
+                  })
+                ) {
+                  continue
+                }
+
+                syncFooter([], undefined, currentSubagentState())
+              } catch (error) {
+                if (closed || abort.signal.aborted || input.footer.isClosed) {
+                  return
+                }
+
+                const detail = formatUnknownError(error)
+                const message = `Failed to load subagent history: ${detail}`
+                input.trace?.write("subagent.history.error", { sessionID, error: detail })
+                if (recordSubagentDetailError({ data: state.subagent, sessionID, message })) {
+                  syncFooter([], undefined, currentSubagentState())
+                }
+              }
+            }
+          }
+
+          void Promise.all(Array.from({ length: Math.min(4, sessions.length) }, worker))
+        }
 
         const bootstrap = Effect.fn("RunStreamTransport.bootstrap")(function* () {
           const [replayMessages, noReplayBootstrapMessages, children, permissions, questions] = yield* Effect.all(
@@ -853,10 +882,7 @@ function createLayer(input: StreamInput) {
             return
           }
 
-          yield* bootstrapSubagentHistory(sessions).pipe(
-            Effect.forkIn(scope, { startImmediately: true }),
-            Effect.asVoid,
-          )
+          bootstrapSubagentHistory(sessions)
         })
 
         const idle = Effect.fn("RunStreamTransport.idle")((fallback: boolean) =>

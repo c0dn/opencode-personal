@@ -7,7 +7,9 @@ import {
   reduceSessionData,
   type SessionData,
 } from "./session-data"
+import { bootstrapSessionDataV2Display, replaySessionV2Messages } from "./session-replay"
 import type { FooterSubagentState, FooterSubagentTab, StreamCommit } from "./types"
+import type { TranscriptV2Display } from "@/session/transcript-v2-display"
 
 export const SUBAGENT_BOOTSTRAP_LIMIT = 200
 export const SUBAGENT_CALL_BOOTSTRAP_LIMIT = 80
@@ -747,6 +749,56 @@ export function bootstrapSubagentCalls(input: {
   })
 
   return changed || beforeCallCount !== detail.data.call.size || queueChanged(detail.data, before)
+}
+
+export function bootstrapSubagentCallsV2Display(input: {
+  data: SubagentData
+  sessionID: string
+  messages: readonly TranscriptV2Display.DisplayTranscriptMessage[]
+  thinking: boolean
+  limits: Record<string, number>
+}) {
+  if (!knownSession(input.data, input.sessionID) || input.messages.length === 0) {
+    return false
+  }
+
+  const detail = ensureDetail(input.data, input.sessionID)
+  const before = queueSnapshot(detail.data)
+  const beforeCallCount = detail.data.call.size
+  bootstrapSessionDataV2Display({
+    data: detail.data,
+    messages: input.messages,
+    permissions: detail.data.permissions,
+    questions: detail.data.questions,
+  })
+  const replay = replaySessionV2Messages({
+    data: detail.data,
+    messages: input.messages,
+    thinking: input.thinking,
+    limits: input.limits,
+    sessionID: input.sessionID,
+  })
+  const changed = appendCommits(detail, replay.commits)
+  compactDetail(detail)
+
+  return changed || beforeCallCount !== detail.data.call.size || queueChanged(detail.data, before)
+}
+
+export function recordSubagentDetailError(input: { data: SubagentData; sessionID: string; message: string }) {
+  if (!knownSession(input.data, input.sessionID)) {
+    return false
+  }
+
+  const detail = ensureDetail(input.data, input.sessionID)
+  return appendCommits(detail, [
+    {
+      kind: "error",
+      text: input.message,
+      phase: "start",
+      source: "system",
+      messageID: `subagent.history.error:${input.sessionID}:${input.message}`,
+    },
+  ])
 }
 
 export function clearFinishedSubagents(data: SubagentData) {

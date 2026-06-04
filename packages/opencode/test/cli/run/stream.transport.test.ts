@@ -270,6 +270,27 @@ function v2RunningTool(id: string, callID = "call-1"): Extract<Extract<V2Session
   }
 }
 
+function v2CompletedTool(
+  id: string,
+  input: Record<string, unknown>,
+  name = "bash",
+  callID = "call-1",
+): Extract<Extract<V2SessionMessage, { type: "assistant" }>["content"][number], { type: "tool" }> {
+  return {
+    id,
+    type: "tool",
+    callID,
+    name,
+    state: {
+      status: "completed",
+      input,
+      structured: {},
+      content: [],
+    },
+    time: { created: 2, ran: 2, completed: 3 },
+  }
+}
+
 function runningTool(input: {
   sessionID: string
   messageID: string
@@ -761,8 +782,7 @@ describe("run stream transport", () => {
       })
       expect(state.tabs).toEqual([expect.objectContaining({ sessionID: "child-1", status: "running" })])
       expect(legacyMessages.mock.calls.map((call) => call[0])).toEqual([
-        expect.objectContaining({ sessionID: "session-1" }),
-        expect.objectContaining({ sessionID: "child-1" }),
+        { sessionID: "session-1", limit: 200 },
       ])
     } finally {
       src.close()
@@ -1097,26 +1117,24 @@ describe("run stream transport", () => {
             ])
           }
 
-          return ok([
-            assistantMessage({
-              sessionID: "child-1",
-              id: "msg-child-1",
-              parts: [
-                runningTool({
-                  sessionID: "child-1",
-                  messageID: "msg-child-1",
-                  id: "edit-1",
-                  callID: "call-edit-1",
-                  tool: "edit",
-                  body: {
-                    filePath: "src/run/subagent-data.ts",
-                    diff: "@@ -1 +1 @@",
-                  },
-                }),
-              ],
-            }),
-          ])
+          throw new Error(`unexpected legacy child history read: ${sessionID}`)
         },
+        v2Messages: async ({ sessionID }) =>
+          sessionID === "child-1"
+            ? okV2Messages([
+                v2Assistant("evt-child-assistant-1", [
+                  v2CompletedTool(
+                    "edit-1",
+                    {
+                      filePath: "src/run/subagent-data.ts",
+                      diff: "@@ -1 +1 @@",
+                    },
+                    "edit",
+                    "call-edit-1",
+                  ),
+                ]),
+              ])
+            : okV2Messages([]),
         children: async () => ok([child("child-1")]),
         permissions: async () =>
           ok([
@@ -1128,7 +1146,7 @@ describe("run stream transport", () => {
               metadata: {},
               always: [],
               tool: {
-                messageID: "msg-child-1",
+                messageID: "evt-child-assistant-1",
                 callID: "call-edit-1",
               },
             },
@@ -1145,7 +1163,7 @@ describe("run stream transport", () => {
         const item = ui.events.findLast((event) => event.type === "stream.subagent")
         const state = item?.type === "stream.subagent" ? item.state : undefined
         return state?.tabs.some((tab) => tab.sessionID === "child-1") &&
-          state.permissions.some((req) => req.id === "perm-1")
+          state.permissions.some((req) => req.id === "perm-1" && req.metadata.input)
           ? state
           : undefined
       })
@@ -1184,18 +1202,13 @@ describe("run stream transport", () => {
           : undefined
       })
 
-      expect(selected.details).toEqual({
-        "child-1": {
-          sessionID: "child-1",
-          commits: [
-            expect.objectContaining({
-              kind: "tool",
-              tool: "edit",
-              phase: "start",
-            }),
-          ],
-        },
-      })
+      expect(selected.details["child-1"]?.commits).toContainEqual(
+        expect.objectContaining({
+          kind: "tool",
+          tool: "edit",
+          phase: "start",
+        }),
+      )
 
       expect(
         await waitFor(() => {
@@ -1227,44 +1240,50 @@ describe("run stream transport", () => {
 
   test("bootstraps child session output before selection", async () => {
     const ui = footer()
+    const legacyMessages = mock(async ({ sessionID }) => {
+      if (sessionID !== "session-1") {
+        throw new Error(`unexpected legacy child history read: ${sessionID}`)
+      }
+
+      return ok([
+        assistantMessage({
+          sessionID: "session-1",
+          id: "msg-1",
+          parts: [
+            runningTool({
+              sessionID: "session-1",
+              messageID: "msg-1",
+              id: "task-1",
+              callID: "call-1",
+              tool: "task",
+              body: {
+                description: "Explore run.ts",
+                subagent_type: "explore",
+              },
+              metadata: {
+                sessionId: "child-1",
+              },
+            }),
+          ],
+        }),
+      ])
+    })
+    const v2Messages = mock(async ({ sessionID, order, limit }) => {
+      if (sessionID === "child-1") {
+        expect({ sessionID, order, limit }).toEqual({
+          sessionID: "child-1",
+          order: "desc",
+          limit: 80,
+        })
+        return okV2Messages([v2Assistant("evt-child-assistant-1", [v2Text("evt-child-text-1", "subagent summary")])])
+      }
+
+      return okV2Messages([])
+    })
     const transport = await createSessionTransport({
       sdk: sdk({
-        messages: async ({ sessionID }) => {
-          if (sessionID === "session-1") {
-            return ok([
-              assistantMessage({
-                sessionID: "session-1",
-                id: "msg-1",
-                parts: [
-                  runningTool({
-                    sessionID: "session-1",
-                    messageID: "msg-1",
-                    id: "task-1",
-                    callID: "call-1",
-                    tool: "task",
-                    body: {
-                      description: "Explore run.ts",
-                      subagent_type: "explore",
-                    },
-                    metadata: {
-                      sessionId: "child-1",
-                    },
-                  }),
-                ],
-              }),
-            ])
-          }
-
-          return sessionID === "child-1"
-            ? ok([
-                assistantMessage({
-                  sessionID: "child-1",
-                  id: "msg-child-1",
-                  parts: [textPart("txt-child-1", "msg-child-1", "subagent summary", "child-1")],
-                }),
-              ])
-            : ok([])
-        },
+        messages: legacyMessages,
+        v2Messages,
         children: async () => ok([child("child-1")]),
       }),
       sessionID: "session-1",
@@ -1280,6 +1299,10 @@ describe("run stream transport", () => {
           ? item
           : undefined
       })
+
+      await waitFor(() =>
+        v2Messages.mock.calls.some((call) => call[0]?.sessionID === "child-1") ? true : undefined,
+      )
 
       transport.selectSubagent("child-1")
 
@@ -1300,49 +1323,59 @@ describe("run stream transport", () => {
           }),
         ],
       })
+      expect(v2Messages).toHaveBeenCalledWith(
+        { sessionID: "child-1", limit: 80, order: "desc" },
+        expect.objectContaining({ throwOnError: true, signal: expect.any(AbortSignal) }),
+      )
+      expect(legacyMessages.mock.calls.map((call) => call[0])).not.toContainEqual(
+        expect.objectContaining({ sessionID: "child-1" }),
+      )
     } finally {
       await transport.close()
     }
   })
 
   test("does not block startup on child history bootstrap", async () => {
-    const pending = defer<Awaited<ReturnType<typeof ok<SessionMessage[]>>>>()
+    const pending = defer<Awaited<ReturnType<typeof okV2Messages>>>()
     const ui = footer()
     let transport: Awaited<ReturnType<typeof createSessionTransport>> | undefined
 
     const task = createSessionTransport({
       sdk: sdk({
         messages: async ({ sessionID }) => {
-          if (sessionID === "session-1") {
-            return ok([
-              assistantMessage({
-                sessionID: "session-1",
-                id: "msg-1",
-                parts: [
-                  runningTool({
-                    sessionID: "session-1",
-                    messageID: "msg-1",
-                    id: "task-1",
-                    callID: "call-1",
-                    tool: "task",
-                    body: {
-                      description: "Explore run.ts",
-                      subagent_type: "explore",
-                    },
-                    metadata: {
-                      sessionId: "child-1",
-                    },
-                  }),
-                ],
-              }),
-            ])
+          if (sessionID !== "session-1") {
+            throw new Error(`unexpected legacy child history read: ${sessionID}`)
           }
 
+          return ok([
+            assistantMessage({
+              sessionID: "session-1",
+              id: "msg-1",
+              parts: [
+                runningTool({
+                  sessionID: "session-1",
+                  messageID: "msg-1",
+                  id: "task-1",
+                  callID: "call-1",
+                  tool: "task",
+                  body: {
+                    description: "Explore run.ts",
+                    subagent_type: "explore",
+                  },
+                  metadata: {
+                    sessionId: "child-1",
+                  },
+                }),
+              ],
+            }),
+          ])
+        },
+        v2Messages: async ({ sessionID }) => {
           if (sessionID === "child-1") {
             return pending.promise
           }
 
-          return ok([])
+          return okV2Messages([])
         },
         children: async () => ok([child("child-1")]),
       }),
@@ -1372,9 +1405,99 @@ describe("run stream transport", () => {
         questions: [],
       })
     } finally {
-      pending.resolve(ok([]))
+      pending.resolve(okV2Messages([]))
       await task
       await transport?.close()
+    }
+  })
+
+  test("reports v2 child history failures without legacy fallback", async () => {
+    const gate = defer<void>()
+    const ui = footer()
+    const trace = { write: mock(() => {}) }
+    const legacyMessages = mock(async ({ sessionID }) => {
+      if (sessionID !== "session-1") {
+        throw new Error(`unexpected legacy child history read: ${sessionID}`)
+      }
+
+      return ok([
+        assistantMessage({
+          sessionID: "session-1",
+          id: "msg-1",
+          parts: [
+            runningTool({
+              sessionID: "session-1",
+              messageID: "msg-1",
+              id: "task-1",
+              callID: "call-1",
+              tool: "task",
+              body: {
+                description: "Explore run.ts",
+                subagent_type: "explore",
+              },
+              metadata: {
+                sessionId: "child-1",
+              },
+            }),
+          ],
+        }),
+      ])
+    })
+    const v2Messages = mock(async ({ sessionID }) => {
+      if (sessionID === "child-1") {
+        await gate.promise
+        throw new Error("v2 unavailable")
+      }
+
+      return okV2Messages([])
+    })
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        messages: legacyMessages,
+        v2Messages,
+        children: async () => ok([child("child-1")]),
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+      trace,
+    })
+
+    try {
+      await waitFor(() => {
+        const item = ui.events.findLast((event) => event.type === "stream.subagent")
+        return item?.type === "stream.subagent" && item.state.tabs.some((tab) => tab.sessionID === "child-1")
+          ? item
+          : undefined
+      })
+
+      transport.selectSubagent("child-1")
+      gate.resolve()
+
+      const detail = await waitFor(() => {
+        const item = ui.events.findLast((event) => event.type === "stream.subagent")
+        const next = item?.type === "stream.subagent" ? item.state.details["child-1"] : undefined
+        return next?.commits.some((commit) => commit.kind === "error" && commit.text.includes("v2 unavailable"))
+          ? next
+          : undefined
+      })
+
+      expect(detail.commits).toEqual([
+        expect.objectContaining({
+          kind: "error",
+          text: expect.stringContaining("v2 unavailable"),
+        }),
+      ])
+      expect(trace.write).toHaveBeenCalledWith(
+        "subagent.history.error",
+        expect.objectContaining({ sessionID: "child-1", error: "v2 unavailable" }),
+      )
+      expect(legacyMessages.mock.calls.map((call) => call[0])).not.toContainEqual(
+        expect.objectContaining({ sessionID: "child-1" }),
+      )
+    } finally {
+      await transport.close()
     }
   })
 

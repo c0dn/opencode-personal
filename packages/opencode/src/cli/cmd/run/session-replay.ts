@@ -29,6 +29,14 @@ type BootstrapV2DisplayInput = {
   questions: QuestionRequest[]
 }
 
+type ReplayV2MessagesInput = {
+  data: SessionData
+  messages: readonly TranscriptV2Display.DisplayTranscriptMessage[]
+  thinking: boolean
+  limits: Record<string, number>
+  sessionID: string
+}
+
 export type SessionReplay = {
   data: SessionData
   commits: StreamCommit[]
@@ -207,15 +215,14 @@ export function replaySession(input: ReplayInput): SessionReplay {
 
 export function replaySessionV2(input: ReplayV2Input): SessionReplay {
   const data = createSessionData()
-  const commits: StreamCommit[] = []
-  let patch: FooterPatch | undefined
   const sessionID = replaySessionID(input)
-
-  for (const message of orderDisplayMessages(input.messages)) {
-    const next = replayDisplayMessage(data, message, sessionID, input.thinking, input.limits)
-    commits.push(...next.commits)
-    patch = mergePatch(patch, next.patch)
-  }
+  const replay = replaySessionV2Messages({
+    data,
+    messages: input.messages,
+    thinking: input.thinking,
+    limits: input.limits,
+    sessionID,
+  })
 
   bootstrapSessionData({
     data,
@@ -226,9 +233,22 @@ export function replaySessionV2(input: ReplayV2Input): SessionReplay {
 
   return {
     data,
-    commits,
-    patch: replayPatch(data, patch),
+    commits: replay.commits,
+    patch: replayPatch(data, replay.patch),
   }
+}
+
+export function replaySessionV2Messages(input: ReplayV2MessagesInput): ReplayMessage {
+  const commits: StreamCommit[] = []
+  let patch: FooterPatch | undefined
+
+  for (const message of orderDisplayMessages(input.messages)) {
+    const next = replayDisplayMessage(input.data, message, input.sessionID, input.thinking, input.limits)
+    commits.push(...next.commits)
+    patch = mergePatch(patch, next.patch)
+  }
+
+  return { commits, patch }
 }
 
 export function bootstrapSessionDataV2Display(input: BootstrapV2DisplayInput) {

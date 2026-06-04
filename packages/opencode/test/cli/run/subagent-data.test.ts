@@ -3,12 +3,14 @@ import type { Event } from "@opencode-ai/sdk/v2"
 import { entryBody } from "@/cli/cmd/run/entry.body"
 import {
   bootstrapSubagentCalls,
+  bootstrapSubagentCallsV2Display,
   bootstrapSubagentData,
   clearFinishedSubagents,
   createSubagentData,
   reduceSubagentData,
   snapshotSubagentData,
 } from "@/cli/cmd/run/subagent-data"
+import type { TranscriptV2Display } from "@/session/transcript-v2-display"
 
 type SessionMessage = Parameters<typeof bootstrapSubagentData>[0]["messages"][number]
 type ChildMessage = Parameters<typeof bootstrapSubagentCalls>[0]["messages"][number]
@@ -434,6 +436,89 @@ describe("run subagent data", () => {
       "› Inspect footer tabs",
       "_Thinking:_ planning next steps",
       "hello world",
+    ])
+  })
+
+  test("replays v2 display child rows into selected detail commits and preserves blockers", () => {
+    const data = createSubagentData()
+
+    bootstrapSubagentData({
+      data,
+      messages: [taskMessage("child-1", "running")],
+      children: [{ id: "child-1" }],
+      permissions: [
+        {
+          id: "perm-1",
+          sessionID: "child-1",
+          permission: "read",
+          patterns: ["src/**/*.ts"],
+          metadata: {},
+          always: [],
+        },
+      ],
+      questions: [],
+    })
+
+    expect(
+      bootstrapSubagentCallsV2Display({
+        data,
+        sessionID: "child-1",
+        thinking: true,
+        limits: {},
+        messages: [
+          {
+            type: "assistant",
+            id: "asst-1",
+            agent: "explore",
+            model: { providerID: "openai", id: "gpt-5" } as TranscriptV2Display.DisplayAssistant["model"],
+            time: { created: 2, completed: 3 },
+            content: [
+              { type: "text", id: "txt-1", text: "subagent summary" },
+              {
+                type: "tool",
+                id: "tool-1",
+                callID: "call-1",
+                name: "bash",
+                title: "bash",
+                time: { created: 2, ran: 2, completed: 3 },
+                state: {
+                  status: "completed",
+                  input: { command: "pwd" },
+                  structured: {},
+                  content: [{ type: "text", text: "/repo" }],
+                },
+              },
+            ],
+          },
+          {
+            type: "user",
+            id: "user-1",
+            text: "inspect runtime",
+            files: [],
+            agents: [],
+            references: [],
+            taskRequests: [
+              {
+                type: "task-request",
+                id: "task-request-1",
+                prompt: "map reducers",
+                description: "Map reducers",
+                agent: "explore",
+              },
+            ],
+            time: { created: 1 },
+          },
+        ] satisfies readonly TranscriptV2Display.DisplayTranscriptMessage[],
+      }),
+    ).toBe(true)
+
+    const snapshot = snapshotSubagentData(data)
+    expect(snapshot.permissions.map((item) => item.id)).toEqual(["perm-1"])
+    expect(visible(snapshot.details["child-1"]?.commits ?? [])).toEqual([
+      "› inspect runtime",
+      "subagent summary",
+      "$ pwd",
+      "\n/repo",
     ])
   })
 
