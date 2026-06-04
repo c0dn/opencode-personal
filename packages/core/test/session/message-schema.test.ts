@@ -85,6 +85,74 @@ describe("SessionMessage schema", () => {
     expect(tool.state).not.toHaveProperty("title")
   })
 
+  test("roundtrips assistant tool provider call and result metadata without raw result", () => {
+    const message = Schema.decodeUnknownSync(SessionMessage.Message)({
+      id: "evt_assistant",
+      type: "assistant",
+      agent: "build",
+      model: {
+        providerID: ProviderV2.ID.make("test"),
+        id: ModelV2.ID.make("test-model"),
+      },
+      content: [
+        {
+          type: "tool",
+          id: "evt_tool",
+          callID: "call_1",
+          name: "read",
+          title: "Read file",
+          provider: {
+            executed: true,
+            metadata: { call: "provider-call" },
+            resultMetadata: { outcome: "provider-result" },
+          },
+          state: {
+            status: "completed",
+            input: { file: "README.md" },
+            content: [
+              { type: "text", text: "ok" },
+              { type: "file", uri: "file:///tmp/out.txt", mime: "text/plain", name: "out.txt" },
+            ],
+            structured: { ok: true },
+          },
+          time: { created: 1, completed: 2 },
+        },
+      ],
+      time: { created: 1, completed: 2 },
+    })
+
+    const encoded = Schema.encodeSync(SessionMessage.Message)(message)
+    expect(encoded).toMatchObject({
+      type: "assistant",
+      content: [
+        {
+          type: "tool",
+          title: "Read file",
+          provider: {
+            executed: true,
+            metadata: { call: "provider-call" },
+            resultMetadata: { outcome: "provider-result" },
+          },
+          state: {
+            status: "completed",
+            input: { file: "README.md" },
+            structured: { ok: true },
+            content: [
+              { type: "text", text: "ok" },
+              { type: "file", uri: "file:///tmp/out.txt", mime: "text/plain", name: "out.txt" },
+            ],
+          },
+        },
+      ],
+    })
+    const hasRawResult = (value: unknown): boolean => {
+      if (!value || typeof value !== "object") return false
+      if (Object.prototype.hasOwnProperty.call(value, "result")) return true
+      return Object.values(value).some(hasRawResult)
+    }
+    expect(hasRawResult(encoded)).toBe(false)
+  })
+
   test("roundtrips assistant patch content", () => {
     const message = Schema.decodeUnknownSync(SessionMessage.Message)({
       id: "evt_assistant",

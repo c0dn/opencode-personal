@@ -42,7 +42,10 @@ function layer(filename: string) {
   )
 }
 
-function run<A, E>(filename: string, effect: Effect.Effect<A, E, Database.Service | EventV2.Service | SessionV2.Service>) {
+function run<A, E>(
+  filename: string,
+  effect: Effect.Effect<A, E, Database.Service | EventV2.Service | SessionV2.Service>,
+) {
   return Effect.runPromise(effect.pipe(Effect.provide(layer(filename)), Effect.scoped))
 }
 
@@ -109,7 +112,12 @@ function insertMessage(message: SessionMessage.Message) {
   })
 }
 
-function assistantMessage(input: { id: string; created: number; completed?: number; content?: SessionMessage.Assistant["content"] }) {
+function assistantMessage(input: {
+  id: string
+  created: number
+  completed?: number
+  content?: SessionMessage.Assistant["content"]
+}) {
   return new SessionMessage.Assistant({
     id: SessionMessage.ID.make(input.id),
     type: "assistant",
@@ -471,7 +479,12 @@ describe("SessionProjector", () => {
         )
 
         expect(yield* readMessages()).toMatchObject([
-          { id: eventID("completed_before_orphan"), type: "compaction", summary: "original summary", include: "original" },
+          {
+            id: eventID("completed_before_orphan"),
+            type: "compaction",
+            summary: "original summary",
+            include: "original",
+          },
         ])
       }),
     )
@@ -523,7 +536,11 @@ describe("SessionProjector", () => {
         const events = yield* EventV2.Service
         yield* events.publish(
           SessionEvent.Prompted,
-          { sessionID, timestamp: at(30), prompt: new Prompt({ text: "between", files: [], agents: [], references: [] }) },
+          {
+            sessionID,
+            timestamp: at(30),
+            prompt: new Prompt({ text: "between", files: [], agents: [], references: [] }),
+          },
           { id: eventID("between_compactions") },
         )
         yield* publishCompaction({
@@ -535,7 +552,11 @@ describe("SessionProjector", () => {
         })
         yield* events.publish(
           SessionEvent.Prompted,
-          { sessionID, timestamp: at(60), prompt: new Prompt({ text: "after", files: [], agents: [], references: [] }) },
+          {
+            sessionID,
+            timestamp: at(60),
+            prompt: new Prompt({ text: "after", files: [], agents: [], references: [] }),
+          },
           { id: eventID("after_second_compaction") },
         )
 
@@ -621,13 +642,21 @@ describe("SessionProjector", () => {
         const events = yield* EventV2.Service
         yield* events.publish(
           SessionEvent.Prompted,
-          { sessionID, timestamp: at(10), prompt: new Prompt({ text: "before", files: [], agents: [], references: [] }) },
+          {
+            sessionID,
+            timestamp: at(10),
+            prompt: new Prompt({ text: "before", files: [], agents: [], references: [] }),
+          },
           { id: eventID("before_started_only") },
         )
         yield* publishCompaction({ startedID: eventID("context_started_only"), startedAt: 20 })
         yield* events.publish(
           SessionEvent.Prompted,
-          { sessionID, timestamp: at(30), prompt: new Prompt({ text: "after start", files: [], agents: [], references: [] }) },
+          {
+            sessionID,
+            timestamp: at(30),
+            prompt: new Prompt({ text: "after start", files: [], agents: [], references: [] }),
+          },
           { id: eventID("after_started_only") },
         )
 
@@ -644,7 +673,11 @@ describe("SessionProjector", () => {
         )
         yield* events.publish(
           SessionEvent.Prompted,
-          { sessionID, timestamp: at(50), prompt: new Prompt({ text: "after end", files: [], agents: [], references: [] }) },
+          {
+            sessionID,
+            timestamp: at(50),
+            prompt: new Prompt({ text: "after end", files: [], agents: [], references: [] }),
+          },
           { id: eventID("after_ended") },
         )
 
@@ -715,6 +748,196 @@ describe("SessionProjector", () => {
         expect(assistant?.type).toBe("assistant")
         if (assistant?.type !== "assistant") return
         expect(assistant.content[0]).toMatchObject({ type: "tool", state: { status: "completed" } })
+      }),
+    )
+  })
+
+  test("tool settlement preserves call metadata and stores result metadata separately", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        const events = yield* EventV2.Service
+        yield* events.publish(
+          SessionEvent.Step.Started,
+          { sessionID, timestamp: at(10), agent: "build", model },
+          { id: eventID("metadata_assistant") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Input.Started,
+          { sessionID, timestamp: at(20), callID: "call_metadata", name: "bash" },
+          { id: eventID("metadata_tool") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Called,
+          {
+            sessionID,
+            timestamp: at(30),
+            callID: "call_metadata",
+            tool: "bash",
+            input: { command: "pwd" },
+            provider: { executed: false, metadata: { call: "metadata" } },
+          },
+          { id: eventID("metadata_called") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Success,
+          {
+            sessionID,
+            timestamp: at(40),
+            callID: "call_metadata",
+            structured: {},
+            content: [new ToolOutput.TextContent({ type: "text", text: "/tmp" })],
+            provider: { executed: true, resultMetadata: { result: "metadata" } },
+          },
+          { id: eventID("metadata_success") },
+        )
+
+        const assistant = (yield* readMessages())[0]
+        expect(assistant?.type).toBe("assistant")
+        if (assistant?.type !== "assistant") return
+        const tool = assistant.content[0]
+        expect(tool?.type).toBe("tool")
+        if (tool?.type !== "tool") return
+        expect(tool.provider).toEqual({
+          executed: true,
+          metadata: { call: "metadata" },
+          resultMetadata: { result: "metadata" },
+        })
+      }),
+    )
+  })
+
+  test("legacy settlement provider metadata is treated as result metadata", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        const events = yield* EventV2.Service
+        yield* events.publish(
+          SessionEvent.Step.Started,
+          { sessionID, timestamp: at(10), agent: "build", model },
+          { id: eventID("legacy_metadata_assistant") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Input.Started,
+          { sessionID, timestamp: at(20), callID: "call_legacy_metadata", name: "bash" },
+          { id: eventID("legacy_metadata_tool") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Called,
+          {
+            sessionID,
+            timestamp: at(30),
+            callID: "call_legacy_metadata",
+            tool: "bash",
+            input: { command: "pwd" },
+            provider: { executed: true, metadata: { call: "metadata" } },
+          },
+          { id: eventID("legacy_metadata_called") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Failed,
+          {
+            sessionID,
+            timestamp: at(40),
+            callID: "call_legacy_metadata",
+            error: { type: "unknown", message: "boom" },
+            provider: { executed: true, metadata: { legacy: "settlement" } },
+          },
+          { id: eventID("legacy_metadata_failed") },
+        )
+
+        const assistant = (yield* readMessages())[0]
+        expect(assistant?.type).toBe("assistant")
+        if (assistant?.type !== "assistant") return
+        const tool = assistant.content[0]
+        expect(tool?.type).toBe("tool")
+        if (tool?.type !== "tool") return
+        expect(tool.provider).toEqual({
+          executed: true,
+          metadata: { call: "metadata" },
+          resultMetadata: { legacy: "settlement" },
+        })
+      }),
+    )
+  })
+
+  test("tool failed terminalizes pending tools and does not overwrite completed tools", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        const events = yield* EventV2.Service
+        yield* events.publish(
+          SessionEvent.Step.Started,
+          { sessionID, timestamp: at(10), agent: "build", model },
+          { id: eventID("failed_pending_assistant") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Input.Started,
+          { sessionID, timestamp: at(20), callID: "call_pending", name: "bash" },
+          { id: eventID("failed_pending_tool") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Failed,
+          {
+            sessionID,
+            timestamp: at(30),
+            callID: "call_pending",
+            error: { type: "unknown", message: "pending failed" },
+            provider: { executed: false, resultMetadata: { interrupted: true } },
+          },
+          { id: eventID("failed_pending") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Failed,
+          {
+            sessionID,
+            timestamp: at(40),
+            callID: "call_missing",
+            error: { type: "unknown", message: "missing" },
+            provider: { executed: false },
+          },
+          { id: eventID("failed_missing") },
+        )
+
+        const pendingAssistant = (yield* readMessages())[0]
+        expect(pendingAssistant?.type).toBe("assistant")
+        if (pendingAssistant?.type !== "assistant") return
+        expect(pendingAssistant.content).toHaveLength(1)
+        const pendingTool = pendingAssistant.content[0]
+        expect(pendingTool?.type).toBe("tool")
+        if (pendingTool?.type !== "tool") return
+        expect(pendingTool.state).toEqual({
+          status: "error",
+          input: {},
+          structured: {},
+          content: [],
+          error: { type: "unknown", message: "pending failed" },
+        })
+        expect(pendingTool.provider?.resultMetadata).toEqual({ interrupted: true })
+
+        yield* events.publish(
+          SessionEvent.Tool.Called,
+          {
+            sessionID,
+            timestamp: at(50),
+            callID: "call_pending",
+            tool: "bash",
+            input: { command: "pwd" },
+            provider: { executed: true },
+          },
+          { id: eventID("failed_late_called") },
+        )
+
+        const afterLate = (yield* readMessages())[0]
+        expect(afterLate?.type).toBe("assistant")
+        if (afterLate?.type !== "assistant") return
+        expect(afterLate.content[0]).toMatchObject({ type: "tool", state: { status: "error" } })
       }),
     )
   })

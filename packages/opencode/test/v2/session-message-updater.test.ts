@@ -47,13 +47,21 @@ function canonicalStateStrings(state: SessionMessageUpdater.MemoryState) {
   return strings
 }
 
-function assistantMessage(input: { id: string; created: number; completed?: number; content?: SessionMessage.Assistant["content"] }) {
+function assistantMessage(input: {
+  id: string
+  created: number
+  completed?: number
+  content?: SessionMessage.Assistant["content"]
+}) {
   return new SessionMessage.Assistant({
     id: SessionMessage.ID.make(input.id),
     type: "assistant",
     agent: "build",
     model,
-    time: { created: DateTime.makeUnsafe(input.created), completed: input.completed ? DateTime.makeUnsafe(input.completed) : undefined },
+    time: {
+      created: DateTime.makeUnsafe(input.created),
+      completed: input.completed ? DateTime.makeUnsafe(input.completed) : undefined,
+    },
     content: input.content ?? [],
   })
 }
@@ -459,4 +467,150 @@ test("compaction delta is non-canonical and ended materializes summary and inclu
     expect(value.startsWith("msg_")).toBe(false)
     expect(value.startsWith("prt_")).toBe(false)
   }
+})
+
+test("tool settlement keeps call metadata separate from result metadata", () => {
+  const state = applyEvents([
+    {
+      id: eventID("metadata_assistant"),
+      type: "session.next.step.started",
+      data: { sessionID, timestamp: DateTime.makeUnsafe(1), agent: "build", model },
+    },
+    {
+      id: eventID("metadata_tool"),
+      type: "session.next.tool.input.started",
+      data: { sessionID, timestamp: DateTime.makeUnsafe(2), callID: "call-metadata", name: "bash" },
+    },
+    {
+      id: eventID("metadata_called"),
+      type: "session.next.tool.called",
+      data: {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(3),
+        callID: "call-metadata",
+        tool: "bash",
+        input: { command: "pwd" },
+        provider: { executed: false, metadata: { call: "metadata" } },
+      },
+    },
+    {
+      id: eventID("metadata_success"),
+      type: "session.next.tool.success",
+      data: {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(4),
+        callID: "call-metadata",
+        structured: {},
+        content: [{ type: "text", text: "/tmp" }],
+        provider: { executed: true, resultMetadata: { result: "metadata" } },
+      },
+    },
+  ] satisfies SessionEvent.Event[])
+
+  const assistant = state.messages[0]
+  expect(assistant?.type).toBe("assistant")
+  if (assistant?.type !== "assistant") return
+  const tool = assistant.content[0]
+  expect(tool?.type).toBe("tool")
+  if (tool?.type !== "tool") return
+  expect(tool.provider).toEqual({
+    executed: true,
+    metadata: { call: "metadata" },
+    resultMetadata: { result: "metadata" },
+  })
+})
+
+test("tool failed terminalizes pending tools without creating or overwriting terminal tools", () => {
+  const completedTool = new SessionMessage.AssistantTool({
+    type: "tool",
+    id: eventID("completed_tool"),
+    callID: "call-completed",
+    name: "bash",
+    time: { created: DateTime.makeUnsafe(1), ran: DateTime.makeUnsafe(2), completed: DateTime.makeUnsafe(3) },
+    provider: { executed: true, metadata: { call: "metadata" }, resultMetadata: { result: "ok" } },
+    state: new SessionMessage.ToolStateCompleted({
+      status: "completed",
+      input: { command: "pwd" },
+      structured: { ok: true },
+      content: [],
+    }),
+  })
+  const state: SessionMessageUpdater.MemoryState = {
+    messages: [assistantMessage({ id: "evt_failure_assistant", created: 1, content: [completedTool] })],
+  }
+
+  for (const event of [
+    {
+      id: eventID("pending_tool"),
+      type: "session.next.tool.input.started",
+      data: {
+        sessionID,
+        assistantMessageID: "evt_failure_assistant",
+        timestamp: DateTime.makeUnsafe(4),
+        callID: "call-pending",
+        name: "bash",
+      },
+    },
+    {
+      id: eventID("pending_failed"),
+      type: "session.next.tool.failed",
+      data: {
+        sessionID,
+        assistantMessageID: "evt_failure_assistant",
+        timestamp: DateTime.makeUnsafe(5),
+        callID: "call-pending",
+        error: { type: "unknown", message: "pending failed" },
+        provider: { executed: false, resultMetadata: { interrupted: true } },
+      },
+    },
+    {
+      id: eventID("completed_failed"),
+      type: "session.next.tool.failed",
+      data: {
+        sessionID,
+        assistantMessageID: "evt_failure_assistant",
+        timestamp: DateTime.makeUnsafe(6),
+        callID: "call-completed",
+        error: { type: "unknown", message: "late failure" },
+        provider: { executed: false, resultMetadata: { late: true } },
+      },
+    },
+    {
+      id: eventID("missing_failed"),
+      type: "session.next.tool.failed",
+      data: {
+        sessionID,
+        assistantMessageID: "evt_failure_assistant",
+        timestamp: DateTime.makeUnsafe(7),
+        callID: "call-missing",
+        error: { type: "unknown", message: "missing" },
+        provider: { executed: false },
+      },
+    },
+  ] satisfies SessionEvent.Event[]) {
+    Effect.runSync(SessionMessageUpdater.update(SessionMessageUpdater.memory(state), event))
+  }
+
+  const assistant = state.messages[0]
+  expect(assistant?.type).toBe("assistant")
+  if (assistant?.type !== "assistant") return
+  expect(assistant.content).toHaveLength(2)
+  expect(assistant.content[0]).toMatchObject({
+    type: "tool",
+    callID: "call-completed",
+    provider: { executed: true, metadata: { call: "metadata" }, resultMetadata: { result: "ok" } },
+    state: { status: "completed", structured: { ok: true } },
+  })
+  expect(assistant.content[1]).toMatchObject({
+    type: "tool",
+    callID: "call-pending",
+    provider: { executed: false, resultMetadata: { interrupted: true } },
+    state: {
+      status: "error",
+      input: {},
+      structured: {},
+      content: [],
+      error: { type: "unknown", message: "pending failed" },
+    },
+  })
 })

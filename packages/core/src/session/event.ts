@@ -27,6 +27,17 @@ const AssistantTarget = {
   assistantMessageID: Schema.String.pipe(Schema.optional),
 }
 
+const ToolCallProvider = Schema.Struct({
+  executed: Schema.Boolean,
+  metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
+})
+
+const ToolSettlementProvider = Schema.Struct({
+  executed: Schema.Boolean,
+  metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
+  resultMetadata: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
+})
+
 const options = {
   sync: {
     aggregate: "sessionID",
@@ -461,10 +472,7 @@ export namespace Tool {
       callID: Schema.String,
       tool: Schema.String,
       input: Schema.Record(Schema.String, Schema.Unknown),
-      provider: Schema.Struct({
-        executed: Schema.Boolean,
-        metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
-      }),
+      provider: ToolCallProvider,
     },
   })
   export type Called = typeof Called.Type
@@ -491,10 +499,7 @@ export namespace Tool {
       title: Schema.String.pipe(Schema.optional),
       structured: ToolOutput.Structured,
       content: Schema.Array(ToolOutput.Content),
-      provider: Schema.Struct({
-        executed: Schema.Boolean,
-        metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
-      }),
+      provider: ToolSettlementProvider,
     },
   })
   export type Success = typeof Success.Type
@@ -507,10 +512,7 @@ export namespace Tool {
       ...AssistantTarget,
       callID: Schema.String,
       error: UnknownError,
-      provider: Schema.Struct({
-        executed: Schema.Boolean,
-        metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
-      }),
+      provider: ToolSettlementProvider,
     },
   })
   export type Failed = typeof Failed.Type

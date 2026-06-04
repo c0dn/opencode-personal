@@ -13882,6 +13882,9 @@
                           },
                           "metadata": {
                             "type": "object"
+                          },
+                          "resultMetadata": {
+                            "type": "object"
                           }
                         },
                         "required": ["executed"],
@@ -13931,6 +13934,9 @@
                             "type": "boolean"
                           },
                           "metadata": {
+                            "type": "object"
+                          },
+                          "resultMetadata": {
                             "type": "object"
                           }
                         },
@@ -21150,6 +21156,9 @@
                   },
                   "metadata": {
                     "type": "object"
+                  },
+                  "resultMetadata": {
+                    "type": "object"
                   }
                 },
                 "required": ["executed"],
@@ -21210,6 +21219,9 @@
                     "type": "boolean"
                   },
                   "metadata": {
+                    "type": "object"
+                  },
+                  "resultMetadata": {
                     "type": "object"
                   }
                 },
@@ -22213,6 +22225,9 @@
                 "type": "boolean"
               },
               "metadata": {
+                "type": "object"
+              },
+              "resultMetadata": {
                 "type": "object"
               }
             },
@@ -24351,6 +24366,9 @@
                   },
                   "metadata": {
                     "type": "object"
+                  },
+                  "resultMetadata": {
+                    "type": "object"
                   }
                 },
                 "required": ["executed"],
@@ -24400,6 +24418,9 @@
                     "type": "boolean"
                   },
                   "metadata": {
+                    "type": "object"
+                  },
+                  "resultMetadata": {
                     "type": "object"
                   }
                 },

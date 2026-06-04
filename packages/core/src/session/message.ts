@@ -114,6 +114,7 @@ export class AssistantTool extends Schema.Class<AssistantTool>("Session.Message.
   provider: Schema.Struct({
     executed: Schema.Boolean,
     metadata: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
+    resultMetadata: Schema.Record(Schema.String, Schema.Unknown).pipe(Schema.optional),
   }).pipe(Schema.optional),
   state: ToolState,
   time: Schema.Struct({

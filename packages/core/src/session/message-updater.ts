@@ -170,7 +170,36 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
     )
 
   const targetAssistant = (assistantMessageID?: string) =>
-    assistantMessageID ? adapter.getAssistant(SessionMessage.ID.make(assistantMessageID)) : adapter.getCurrentAssistant()
+    assistantMessageID
+      ? adapter.getAssistant(SessionMessage.ID.make(assistantMessageID))
+      : adapter.getCurrentAssistant()
+
+  const settleProvider = (
+    current: DraftTool["provider"],
+    settlement: SessionEvent.Tool.Success["data"]["provider"] | SessionEvent.Tool.Failed["data"]["provider"],
+  ): NonNullable<DraftTool["provider"]> => {
+    const resultMetadata = settlement.resultMetadata ?? settlement.metadata ?? current?.resultMetadata
+    return {
+      executed: current?.executed === true || settlement.executed,
+      ...(current?.metadata ? { metadata: current.metadata } : {}),
+      ...(resultMetadata ? { resultMetadata } : {}),
+    }
+  }
+
+  const failedInput = (tool: DraftTool) => {
+    if (tool.state.status === "running") return tool.state.input
+    return {}
+  }
+
+  const failedStructured = (tool: DraftTool) => {
+    if (tool.state.status === "running") return tool.state.structured
+    return {}
+  }
+
+  const failedContent = (tool: DraftTool) => {
+    if (tool.state.status === "running") return tool.state.content.map((item) => decodeToolContent(item))
+    return []
+  }
 
   return Effect.gen(function* () {
     yield* SessionEvent.All.match(event, {
@@ -306,7 +335,9 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           if (currentAssistant) {
             yield* adapter.updateAssistant(
               produce(currentAssistant, (draft) => {
-                draft.content.push(new SessionMessage.AssistantText({ type: "text", id: event.id, text: "" }) as DraftText)
+                draft.content.push(
+                  new SessionMessage.AssistantText({ type: "text", id: event.id, text: "" }) as DraftText,
+                )
               }),
             )
           }
@@ -420,7 +451,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
               produce(currentAssistant, (draft) => {
                 const match = latestTool(draft, event.data.callID)
                 if (match && match.state.status === "running") {
-                  match.provider = event.data.provider
+                  match.provider = settleProvider(match.provider, event.data.provider)
                   if (event.data.title !== undefined) match.title = event.data.title
                   match.time.completed = event.data.timestamp
                   match.state = new SessionMessage.ToolStateCompleted({
@@ -442,15 +473,15 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
             yield* adapter.updateAssistant(
               produce(currentAssistant, (draft) => {
                 const match = latestTool(draft, event.data.callID)
-                if (match && match.state.status === "running") {
-                  match.provider = event.data.provider
+                if (match && (match.state.status === "pending" || match.state.status === "running")) {
+                  match.provider = settleProvider(match.provider, event.data.provider)
                   match.time.completed = event.data.timestamp
                   match.state = new SessionMessage.ToolStateError({
                     status: "error",
                     error: event.data.error,
-                    input: match.state.input,
-                    structured: match.state.structured,
-                    content: match.state.content.map((item) => decodeToolContent(item)),
+                    input: failedInput(match),
+                    structured: failedStructured(match),
+                    content: failedContent(match),
                   }) as DraftTool["state"]
                 }
               }),

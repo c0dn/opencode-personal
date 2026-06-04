@@ -9,6 +9,7 @@ import { SessionEvent } from "@opencode-ai/core/session/event"
 import { expect, test } from "bun:test"
 import { tool } from "ai"
 import { Cause, Effect, Exit, Fiber, Layer, Schema } from "effect"
+import * as Stream from "effect/Stream"
 import { eq } from "drizzle-orm"
 import path from "path"
 import z from "zod"
@@ -30,11 +31,12 @@ import { SessionSummary } from "../../src/session/summary"
 import { Snapshot } from "../../src/snapshot"
 import * as Log from "@opencode-ai/core/util/log"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { provideTmpdirServer } from "../fixture/fixture"
+import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { raw, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+import { LLMEvent } from "@opencode-ai/llm"
 
 void Log.init({ print: false })
 
@@ -191,6 +193,18 @@ const deps = Layer.mergeAll(
   Database.defaultLayer,
   EventV2Bridge.defaultLayer,
 ).pipe(Layer.provideMerge(infra))
+const depsWithoutLLM = Layer.mergeAll(
+  Session.defaultLayer,
+  Snapshot.defaultLayer,
+  AgentSvc.defaultLayer,
+  Permission.defaultLayer,
+  Plugin.defaultLayer,
+  Config.defaultLayer,
+  Provider.defaultLayer,
+  status,
+  Database.defaultLayer,
+  EventV2Bridge.defaultLayer,
+).pipe(Layer.provideMerge(infra))
 const env = Layer.mergeAll(
   TestLLMServer.layer,
   SessionProcessor.layer.pipe(
@@ -202,6 +216,25 @@ const env = Layer.mergeAll(
 )
 
 const it = testEffect(env)
+
+function envWithLLMEvents(events: LLMEvent[]) {
+  return SessionProcessor.layer.pipe(
+    Layer.provide(summary),
+    Layer.provide(Image.defaultLayer),
+    Layer.provide(RuntimeFlags.layer({})),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        depsWithoutLLM,
+        Layer.succeed(
+          LLM.Service,
+          LLM.Service.of({
+            stream: () => Stream.make(...events),
+          }),
+        ),
+      ),
+    ),
+  )
+}
 
 test("session.processor maps legacy assistant errors to rich failed-step errors", () => {
   expect(SessionProcessor.toAssistantError(new SessionLegacy.AbortedError({ message: "stopped" }))).toEqual({
@@ -861,11 +894,15 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
         expect((toolInputEnded?.data as { assistantMessageID?: string } | undefined)?.assistantMessageID).toBe(
           stepStarted?.id,
         )
-        expect((toolCalled?.data as { assistantMessageID?: string } | undefined)?.assistantMessageID).toBe(stepStarted?.id)
+        expect((toolCalled?.data as { assistantMessageID?: string } | undefined)?.assistantMessageID).toBe(
+          stepStarted?.id,
+        )
         expect((toolSuccess?.data as { assistantMessageID?: string } | undefined)?.assistantMessageID).toBe(
           stepStarted?.id,
         )
-        expect((stepEnded?.data as { assistantMessageID?: string } | undefined)?.assistantMessageID).toBe(stepStarted?.id)
+        expect((stepEnded?.data as { assistantMessageID?: string } | undefined)?.assistantMessageID).toBe(
+          stepStarted?.id,
+        )
         expect((toolSuccess?.data as { title?: string } | undefined)?.title).toBe("Weather lookup")
         expect(call?.callID).toBe("call_1")
         expect(call?.tool).toBe("lookup")
@@ -911,6 +948,181 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
     { config: (url) => providerCfg(url) },
   ),
 )
+
+test("session.processor publishes tool-result provider metadata as result metadata", async () => {
+  const providerMetadata = { openai: { result: true } }
+  await Effect.runPromise(
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const database = yield* Database.Service
+          const { processors, session, provider } = yield* boot()
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "tool result metadata")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+          const value = yield* handle.process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies SessionLegacy.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "tool result metadata" }],
+            tools: {},
+          })
+
+          const eventRows = (yield* database.db.select().from(EventTable).all().pipe(Effect.orDie)).filter(
+            (evt) => (evt.data as { sessionID?: string }).sessionID === chat.id,
+          )
+          const toolSuccess = eventRows.find((evt) => evt.type.startsWith(SessionEvent.Tool.Success.type))
+          const rows = yield* database.db
+            .select()
+            .from(SessionMessageTable)
+            .where(eq(SessionMessageTable.session_id, chat.id))
+            .all()
+            .pipe(Effect.orDie)
+          const v2Tool = rows
+            .map((row) => Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type }))
+            .find((message): message is SessionMessage.Assistant => message.type === "assistant")
+            ?.content.find((item): item is SessionMessage.AssistantTool => item.type === "tool")
+
+          expect(value).toBe("continue")
+          expect(
+            (toolSuccess?.data as { provider?: { resultMetadata?: unknown; metadata?: unknown } } | undefined)
+              ?.provider,
+          ).toMatchObject({
+            resultMetadata: providerMetadata,
+          })
+          expect(
+            (toolSuccess?.data as { provider?: { metadata?: unknown } } | undefined)?.provider?.metadata,
+          ).toBeUndefined()
+          expect(v2Tool?.provider).toMatchObject({ resultMetadata: providerMetadata })
+          expect(v2Tool?.provider?.metadata).toEqual({ openai: { called: true } })
+        }),
+      { config: () => cfg },
+    ).pipe(
+      Effect.provide(
+        envWithLLMEvents([
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.toolCall({
+            id: "call_1",
+            name: "lookup",
+            input: { query: "weather" },
+            providerExecuted: true,
+            providerMetadata: { openai: { called: true } },
+          }),
+          LLMEvent.toolResult({
+            id: "call_1",
+            name: "lookup",
+            result: { type: "json", value: { title: "Lookup", output: "sunny", metadata: { ok: true } } },
+            providerExecuted: true,
+            providerMetadata,
+          }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop", usage: {} }),
+          LLMEvent.finish({ reason: "stop", usage: {} }),
+        ]),
+      ),
+      Effect.scoped,
+    ),
+  )
+})
+
+test("session.processor publishes tool-error and cleanup metadata as result metadata", async () => {
+  const errorMetadata = { openai: { error: true } }
+  await Effect.runPromise(
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const database = yield* Database.Service
+          const { processors, session, provider } = yield* boot()
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "tool error metadata")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+          const value = yield* handle.process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies SessionLegacy.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "tool error metadata" }],
+            tools: {},
+          })
+
+          const eventRows = (yield* database.db.select().from(EventTable).all().pipe(Effect.orDie)).filter(
+            (evt) => (evt.data as { sessionID?: string }).sessionID === chat.id,
+          )
+          const toolFailed = eventRows.find((evt) => evt.type.startsWith(SessionEvent.Tool.Failed.type))
+          const rows = yield* database.db
+            .select()
+            .from(SessionMessageTable)
+            .where(eq(SessionMessageTable.session_id, chat.id))
+            .all()
+            .pipe(Effect.orDie)
+          const v2Tool = rows
+            .map((row) => Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type }))
+            .find((message): message is SessionMessage.Assistant => message.type === "assistant")
+            ?.content.find((item): item is SessionMessage.AssistantTool => item.type === "tool")
+
+          expect(value).toBe("continue")
+          expect(
+            (toolFailed?.data as { provider?: { resultMetadata?: unknown; metadata?: unknown } } | undefined)?.provider,
+          ).toMatchObject({
+            resultMetadata: errorMetadata,
+          })
+          expect(
+            (toolFailed?.data as { provider?: { metadata?: unknown } } | undefined)?.provider?.metadata,
+          ).toBeUndefined()
+          expect(v2Tool?.state.status).toBe("error")
+          expect(v2Tool?.provider).toMatchObject({
+            metadata: { openai: { called: true } },
+            resultMetadata: errorMetadata,
+          })
+        }),
+      { config: () => cfg },
+    ).pipe(
+      Effect.provide(
+        envWithLLMEvents([
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.toolCall({
+            id: "call_1",
+            name: "lookup",
+            input: { query: "weather" },
+            providerMetadata: { openai: { called: true } },
+          }),
+          LLMEvent.toolError({
+            id: "call_1",
+            name: "lookup",
+            message: "boom",
+            error: new Error("boom"),
+            providerMetadata: errorMetadata,
+          }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop", usage: {} }),
+          LLMEvent.finish({ reason: "stop", usage: {} }),
+        ]),
+      ),
+      Effect.scoped,
+    ),
+  )
+})
 
 it.live("session.processor effect tests mark pending tools as aborted on cleanup", () =>
   provideTmpdirServer(
@@ -963,6 +1175,10 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
         const exit = yield* Fiber.await(run)
         const parts = yield* MessageV2.parts(msg.id)
         const call = parts.find((part): part is SessionLegacy.ToolPart => part.type === "tool")
+        const eventRows = (yield* database.db.select().from(EventTable).all().pipe(Effect.orDie)).filter(
+          (evt) => (evt.data as { sessionID?: string }).sessionID === chat.id,
+        )
+        const toolFailed = eventRows.find((evt) => evt.type.startsWith(SessionEvent.Tool.Failed.type))
 
         expect(Exit.isFailure(exit)).toBe(true)
         if (Exit.isFailure(exit)) {
@@ -975,6 +1191,14 @@ it.live("session.processor effect tests mark pending tools as aborted on cleanup
           expect(call.state.metadata?.interrupted).toBe(true)
           expect(call.state.time.end).toBeDefined()
         }
+        expect(
+          (toolFailed?.data as { provider?: { resultMetadata?: unknown; metadata?: unknown } } | undefined)?.provider,
+        ).toMatchObject({
+          resultMetadata: { interrupted: true },
+        })
+        expect(
+          (toolFailed?.data as { provider?: { metadata?: unknown } } | undefined)?.provider?.metadata,
+        ).toBeUndefined()
       }),
     { config: (url) => providerCfg(url) },
   ),

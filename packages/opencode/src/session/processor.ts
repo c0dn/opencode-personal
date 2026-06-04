@@ -88,7 +88,10 @@ type StreamEvent = LLMEvent
 type LegacyAssistantError = NonNullable<SessionLegacy.Assistant["error"]>
 
 function legacyErrorMessage(error: LegacyAssistantError) {
-  return typeof error.data === "object" && error.data !== null && "message" in error.data && typeof error.data.message === "string"
+  return typeof error.data === "object" &&
+    error.data !== null &&
+    "message" in error.data &&
+    typeof error.data.message === "string"
     ? error.data.message
     : "Unknown error"
 }
@@ -533,15 +536,19 @@ export const layer = Layer.effect(
                   type: "text",
                   text: output.output,
                 }),
-                ...(output.attachments?.map((item: SessionLegacy.FilePart) => new ToolOutput.FileContent({
-                  type: "file" as const,
-                  uri: item.url,
-                  mime: item.mime,
-                  name: item.filename,
-                })) ?? []),
+                ...(output.attachments?.map(
+                  (item: SessionLegacy.FilePart) =>
+                    new ToolOutput.FileContent({
+                      type: "file" as const,
+                      uri: item.url,
+                      mime: item.mime,
+                      name: item.filename,
+                    }),
+                ) ?? []),
               ],
               provider: {
                 executed: value.providerExecuted === true || toolCall?.part.metadata?.providerExecuted === true,
+                ...(value.providerMetadata ? { resultMetadata: value.providerMetadata } : {}),
               },
               timestamp: DateTime.makeUnsafe(Date.now()),
             })
@@ -562,6 +569,7 @@ export const layer = Layer.effect(
               },
               provider: {
                 executed: toolCall?.part.metadata?.providerExecuted === true,
+                ...(value.providerMetadata ? { resultMetadata: value.providerMetadata } : {}),
               },
               timestamp: DateTime.makeUnsafe(Date.now()),
             })
@@ -769,7 +777,7 @@ export const layer = Layer.effect(
             },
             provider: {
               executed: part.metadata?.providerExecuted === true,
-              metadata: { ...metadata, interrupted: true },
+              resultMetadata: { ...metadata, interrupted: true },
             },
             timestamp: DateTime.makeUnsafe(end),
           })

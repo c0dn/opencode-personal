@@ -1099,6 +1099,9 @@ export type GlobalEvent = {
             metadata?: {
               [key: string]: unknown
             }
+            resultMetadata?: {
+              [key: string]: unknown
+            }
           }
         }
       }
@@ -1114,6 +1117,9 @@ export type GlobalEvent = {
           provider: {
             executed: boolean
             metadata?: {
+              [key: string]: unknown
+            }
+            resultMetadata?: {
               [key: string]: unknown
             }
           }
@@ -3523,6 +3529,9 @@ export type SyncEventSessionNextToolSuccess = {
       metadata?: {
         [key: string]: unknown
       }
+      resultMetadata?: {
+        [key: string]: unknown
+      }
     }
   }
 }
@@ -3542,6 +3551,9 @@ export type SyncEventSessionNextToolFailed = {
     provider: {
       executed: boolean
       metadata?: {
+        [key: string]: unknown
+      }
+      resultMetadata?: {
         [key: string]: unknown
       }
     }
@@ -3875,6 +3887,9 @@ export type SessionMessageAssistantTool = {
   provider?: {
     executed: boolean
     metadata?: {
+      [key: string]: unknown
+    }
+    resultMetadata?: {
       [key: string]: unknown
     }
   }
@@ -4570,6 +4585,9 @@ export type EventSessionNextToolSuccess = {
       metadata?: {
         [key: string]: unknown
       }
+      resultMetadata?: {
+        [key: string]: unknown
+      }
     }
   }
 }
@@ -4586,6 +4604,9 @@ export type EventSessionNextToolFailed = {
     provider: {
       executed: boolean
       metadata?: {
+        [key: string]: unknown
+      }
+      resultMetadata?: {
         [key: string]: unknown
       }
     }
