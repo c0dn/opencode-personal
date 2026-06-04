@@ -22,6 +22,13 @@ type ReplayV2Input = {
   sessionID?: string
 }
 
+type BootstrapV2DisplayInput = {
+  data: SessionData
+  messages: readonly TranscriptV2Display.DisplayTranscriptMessage[]
+  permissions: PermissionRequest[]
+  questions: QuestionRequest[]
+}
+
 export type SessionReplay = {
   data: SessionData
   commits: StreamCommit[]
@@ -222,6 +229,34 @@ export function replaySessionV2(input: ReplayV2Input): SessionReplay {
     commits,
     patch: replayPatch(data, patch),
   }
+}
+
+export function bootstrapSessionDataV2Display(input: BootstrapV2DisplayInput) {
+  for (const message of input.messages) {
+    if (message.type !== "assistant") {
+      continue
+    }
+
+    for (const content of message.content) {
+      if (content.type !== "tool") {
+        continue
+      }
+
+      const state = content.state
+      if (state.status === "pending") {
+        continue
+      }
+
+      input.data.call.set(`${message.id}:${content.callID}`, state.input)
+    }
+  }
+
+  bootstrapSessionData({
+    data: input.data,
+    messages: [],
+    permissions: input.permissions,
+    questions: input.questions,
+  })
 }
 
 function replaySessionID(input: ReplayV2Input) {

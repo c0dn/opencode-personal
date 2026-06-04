@@ -28,7 +28,7 @@ import {
   reduceSessionData,
   type SessionData,
 } from "./session-data"
-import { replaySession, replaySessionV2 } from "./session-replay"
+import { bootstrapSessionDataV2Display, replaySession, replaySessionV2 } from "./session-replay"
 import {
   bootstrapSubagentCalls,
   bootstrapSubagentData,
@@ -623,6 +623,26 @@ function createLayer(input: StreamInput) {
           return TranscriptV2Display.toDisplayTranscriptV2FromWire(rows, { status: "ready" })
         })
 
+        const primaryNoReplayBootstrapMessages = Effect.fn("RunStreamTransport.primaryNoReplayBootstrapMessages")(
+          function* () {
+            if (input.replay) {
+              return undefined
+            }
+
+            const response = yield* Effect.promise(() =>
+              input.sdk.v2.session.messages(
+                {
+                  sessionID: input.sessionID,
+                  limit: SUBAGENT_BOOTSTRAP_LIMIT,
+                  order: "desc",
+                },
+                { throwOnError: true },
+              ),
+            )
+            return TranscriptV2Display.toDisplayTranscriptV2FromWire(requireV2ReplayItems(response), { status: "ready" })
+          },
+        )
+
         const primaryReplayLatestMessages = Effect.fn("RunStreamTransport.primaryReplayLatestMessages")(function* (
           limit: number,
         ) {
@@ -701,9 +721,10 @@ function createLayer(input: StreamInput) {
         })
 
         const bootstrap = Effect.fn("RunStreamTransport.bootstrap")(function* () {
-          const [replayMessages, children, permissions, questions] = yield* Effect.all(
+          const [replayMessages, noReplayBootstrapMessages, children, permissions, questions] = yield* Effect.all(
             [
               primaryReplayMessages(),
+              primaryNoReplayBootstrapMessages(),
               Effect.promise(() =>
                 input.sdk.session.children({
                   sessionID: input.sessionID,
@@ -725,11 +746,11 @@ function createLayer(input: StreamInput) {
               concurrency: "unbounded",
             },
           )
-          // Primary v2 replay owns main-session transcript rendering. Legacy
-          // main-session messages remain needed only to discover parent task
-          // calls for child/subagent bootstrap until that path gets its own v2
-          // cutover slice.
-          const messagesList = input.replay
+          // Primary v2 replay/bootstrap owns main-session transcript state.
+          // Legacy main-session messages remain needed only to discover parent
+          // task calls for child/subagent bootstrap until that path gets its own
+          // v2 cutover slice. Replay mode keeps its narrower legacy fetch policy.
+          const subagentBootstrapMessages = input.replay
             ? children.length > 0
               ? yield* messages(input.sessionID, SUBAGENT_BOOTSTRAP_LIMIT)
               : []
@@ -755,12 +776,21 @@ function createLayer(input: StreamInput) {
           }
 
           if (!history) {
-            bootstrapSessionData({
-              data: state.data,
-              messages: messagesList,
-              permissions: sessionPermissions,
-              questions: sessionQuestions,
-            })
+            if (noReplayBootstrapMessages) {
+              bootstrapSessionDataV2Display({
+                data: state.data,
+                messages: noReplayBootstrapMessages,
+                permissions: sessionPermissions,
+                questions: sessionQuestions,
+              })
+            } else {
+              bootstrapSessionData({
+                data: state.data,
+                messages: subagentBootstrapMessages,
+                permissions: sessionPermissions,
+                questions: sessionQuestions,
+              })
+            }
           }
 
           if (replay) {
@@ -778,7 +808,7 @@ function createLayer(input: StreamInput) {
 
           bootstrapSubagentData({
             data: state.subagent,
-            messages: messagesList,
+            messages: subagentBootstrapMessages,
             children,
             permissions,
             questions,

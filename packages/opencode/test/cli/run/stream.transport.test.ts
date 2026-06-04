@@ -486,9 +486,14 @@ describe("run stream transport", () => {
   test("does not replay persisted main-session history during bootstrap by default", async () => {
     const src = eventFeed()
     const ui = footer()
+    const v2Messages = mock(({ sessionID, order, limit }) => {
+      expect({ sessionID, order, limit }).toEqual({ sessionID: "session-1", order: "desc", limit: 200 })
+      return okV2Messages([])
+    })
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
+        v2Messages,
         messages: async ({ sessionID }) =>
           sessionID === "session-1"
             ? ok([
@@ -517,6 +522,69 @@ describe("run stream transport", () => {
     try {
       expect(ui.commits).toEqual([])
       expect(ui.idleCalls).toBe(0)
+      expect(v2Messages).toHaveBeenCalledTimes(1)
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
+
+  test("bootstraps no-replay primary blockers from v2 without appending history", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const v2Messages = mock(({ sessionID, order, limit }) => {
+      expect({ sessionID, order, limit }).toEqual({ sessionID: "session-1", order: "desc", limit: 200 })
+      return okV2Messages([
+        v2User("evt-user-1", "historical user"),
+        v2Assistant("evt-assistant-1", [v2Text("evt-text-1", "historical assistant"), v2RunningTool("evt-tool-1")]),
+      ])
+    })
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        stream: src.stream,
+        v2Messages,
+        permissions: async () =>
+          ok([
+            {
+              id: "perm-1",
+              sessionID: "session-1",
+              permission: "bash",
+              patterns: ["*"],
+              metadata: {},
+              always: [],
+              tool: { messageID: "evt-assistant-1", callID: "call-1" },
+            },
+            {
+              id: "perm-child",
+              sessionID: "child-1",
+              permission: "bash",
+              patterns: ["*"],
+              metadata: {},
+              always: [],
+              tool: { messageID: "evt-child", callID: "call-child" },
+            },
+          ]),
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      replay: false,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const view = await waitFor(() => {
+        const item = ui.events.findLast((event) => event.type === "stream.view")
+        return item?.type === "stream.view" && item.view.type === "permission" ? item.view : undefined
+      })
+      expect(view.request).toEqual(
+        expect.objectContaining({
+          id: "perm-1",
+          metadata: { input: { command: "pwd" } },
+        }),
+      )
+      expect(ui.commits).toEqual([])
+      expect(v2Messages).toHaveBeenCalledTimes(1)
     } finally {
       src.close()
       await transport.close()
@@ -637,6 +705,61 @@ describe("run stream transport", () => {
           : undefined
       })
       expect(state.tabs).toEqual([expect.objectContaining({ sessionID: "child-1", status: "running" })])
+      expect(legacyMessages.mock.calls.map((call) => call[0])).toContainEqual(
+        expect.objectContaining({ sessionID: "session-1" }),
+      )
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
+
+  test("no-replay discovers subagent tabs from legacy primary messages when children are empty", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const legacyMessages = mock(({ sessionID }) =>
+      sessionID === "session-1"
+        ? ok([
+            assistantMessage({
+              sessionID: "session-1",
+              id: "msg-legacy-parent",
+              parts: [
+                runningTool({
+                  sessionID: "session-1",
+                  messageID: "msg-legacy-parent",
+                  id: "task-1",
+                  callID: "call-1",
+                  tool: "task",
+                  body: { description: "Explore run.ts", subagent_type: "explore" },
+                  metadata: { sessionId: "child-1" },
+                }),
+              ],
+            }),
+          ])
+        : ok([]),
+    )
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        stream: src.stream,
+        v2Messages: async () => okV2Messages([]),
+        messages: legacyMessages,
+        children: async () => ok([]),
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      replay: false,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const state = await waitFor(() => {
+        const item = ui.events.findLast((event) => event.type === "stream.subagent")
+        return item?.type === "stream.subagent" && item.state.tabs.some((tab) => tab.sessionID === "child-1")
+          ? item.state
+          : undefined
+      })
+      expect(state.tabs).toEqual([expect.objectContaining({ sessionID: "child-1", status: "running" })])
       expect(legacyMessages.mock.calls.map((call) => call[0])).toEqual([
         expect.objectContaining({ sessionID: "session-1" }),
         expect.objectContaining({ sessionID: "child-1" }),
@@ -736,6 +859,38 @@ describe("run stream transport", () => {
         sessionID: "session-1",
         thinking: true,
         replay: true,
+        limits: () => ({}),
+        footer: footer().api,
+      }),
+    ).rejects.toThrow()
+  })
+
+  test("rejects no-replay startup when primary v2 bootstrap is not ready or invalid", async () => {
+    await expect(
+      createSessionTransport({
+        sdk: sdk({
+          v2Messages: async () =>
+            ({
+              data: undefined,
+              error: { _tag: "SessionMessagesNotReadyError", sessionID: "session-1", status: "upgrade_pending" },
+              request: new Request("https://opencode.test"),
+              response: new Response(undefined, { status: 503 }),
+            }) as never,
+        }),
+        sessionID: "session-1",
+        thinking: true,
+        replay: false,
+        limits: () => ({}),
+        footer: footer().api,
+      }),
+    ).rejects.toThrow("failed to load v2 replay messages")
+
+    await expect(
+      createSessionTransport({
+        sdk: sdk({ v2Messages: async () => okV2Messages([{ ...v2User("msg_legacy", "bad"), id: "msg_legacy" }]) }),
+        sessionID: "session-1",
+        thinking: true,
+        replay: false,
         limits: () => ({}),
         footer: footer().api,
       }),

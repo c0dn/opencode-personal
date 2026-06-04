@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { PermissionRequest } from "@opencode-ai/sdk/v2"
-import { replaySession, replaySessionV2 } from "@/cli/cmd/run/session-replay"
+import { bootstrapSessionDataV2Display, replaySession, replaySessionV2 } from "@/cli/cmd/run/session-replay"
+import { createSessionData } from "@/cli/cmd/run/session-data"
 import type { SessionMessages } from "@/cli/cmd/run/session.shared"
 import type { TranscriptV2Display } from "@/session/transcript-v2-display"
 
@@ -246,6 +247,46 @@ describe("run session replay", () => {
     ])
   })
 
+  test("bootstraps v2 display tool inputs without replay commits", () => {
+    const data = createSessionData()
+    bootstrapSessionDataV2Display({
+      data,
+      messages: [
+        v2Assistant("evt-assistant-1", [
+          v2Tool("evt-run", "running", "call-run"),
+          v2Tool("evt-done", "completed", "call-done"),
+          v2Tool("evt-error", "error", "call-error"),
+          v2PendingTool("evt-pending", "call-pending"),
+        ]),
+      ],
+      permissions: [
+        permission("perm-run", "call-run"),
+        permission("perm-done", "call-done"),
+        permission("perm-error", "call-error"),
+        permission("perm-pending", "call-pending"),
+        permission("perm-existing", "call-run", { input: { command: "existing" } }),
+      ],
+      questions: [],
+    })
+
+    expect(data.call).toEqual(
+      new Map([
+        ["evt-assistant-1:call-run", { command: "pwd" }],
+        ["evt-assistant-1:call-done", { command: "pwd" }],
+        ["evt-assistant-1:call-error", { command: "pwd" }],
+      ]),
+    )
+    expect(data.permissions).toEqual([
+      expect.objectContaining({ id: "perm-done", metadata: { input: { command: "pwd" } } }),
+      expect.objectContaining({ id: "perm-error", metadata: { input: { command: "pwd" } } }),
+      expect.objectContaining({ id: "perm-existing", metadata: { input: { command: "existing" } } }),
+      expect.objectContaining({ id: "perm-pending", metadata: {} }),
+      expect.objectContaining({ id: "perm-run", metadata: { input: { command: "pwd" } } }),
+    ])
+    expect(data.ids.size).toBe(0)
+    expect(data.tools.size).toBe(0)
+  })
+
   test("preserves v2 task requests as completed task tool commits", () => {
     const out = replaySessionV2({
       messages: [
@@ -342,11 +383,12 @@ function v2Compaction(id: string, summary: string): TranscriptV2Display.DisplayC
 function v2Tool(
   id: string,
   status: "running" | "completed" | "error",
+  callID = "call-1",
 ): TranscriptV2Display.DisplayAssistantTool {
   return {
     type: "tool",
     id,
-    callID: "call-1",
+    callID,
     name: "bash",
     state:
       status === "running"
@@ -355,5 +397,28 @@ function v2Tool(
           ? { status, input: { command: "pwd" }, structured: {}, content: [{ type: "text", text: "out" }] }
           : { status, input: { command: "pwd" }, structured: {}, content: [], error: { type: "unknown", message: "boom" } },
     time: { created: 2, ran: 2, completed: status === "running" ? undefined : 3 },
+  }
+}
+
+function v2PendingTool(id: string, callID: string): TranscriptV2Display.DisplayAssistantTool {
+  return {
+    type: "tool",
+    id,
+    callID,
+    name: "bash",
+    state: { status: "pending", input: '{"command":"pwd"}' },
+    time: { created: 2 },
+  }
+}
+
+function permission(id: string, callID: string, metadata: PermissionRequest["metadata"] = {}): PermissionRequest {
+  return {
+    id,
+    sessionID: "session-1",
+    permission: "bash",
+    patterns: ["*"],
+    metadata,
+    always: [],
+    tool: { messageID: "evt-assistant-1", callID },
   }
 }
