@@ -1,10 +1,11 @@
 import { SessionMessage } from "@opencode-ai/core/session/message"
+import { SessionMessageBackfillService } from "@opencode-ai/core/session/message-backfill-service"
 import { SessionV2 } from "@opencode-ai/core/session"
-import { Effect, Schema } from "effect"
+import { Cause, Effect, Schema } from "effect"
 import * as DateTime from "effect/DateTime"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../../api"
-import { InvalidCursorError, SessionNotFoundError, UnknownError } from "../../errors"
+import { InvalidCursorError, SessionMessagesNotReadyError, SessionNotFoundError, UnknownError } from "../../errors"
 
 const DefaultMessagesLimit = 50
 
@@ -42,6 +43,17 @@ export const messageHandlers = HttpApiBuilder.group(InstanceHttpApi, "v2.message
           catch: () => new InvalidCursorError({ message: "Invalid cursor" }),
         })
         const order = decoded?.order ?? ctx.query.order ?? "desc"
+        yield* session.get(ctx.params.sessionID).pipe(
+          Effect.catchTag(
+            "Session.NotFoundError",
+            (error) =>
+              new SessionNotFoundError({
+                sessionID: error.sessionID,
+                message: `Session not found: ${error.sessionID}`,
+              }),
+          ),
+        )
+        yield* ensureMessagesReady(ctx.params.sessionID)
         const messages = yield* session
           .messages({
             sessionID: ctx.params.sessionID,
@@ -86,3 +98,26 @@ export const messageHandlers = HttpApiBuilder.group(InstanceHttpApi, "v2.message
     )
   }),
 )
+
+const ensureMessagesReady = Effect.fn("V2Message.ensureMessagesReady")(function* (sessionID: string) {
+  const exit = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID).pipe(Effect.exit)
+  if (exit._tag === "Failure") {
+    const ref = `err_${crypto.randomUUID().slice(0, 8)}`
+    yield* Effect.logError("failed to check v2 session message backfill readiness").pipe(
+      Effect.annotateLogs({ ref, sessionID, cause: Cause.pretty(exit.cause) }),
+    )
+    return yield* new SessionMessagesNotReadyError({ sessionID, status: "failure", retryable: true, ref })
+  }
+  const result = exit.value
+  if (result.status === "completed" || result.status === "already_completed") return
+  return yield* new SessionMessagesNotReadyError({
+    sessionID,
+    status: result.status,
+    reason: result.status === "aborted" ? result.reason : firstBackfillReason(result.stats),
+    retryable: result.status !== "upgrade_unavailable",
+  })
+})
+
+function firstBackfillReason(stats: Extract<SessionMessageBackfillService.Result, { stats: unknown }>["stats"]) {
+  return [...stats.skipped, ...stats.degraded].find((stat) => stat.count > 0)?.reason
+}

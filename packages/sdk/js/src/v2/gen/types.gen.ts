@@ -2661,6 +2661,15 @@ export type V2SessionMessagesResponse = {
   }
 }
 
+export type SessionMessagesNotReadyError = {
+  _tag: "SessionMessagesNotReadyError"
+  sessionID: string
+  status: "aborted" | "upgrade_pending" | "upgrade_unavailable" | "failure"
+  reason?: string
+  retryable?: boolean
+  ref?: string
+}
+
 export type ProviderNotFoundError = {
   _tag: "ProviderNotFoundError"
   providerID: string
@@ -8621,6 +8630,10 @@ export type V2SessionMessagesErrors = {
    * UnknownError
    */
   500: UnknownError1
+  /**
+   * SessionMessagesNotReadyError
+   */
+  503: SessionMessagesNotReadyError
 }
 
 export type V2SessionMessagesError = V2SessionMessagesErrors[keyof V2SessionMessagesErrors]

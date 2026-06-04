@@ -97,6 +97,23 @@ export class SessionNotFoundError extends Schema.TaggedErrorClass<SessionNotFoun
   { httpApiStatus: 404 },
 ) {}
 
+export class SessionMessagesNotReadyError extends Schema.TaggedErrorClass<SessionMessagesNotReadyError>()(
+  "SessionMessagesNotReadyError",
+  {
+    sessionID: Schema.String,
+    status: Schema.Union([
+      Schema.Literal("aborted"),
+      Schema.Literal("upgrade_pending"),
+      Schema.Literal("upgrade_unavailable"),
+      Schema.Literal("failure"),
+    ]),
+    reason: Schema.optional(Schema.String),
+    retryable: Schema.optional(Schema.Boolean),
+    ref: Schema.optional(Schema.String),
+  },
+  { httpApiStatus: 503 },
+) {}
+
 export class MessageNotFoundError extends Schema.TaggedErrorClass<MessageNotFoundError>()(
   "MessageNotFoundError",
   {

@@ -715,7 +715,7 @@ describe("session HttpApi", () => {
   )
 
   it.instance(
-    "preserves live v2 rows and skips markers when legacy backfill has an equal cutoff boundary",
+    "fails closed for mixed equal-boundary v2 message reads without returning partial rows",
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -734,23 +734,17 @@ describe("session HttpApi", () => {
           },
         ])
 
-        const response = yield* requestJson<{ items: SessionMessage.Message[] }>(
-          `/api/session/${session.id}/message?order=asc`,
-          { headers },
-        )
+        const response = yield* request(`/api/session/${session.id}/message?order=asc`, { headers })
         const rows = yield* readV2Rows(session.id)
 
-        expect(response.items as unknown).toEqual([
-          {
-            id: live.id,
-            type: "user",
-            text: "live v2",
-            files: [],
-            agents: [],
-            references: [],
-            time: { created: 10 },
-          },
-        ])
+        expect(response.status).toBe(503)
+        expect(yield* responseJson(response)).toEqual({
+          _tag: "SessionMessagesNotReadyError",
+          sessionID: session.id,
+          status: "aborted",
+          reason: "mixed_cutoff_ambiguous",
+          retryable: true,
+        })
         expect(rows.map((row) => row.id)).toEqual([SessionMessage.ID.make("evt_http_live_equal_boundary")])
         expect(rows.some((row) => row.id.startsWith("evt_legacy_backfill_"))).toBe(false)
         expect(yield* markerExists(`legacy-session-message-backfill/v1/${session.id}`)).toBe(false)
@@ -883,6 +877,8 @@ describe("session HttpApi", () => {
         const messages = yield* request(`/api/session/${missing}/message`, { headers })
         expect(messages.status).toBe(404)
         expect(yield* responseJson(messages)).toEqual(expected)
+        expect(yield* markerExists(`legacy-session-message-backfill/v1/${missing}`)).toBe(false)
+        expect(yield* markerExists(`legacy-session-message-backfill/v2/${missing}`)).toBe(false)
 
         const context = yield* request(`/api/session/${missing}/context`, { headers })
         expect(context.status).toBe(404)

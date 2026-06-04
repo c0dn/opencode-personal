@@ -8746,6 +8746,16 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "SessionMessagesNotReadyError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionMessagesNotReadyError"
+                }
+              }
+            }
           }
         },
         "description": "Retrieve projected v2 messages for a session. Items keep the requested order across pages; use cursor.next or cursor.previous to move through the ordered timeline.",
@@ -18480,6 +18490,33 @@
           }
         },
         "required": ["items", "cursor"],
+        "additionalProperties": false
+      },
+      "SessionMessagesNotReadyError": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["SessionMessagesNotReadyError"]
+          },
+          "sessionID": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["aborted", "upgrade_pending", "upgrade_unavailable", "failure"]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "ref": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "sessionID", "status"],
         "additionalProperties": false
       },
       "ProviderNotFoundError": {
