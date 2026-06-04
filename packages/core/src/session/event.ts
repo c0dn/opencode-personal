@@ -23,6 +23,10 @@ const Base = {
   sessionID: SessionSchema.ID,
 }
 
+const AssistantTarget = {
+  assistantMessageID: Schema.String.pipe(Schema.optional),
+}
+
 const options = {
   sync: {
     aggregate: "sessionID",
@@ -316,6 +320,7 @@ export namespace Step {
     ...options,
     schema: {
       ...Base,
+      ...AssistantTarget,
       finish: Schema.String,
       cost: Schema.Finite,
       tokens: Schema.Struct({
@@ -337,6 +342,7 @@ export namespace Step {
     ...options,
     schema: {
       ...Base,
+      ...AssistantTarget,
       error: AssistantError,
     },
   })
@@ -415,6 +421,7 @@ export namespace Tool {
       ...options,
       schema: {
         ...Base,
+        ...AssistantTarget,
         callID: Schema.String,
         name: Schema.String,
       },
@@ -437,6 +444,7 @@ export namespace Tool {
       ...options,
       schema: {
         ...Base,
+        ...AssistantTarget,
         callID: Schema.String,
         text: Schema.String,
       },
@@ -449,6 +457,7 @@ export namespace Tool {
     ...options,
     schema: {
       ...Base,
+      ...AssistantTarget,
       callID: Schema.String,
       tool: Schema.String,
       input: Schema.Record(Schema.String, Schema.Unknown),
@@ -477,6 +486,7 @@ export namespace Tool {
     ...options,
     schema: {
       ...Base,
+      ...AssistantTarget,
       callID: Schema.String,
       title: Schema.String.pipe(Schema.optional),
       structured: ToolOutput.Structured,
@@ -494,6 +504,7 @@ export namespace Tool {
     ...options,
     schema: {
       ...Base,
+      ...AssistantTarget,
       callID: Schema.String,
       error: UnknownError,
       provider: Schema.Struct({

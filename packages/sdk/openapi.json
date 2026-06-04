@@ -10501,6 +10501,33 @@
             "$ref": "#/components/schemas/EventFileEdited"
           },
           {
+            "$ref": "#/components/schemas/EventSessionMailboxEnqueued"
+          },
+          {
+            "$ref": "#/components/schemas/EventSessionMailboxProcessing"
+          },
+          {
+            "$ref": "#/components/schemas/EventSessionMailboxDelivered"
+          },
+          {
+            "$ref": "#/components/schemas/EventSessionMailboxFailed"
+          },
+          {
+            "$ref": "#/components/schemas/EventSessionMailboxCancelled"
+          },
+          {
+            "$ref": "#/components/schemas/EventSessionBackgroundStarted"
+          },
+          {
+            "$ref": "#/components/schemas/EventSessionBackgroundCompleted"
+          },
+          {
+            "$ref": "#/components/schemas/EventSessionBackgroundFailed"
+          },
+          {
+            "$ref": "#/components/schemas/EventSessionBackgroundCancelled"
+          },
+          {
             "$ref": "#/components/schemas/EventSessionNextAgentSwitched"
           },
           {
@@ -12635,6 +12662,404 @@
                   },
                   "type": {
                     "type": "string",
+                    "enum": ["session.mailbox.enqueued"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "timestamp": {
+                        "type": "number"
+                      },
+                      "sessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "messageID": {
+                        "type": "string"
+                      },
+                      "fromSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "rootSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "kind": {
+                        "$ref": "#/components/schemas/SessionMailboxKind"
+                      },
+                      "delivery": {
+                        "$ref": "#/components/schemas/SessionMailboxDelivery"
+                      }
+                    },
+                    "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["session.mailbox.processing"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "timestamp": {
+                        "type": "number"
+                      },
+                      "sessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "messageID": {
+                        "type": "string"
+                      },
+                      "fromSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "rootSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "kind": {
+                        "$ref": "#/components/schemas/SessionMailboxKind"
+                      },
+                      "delivery": {
+                        "$ref": "#/components/schemas/SessionMailboxDelivery"
+                      },
+                      "claimID": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["session.mailbox.delivered"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "timestamp": {
+                        "type": "number"
+                      },
+                      "sessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "messageID": {
+                        "type": "string"
+                      },
+                      "fromSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "rootSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "kind": {
+                        "$ref": "#/components/schemas/SessionMailboxKind"
+                      },
+                      "delivery": {
+                        "$ref": "#/components/schemas/SessionMailboxDelivery"
+                      }
+                    },
+                    "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["session.mailbox.failed"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "timestamp": {
+                        "type": "number"
+                      },
+                      "sessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "messageID": {
+                        "type": "string"
+                      },
+                      "fromSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "rootSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "kind": {
+                        "$ref": "#/components/schemas/SessionMailboxKind"
+                      },
+                      "delivery": {
+                        "$ref": "#/components/schemas/SessionMailboxDelivery"
+                      },
+                      "error": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["session.mailbox.cancelled"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "timestamp": {
+                        "type": "number"
+                      },
+                      "sessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "messageID": {
+                        "type": "string"
+                      },
+                      "fromSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "rootSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "kind": {
+                        "$ref": "#/components/schemas/SessionMailboxKind"
+                      },
+                      "delivery": {
+                        "$ref": "#/components/schemas/SessionMailboxDelivery"
+                      }
+                    },
+                    "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["session.background.started"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "timestamp": {
+                        "type": "number"
+                      },
+                      "sessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "parentSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "jobID": {
+                        "type": "string"
+                      },
+                      "taskID": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["timestamp", "sessionID", "parentSessionID", "jobID"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["session.background.completed"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "timestamp": {
+                        "type": "number"
+                      },
+                      "sessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "parentSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "jobID": {
+                        "type": "string"
+                      },
+                      "taskID": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["timestamp", "sessionID", "parentSessionID", "jobID"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["session.background.failed"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "timestamp": {
+                        "type": "number"
+                      },
+                      "sessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "parentSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "jobID": {
+                        "type": "string"
+                      },
+                      "taskID": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "error": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["timestamp", "sessionID", "parentSessionID", "jobID"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": ["session.background.cancelled"]
+                  },
+                  "properties": {
+                    "type": "object",
+                    "properties": {
+                      "timestamp": {
+                        "type": "number"
+                      },
+                      "sessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "parentSessionID": {
+                        "type": "string",
+                        "pattern": "^ses"
+                      },
+                      "jobID": {
+                        "type": "string"
+                      },
+                      "taskID": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["timestamp", "sessionID", "parentSessionID", "jobID"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["id", "type", "properties"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
                     "enum": ["session.next.agent.switched"]
                   },
                   "properties": {
@@ -12902,6 +13327,9 @@
                         "type": "string",
                         "pattern": "^ses"
                       },
+                      "assistantMessageID": {
+                        "type": "string"
+                      },
                       "finish": {
                         "type": "string"
                       },
@@ -12968,8 +13396,33 @@
                         "type": "string",
                         "pattern": "^ses"
                       },
+                      "assistantMessageID": {
+                        "type": "string"
+                      },
                       "error": {
-                        "$ref": "#/components/schemas/SessionErrorUnknown"
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/SessionErrorAssistantAborted"
+                          },
+                          {
+                            "$ref": "#/components/schemas/SessionErrorAssistantApi"
+                          },
+                          {
+                            "$ref": "#/components/schemas/SessionErrorAssistantAuth"
+                          },
+                          {
+                            "$ref": "#/components/schemas/SessionErrorAssistantContextOverflow"
+                          },
+                          {
+                            "$ref": "#/components/schemas/SessionErrorAssistantOutputLength"
+                          },
+                          {
+                            "$ref": "#/components/schemas/SessionErrorAssistantStructuredOutput"
+                          },
+                          {
+                            "$ref": "#/components/schemas/SessionErrorUnknown"
+                          }
+                        ]
                       }
                     },
                     "required": ["timestamp", "sessionID", "error"],
@@ -13188,6 +13641,9 @@
                         "type": "string",
                         "pattern": "^ses"
                       },
+                      "assistantMessageID": {
+                        "type": "string"
+                      },
                       "callID": {
                         "type": "string"
                       },
@@ -13256,6 +13712,9 @@
                         "type": "string",
                         "pattern": "^ses"
                       },
+                      "assistantMessageID": {
+                        "type": "string"
+                      },
                       "callID": {
                         "type": "string"
                       },
@@ -13289,6 +13748,9 @@
                       "sessionID": {
                         "type": "string",
                         "pattern": "^ses"
+                      },
+                      "assistantMessageID": {
+                        "type": "string"
                       },
                       "callID": {
                         "type": "string"
@@ -13343,9 +13805,6 @@
                       "callID": {
                         "type": "string"
                       },
-                      "title": {
-                        "type": "string"
-                      },
                       "structured": {
                         "type": "object"
                       },
@@ -13390,7 +13849,13 @@
                         "type": "string",
                         "pattern": "^ses"
                       },
+                      "assistantMessageID": {
+                        "type": "string"
+                      },
                       "callID": {
+                        "type": "string"
+                      },
+                      "title": {
                         "type": "string"
                       },
                       "structured": {
@@ -13449,6 +13914,9 @@
                       "sessionID": {
                         "type": "string",
                         "pattern": "^ses"
+                      },
+                      "assistantMessageID": {
+                        "type": "string"
                       },
                       "callID": {
                         "type": "string"
@@ -15005,6 +15473,33 @@
               },
               {
                 "$ref": "#/components/schemas/EventServerInstanceDisposed"
+              },
+              {
+                "$ref": "#/components/schemas/SyncEventSessionMailboxEnqueued"
+              },
+              {
+                "$ref": "#/components/schemas/SyncEventSessionMailboxProcessing"
+              },
+              {
+                "$ref": "#/components/schemas/SyncEventSessionMailboxDelivered"
+              },
+              {
+                "$ref": "#/components/schemas/SyncEventSessionMailboxFailed"
+              },
+              {
+                "$ref": "#/components/schemas/SyncEventSessionMailboxCancelled"
+              },
+              {
+                "$ref": "#/components/schemas/SyncEventSessionBackgroundStarted"
+              },
+              {
+                "$ref": "#/components/schemas/SyncEventSessionBackgroundCompleted"
+              },
+              {
+                "$ref": "#/components/schemas/SyncEventSessionBackgroundFailed"
+              },
+              {
+                "$ref": "#/components/schemas/SyncEventSessionBackgroundCancelled"
               },
               {
                 "$ref": "#/components/schemas/SyncEventSessionNextAgentSwitched"
@@ -18717,6 +19212,14 @@
         ],
         "additionalProperties": false
       },
+      "SessionMailboxKind": {
+        "type": "string",
+        "enum": ["user", "inter_agent", "control"]
+      },
+      "SessionMailboxDelivery": {
+        "type": "string",
+        "enum": ["async", "interrupt"]
+      },
       "PromptSource": {
         "type": "object",
         "properties": {
@@ -18801,6 +19304,119 @@
           }
         },
         "required": ["name", "kind"],
+        "additionalProperties": false
+      },
+      "SessionErrorAssistantAborted": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["aborted"]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["type", "message"],
+        "additionalProperties": false
+      },
+      "SessionErrorAssistantApi": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["api"]
+          },
+          "message": {
+            "type": "string"
+          },
+          "statusCode": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "isRetryable": {
+            "type": "boolean"
+          },
+          "responseHeaders": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "responseBody": {
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["type", "message", "isRetryable"],
+        "additionalProperties": false
+      },
+      "SessionErrorAssistantAuth": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["auth"]
+          },
+          "providerID": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["type", "providerID", "message"],
+        "additionalProperties": false
+      },
+      "SessionErrorAssistantContextOverflow": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["context_overflow"]
+          },
+          "message": {
+            "type": "string"
+          },
+          "responseBody": {
+            "type": "string"
+          }
+        },
+        "required": ["type", "message"],
+        "additionalProperties": false
+      },
+      "SessionErrorAssistantOutputLength": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["output_length"]
+          }
+        },
+        "required": ["type"],
+        "additionalProperties": false
+      },
+      "SessionErrorAssistantStructuredOutput": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["structured_output"]
+          },
+          "message": {
+            "type": "string"
+          },
+          "retries": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": ["type", "message", "retries"],
         "additionalProperties": false
       },
       "SessionErrorUnknown": {
@@ -18974,6 +19590,503 @@
           }
         },
         "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
+      "SyncEventSessionMailboxEnqueued": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["sync"]
+          },
+          "name": {
+            "type": "string",
+            "enum": ["session.mailbox.enqueued.1"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "number"
+          },
+          "aggregateID": {
+            "type": "string",
+            "enum": ["sessionID"]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "messageID": {
+                "type": "string"
+              },
+              "fromSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "rootSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/SessionMailboxKind"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/SessionMailboxDelivery"
+              }
+            },
+            "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
+        "additionalProperties": false
+      },
+      "SyncEventSessionMailboxProcessing": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["sync"]
+          },
+          "name": {
+            "type": "string",
+            "enum": ["session.mailbox.processing.1"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "number"
+          },
+          "aggregateID": {
+            "type": "string",
+            "enum": ["sessionID"]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "messageID": {
+                "type": "string"
+              },
+              "fromSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "rootSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/SessionMailboxKind"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/SessionMailboxDelivery"
+              },
+              "claimID": {
+                "type": "string"
+              }
+            },
+            "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
+        "additionalProperties": false
+      },
+      "SyncEventSessionMailboxDelivered": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["sync"]
+          },
+          "name": {
+            "type": "string",
+            "enum": ["session.mailbox.delivered.1"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "number"
+          },
+          "aggregateID": {
+            "type": "string",
+            "enum": ["sessionID"]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "messageID": {
+                "type": "string"
+              },
+              "fromSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "rootSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/SessionMailboxKind"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/SessionMailboxDelivery"
+              }
+            },
+            "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
+        "additionalProperties": false
+      },
+      "SyncEventSessionMailboxFailed": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["sync"]
+          },
+          "name": {
+            "type": "string",
+            "enum": ["session.mailbox.failed.1"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "number"
+          },
+          "aggregateID": {
+            "type": "string",
+            "enum": ["sessionID"]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "messageID": {
+                "type": "string"
+              },
+              "fromSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "rootSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/SessionMailboxKind"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/SessionMailboxDelivery"
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
+        "additionalProperties": false
+      },
+      "SyncEventSessionMailboxCancelled": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["sync"]
+          },
+          "name": {
+            "type": "string",
+            "enum": ["session.mailbox.cancelled.1"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "number"
+          },
+          "aggregateID": {
+            "type": "string",
+            "enum": ["sessionID"]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "messageID": {
+                "type": "string"
+              },
+              "fromSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "rootSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/SessionMailboxKind"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/SessionMailboxDelivery"
+              }
+            },
+            "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
+        "additionalProperties": false
+      },
+      "SyncEventSessionBackgroundStarted": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["sync"]
+          },
+          "name": {
+            "type": "string",
+            "enum": ["session.background.started.1"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "number"
+          },
+          "aggregateID": {
+            "type": "string",
+            "enum": ["sessionID"]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "parentSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "jobID": {
+                "type": "string"
+              },
+              "taskID": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": ["timestamp", "sessionID", "parentSessionID", "jobID"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
+        "additionalProperties": false
+      },
+      "SyncEventSessionBackgroundCompleted": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["sync"]
+          },
+          "name": {
+            "type": "string",
+            "enum": ["session.background.completed.1"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "number"
+          },
+          "aggregateID": {
+            "type": "string",
+            "enum": ["sessionID"]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "parentSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "jobID": {
+                "type": "string"
+              },
+              "taskID": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": ["timestamp", "sessionID", "parentSessionID", "jobID"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
+        "additionalProperties": false
+      },
+      "SyncEventSessionBackgroundFailed": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["sync"]
+          },
+          "name": {
+            "type": "string",
+            "enum": ["session.background.failed.1"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "number"
+          },
+          "aggregateID": {
+            "type": "string",
+            "enum": ["sessionID"]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "parentSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "jobID": {
+                "type": "string"
+              },
+              "taskID": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": ["timestamp", "sessionID", "parentSessionID", "jobID"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
+        "additionalProperties": false
+      },
+      "SyncEventSessionBackgroundCancelled": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["sync"]
+          },
+          "name": {
+            "type": "string",
+            "enum": ["session.background.cancelled.1"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "number"
+          },
+          "aggregateID": {
+            "type": "string",
+            "enum": ["sessionID"]
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "parentSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "jobID": {
+                "type": "string"
+              },
+              "taskID": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": ["timestamp", "sessionID", "parentSessionID", "jobID"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["type", "name", "id", "seq", "aggregateID", "data"],
         "additionalProperties": false
       },
       "SyncEventSessionNextAgentSwitched": {
@@ -19339,6 +20452,9 @@
                 "type": "string",
                 "pattern": "^ses"
               },
+              "assistantMessageID": {
+                "type": "string"
+              },
               "finish": {
                 "type": "string"
               },
@@ -19416,8 +20532,33 @@
                 "type": "string",
                 "pattern": "^ses"
               },
+              "assistantMessageID": {
+                "type": "string"
+              },
               "error": {
-                "$ref": "#/components/schemas/SessionErrorUnknown"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SessionErrorAssistantAborted"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SessionErrorAssistantApi"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SessionErrorAssistantAuth"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SessionErrorAssistantContextOverflow"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SessionErrorAssistantOutputLength"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SessionErrorAssistantStructuredOutput"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SessionErrorUnknown"
+                  }
+                ]
               }
             },
             "required": ["timestamp", "sessionID", "error"],
@@ -19713,6 +20854,9 @@
                 "type": "string",
                 "pattern": "^ses"
               },
+              "assistantMessageID": {
+                "type": "string"
+              },
               "callID": {
                 "type": "string"
               },
@@ -19803,6 +20947,9 @@
                 "type": "string",
                 "pattern": "^ses"
               },
+              "assistantMessageID": {
+                "type": "string"
+              },
               "callID": {
                 "type": "string"
               },
@@ -19847,6 +20994,9 @@
               "sessionID": {
                 "type": "string",
                 "pattern": "^ses"
+              },
+              "assistantMessageID": {
+                "type": "string"
               },
               "callID": {
                 "type": "string"
@@ -19912,9 +21062,6 @@
               "callID": {
                 "type": "string"
               },
-              "title": {
-                "type": "string"
-              },
               "structured": {
                 "type": "object"
               },
@@ -19970,7 +21117,13 @@
                 "type": "string",
                 "pattern": "^ses"
               },
+              "assistantMessageID": {
+                "type": "string"
+              },
               "callID": {
+                "type": "string"
+              },
+              "title": {
                 "type": "string"
               },
               "structured": {
@@ -20040,6 +21193,9 @@
               "sessionID": {
                 "type": "string",
                 "pattern": "^ses"
+              },
+              "assistantMessageID": {
+                "type": "string"
               },
               "callID": {
                 "type": "string"
@@ -20718,6 +21874,48 @@
         "required": ["id", "time", "type", "model"],
         "additionalProperties": false
       },
+      "SessionMessageUserTaskRequest": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["task-request"]
+          },
+          "id": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "model": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "providerID": {
+                "type": "string"
+              },
+              "variant": {
+                "type": "string"
+              }
+            },
+            "required": ["id", "providerID"],
+            "additionalProperties": false
+          },
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": ["type", "id", "prompt", "description", "agent"],
+        "additionalProperties": false
+      },
       "SessionMessageUser": {
         "type": "object",
         "properties": {
@@ -20770,48 +21968,6 @@
           }
         },
         "required": ["id", "time", "text", "type"],
-        "additionalProperties": false
-      },
-      "SessionMessageUserTaskRequest": {
-        "type": "object",
-        "properties": {
-          "type": {
-            "type": "string",
-            "enum": ["task-request"]
-          },
-          "id": {
-            "type": "string"
-          },
-          "prompt": {
-            "type": "string"
-          },
-          "description": {
-            "type": "string"
-          },
-          "agent": {
-            "type": "string"
-          },
-          "model": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "providerID": {
-                "type": "string"
-              },
-              "variant": {
-                "type": "string"
-              }
-            },
-            "required": ["id", "providerID"],
-            "additionalProperties": false
-          },
-          "command": {
-            "type": "string"
-          }
-        },
-        "required": ["type", "id", "prompt", "description", "agent"],
         "additionalProperties": false
       },
       "SessionMessageSynthetic": {
@@ -20894,11 +22050,14 @@
             "type": "string",
             "enum": ["text"]
           },
+          "id": {
+            "type": "string"
+          },
           "text": {
             "type": "string"
           }
         },
-        "required": ["type", "text"],
+        "required": ["type", "id", "text"],
         "additionalProperties": false
       },
       "SessionMessageAssistantReasoning": {
@@ -20911,11 +22070,14 @@
           "id": {
             "type": "string"
           },
+          "reasoningID": {
+            "type": "string"
+          },
           "text": {
             "type": "string"
           }
         },
-        "required": ["type", "id", "text"],
+        "required": ["type", "id", "reasoningID", "text"],
         "additionalProperties": false
       },
       "SessionMessageToolStatePending": {
@@ -21035,6 +22197,9 @@
           "id": {
             "type": "string"
           },
+          "callID": {
+            "type": "string"
+          },
           "name": {
             "type": "string"
           },
@@ -21090,7 +22255,7 @@
             "additionalProperties": false
           }
         },
-        "required": ["type", "id", "name", "state", "time"],
+        "required": ["type", "id", "callID", "name", "state", "time"],
         "additionalProperties": false
       },
       "SessionMessageAssistantPatch": {
@@ -21114,6 +22279,29 @@
           }
         },
         "required": ["type", "id", "hash", "files"],
+        "additionalProperties": false
+      },
+      "SessionMessageAssistantRetry": {
+        "type": "object",
+        "properties": {
+          "attempt": {
+            "type": "number"
+          },
+          "error": {
+            "$ref": "#/components/schemas/SessionNextRetry_error"
+          },
+          "time": {
+            "type": "object",
+            "properties": {
+              "created": {
+                "type": "number"
+              }
+            },
+            "required": ["created"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["attempt", "error", "time"],
         "additionalProperties": false
       },
       "SessionMessageAssistant": {
@@ -21198,6 +22386,12 @@
           "cost": {
             "type": "number"
           },
+          "retries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionMessageAssistantRetry"
+            }
+          },
           "tokens": {
             "type": "object",
             "properties": {
@@ -21228,7 +22422,29 @@
             "additionalProperties": false
           },
           "error": {
-            "$ref": "#/components/schemas/SessionErrorUnknown"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SessionErrorAssistantAborted"
+              },
+              {
+                "$ref": "#/components/schemas/SessionErrorAssistantApi"
+              },
+              {
+                "$ref": "#/components/schemas/SessionErrorAssistantAuth"
+              },
+              {
+                "$ref": "#/components/schemas/SessionErrorAssistantContextOverflow"
+              },
+              {
+                "$ref": "#/components/schemas/SessionErrorAssistantOutputLength"
+              },
+              {
+                "$ref": "#/components/schemas/SessionErrorAssistantStructuredOutput"
+              },
+              {
+                "$ref": "#/components/schemas/SessionErrorUnknown"
+              }
+            ]
           }
         },
         "required": ["id", "time", "type", "agent", "model", "content"],
@@ -21907,6 +23123,404 @@
         "required": ["id", "type", "properties"],
         "additionalProperties": false
       },
+      "EventSessionMailboxEnqueued": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.mailbox.enqueued"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "messageID": {
+                "type": "string"
+              },
+              "fromSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "rootSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/SessionMailboxKind"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/SessionMailboxDelivery"
+              }
+            },
+            "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
+      "EventSessionMailboxProcessing": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.mailbox.processing"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "messageID": {
+                "type": "string"
+              },
+              "fromSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "rootSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/SessionMailboxKind"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/SessionMailboxDelivery"
+              },
+              "claimID": {
+                "type": "string"
+              }
+            },
+            "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
+      "EventSessionMailboxDelivered": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.mailbox.delivered"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "messageID": {
+                "type": "string"
+              },
+              "fromSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "rootSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/SessionMailboxKind"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/SessionMailboxDelivery"
+              }
+            },
+            "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
+      "EventSessionMailboxFailed": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.mailbox.failed"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "messageID": {
+                "type": "string"
+              },
+              "fromSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "rootSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/SessionMailboxKind"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/SessionMailboxDelivery"
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
+      "EventSessionMailboxCancelled": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.mailbox.cancelled"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "messageID": {
+                "type": "string"
+              },
+              "fromSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "rootSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "kind": {
+                "$ref": "#/components/schemas/SessionMailboxKind"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/SessionMailboxDelivery"
+              }
+            },
+            "required": ["timestamp", "sessionID", "messageID", "kind", "delivery"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
+      "EventSessionBackgroundStarted": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.background.started"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "parentSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "jobID": {
+                "type": "string"
+              },
+              "taskID": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": ["timestamp", "sessionID", "parentSessionID", "jobID"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
+      "EventSessionBackgroundCompleted": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.background.completed"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "parentSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "jobID": {
+                "type": "string"
+              },
+              "taskID": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": ["timestamp", "sessionID", "parentSessionID", "jobID"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
+      "EventSessionBackgroundFailed": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.background.failed"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "parentSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "jobID": {
+                "type": "string"
+              },
+              "taskID": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              }
+            },
+            "required": ["timestamp", "sessionID", "parentSessionID", "jobID"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
+      "EventSessionBackgroundCancelled": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["session.background.cancelled"]
+          },
+          "properties": {
+            "type": "object",
+            "properties": {
+              "timestamp": {
+                "type": "number"
+              },
+              "sessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "parentSessionID": {
+                "type": "string",
+                "pattern": "^ses"
+              },
+              "jobID": {
+                "type": "string"
+              },
+              "taskID": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": ["timestamp", "sessionID", "parentSessionID", "jobID"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "type", "properties"],
+        "additionalProperties": false
+      },
       "EventSessionNextAgentSwitched": {
         "type": "object",
         "properties": {
@@ -22182,6 +23796,9 @@
                 "type": "string",
                 "pattern": "^ses"
               },
+              "assistantMessageID": {
+                "type": "string"
+              },
               "finish": {
                 "type": "string"
               },
@@ -22248,8 +23865,33 @@
                 "type": "string",
                 "pattern": "^ses"
               },
+              "assistantMessageID": {
+                "type": "string"
+              },
               "error": {
-                "$ref": "#/components/schemas/SessionErrorUnknown"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SessionErrorAssistantAborted"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SessionErrorAssistantApi"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SessionErrorAssistantAuth"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SessionErrorAssistantContextOverflow"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SessionErrorAssistantOutputLength"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SessionErrorAssistantStructuredOutput"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SessionErrorUnknown"
+                  }
+                ]
               }
             },
             "required": ["timestamp", "sessionID", "error"],
@@ -22468,6 +24110,9 @@
                 "type": "string",
                 "pattern": "^ses"
               },
+              "assistantMessageID": {
+                "type": "string"
+              },
               "callID": {
                 "type": "string"
               },
@@ -22536,6 +24181,9 @@
                 "type": "string",
                 "pattern": "^ses"
               },
+              "assistantMessageID": {
+                "type": "string"
+              },
               "callID": {
                 "type": "string"
               },
@@ -22569,6 +24217,9 @@
               "sessionID": {
                 "type": "string",
                 "pattern": "^ses"
+              },
+              "assistantMessageID": {
+                "type": "string"
               },
               "callID": {
                 "type": "string"
@@ -22623,9 +24274,6 @@
               "callID": {
                 "type": "string"
               },
-              "title": {
-                "type": "string"
-              },
               "structured": {
                 "type": "object"
               },
@@ -22670,7 +24318,13 @@
                 "type": "string",
                 "pattern": "^ses"
               },
+              "assistantMessageID": {
+                "type": "string"
+              },
               "callID": {
+                "type": "string"
+              },
+              "title": {
                 "type": "string"
               },
               "structured": {
@@ -22729,6 +24383,9 @@
               "sessionID": {
                 "type": "string",
                 "pattern": "^ses"
+              },
+              "assistantMessageID": {
+                "type": "string"
               },
               "callID": {
                 "type": "string"

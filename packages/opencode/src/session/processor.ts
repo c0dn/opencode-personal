@@ -67,6 +67,7 @@ type ToolCall = {
   partID: SessionLegacy.ToolPart["id"]
   messageID: SessionLegacy.ToolPart["messageID"]
   sessionID: SessionLegacy.ToolPart["sessionID"]
+  assistantMessageID: string | undefined
   done: Deferred.Deferred<void>
   inputEnded: boolean
 }
@@ -79,6 +80,7 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionLegacy.TextPart | undefined
   reasoningMap: Record<string, SessionLegacy.ReasoningPart>
+  v2AssistantMessageID: string | undefined
 }
 
 type StreamEvent = LLMEvent
@@ -156,6 +158,7 @@ export const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        v2AssistantMessageID: undefined,
       }
       let aborted = false
       const slog = log.clone().tag("session.id", input.sessionID).tag("messageID", input.assistantMessage.id)
@@ -263,6 +266,25 @@ export const layer = Layer.effect(
         delete ctx.reasoningMap[reasoningID]
       })
 
+      const ensureV2AssistantMessage = Effect.fn("SessionProcessor.ensureV2AssistantMessage")(function* () {
+        if (ctx.v2AssistantMessageID) return ctx.v2AssistantMessageID
+        if (ctx.assistantMessage.summary) return undefined
+        if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
+        const event = yield* events.publish(SessionEvent.Step.Started, {
+          sessionID: ctx.sessionID,
+          agent: input.assistantMessage.agent,
+          model: {
+            id: ModelV2.ID.make(ctx.model.id),
+            providerID: ProviderV2.ID.make(ctx.model.providerID),
+            variant: ModelV2.VariantID.make(input.assistantMessage.variant ?? "default"),
+          },
+          snapshot: ctx.snapshot,
+          timestamp: DateTime.makeUnsafe(Date.now()),
+        })
+        ctx.v2AssistantMessageID = event.id
+        return ctx.v2AssistantMessageID
+      })
+
       const ensureToolCall = Effect.fn("SessionProcessor.ensureToolCall")(function* (input: {
         id: string
         name: string
@@ -283,8 +305,10 @@ export const layer = Layer.effect(
           }
           return { call: ctx.toolcalls[input.id], part }
         }
+        const assistantMessageID = yield* ensureV2AssistantMessage()
         yield* events.publish(SessionEvent.Tool.Input.Started, {
           sessionID: ctx.sessionID,
+          assistantMessageID,
           callID: input.id,
           name: input.name,
           timestamp: DateTime.makeUnsafe(Date.now()),
@@ -304,6 +328,7 @@ export const layer = Layer.effect(
           partID: part.id,
           messageID: part.messageID,
           sessionID: part.sessionID,
+          assistantMessageID,
           inputEnded: false,
         }
         return { call: ctx.toolcalls[input.id], part }
@@ -390,6 +415,7 @@ export const layer = Layer.effect(
             const toolCall = yield* ensureToolCall(value)
             yield* events.publish(SessionEvent.Tool.Input.Ended, {
               sessionID: ctx.sessionID,
+              assistantMessageID: toolCall.call.assistantMessageID,
               callID: value.id,
               text: "",
               timestamp: DateTime.makeUnsafe(Date.now()),
@@ -407,6 +433,7 @@ export const layer = Layer.effect(
             if (!toolCall.call.inputEnded) {
               yield* events.publish(SessionEvent.Tool.Input.Ended, {
                 sessionID: ctx.sessionID,
+                assistantMessageID: toolCall.call.assistantMessageID,
                 callID: value.id,
                 text: "",
                 timestamp: DateTime.makeUnsafe(Date.now()),
@@ -414,6 +441,7 @@ export const layer = Layer.effect(
             }
             yield* events.publish(SessionEvent.Tool.Called, {
               sessionID: ctx.sessionID,
+              assistantMessageID: toolCall.call.assistantMessageID,
               callID: value.id,
               tool: value.name,
               input,
@@ -471,6 +499,7 @@ export const layer = Layer.effect(
 
           case "tool-result": {
             const toolCall = yield* readToolCall(value.id)
+            const assistantMessageID = toolCall?.call.assistantMessageID ?? (yield* ensureV2AssistantMessage())
             const rawOutput = toolResultOutput(value)
             const normalized = yield* Effect.forEach(rawOutput.attachments ?? [], (attachment) =>
               attachment.mime.startsWith("image/")
@@ -495,6 +524,7 @@ export const layer = Layer.effect(
             }
             yield* events.publish(SessionEvent.Tool.Success, {
               sessionID: ctx.sessionID,
+              assistantMessageID,
               callID: value.id,
               title: output.title,
               structured: output.metadata,
@@ -521,8 +551,10 @@ export const layer = Layer.effect(
 
           case "tool-error": {
             const toolCall = yield* readToolCall(value.id)
+            const assistantMessageID = toolCall?.call.assistantMessageID ?? (yield* ensureV2AssistantMessage())
             yield* events.publish(SessionEvent.Tool.Failed, {
               sessionID: ctx.sessionID,
+              assistantMessageID,
               callID: value.id,
               error: {
                 type: "unknown",
@@ -543,17 +575,7 @@ export const layer = Layer.effect(
           case "step-start":
             if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()
             if (!ctx.assistantMessage.summary) {
-              yield* events.publish(SessionEvent.Step.Started, {
-                sessionID: ctx.sessionID,
-                agent: input.assistantMessage.agent,
-                model: {
-                  id: ModelV2.ID.make(ctx.model.id),
-                  providerID: ProviderV2.ID.make(ctx.model.providerID),
-                  variant: ModelV2.VariantID.make(input.assistantMessage.variant ?? "default"),
-                },
-                snapshot: ctx.snapshot,
-                timestamp: DateTime.makeUnsafe(Date.now()),
-              })
+              yield* ensureV2AssistantMessage()
             }
             yield* session.updatePart({
               id: PartID.ascending(),
@@ -575,6 +597,7 @@ export const layer = Layer.effect(
             if (!ctx.assistantMessage.summary) {
               yield* events.publish(SessionEvent.Step.Ended, {
                 sessionID: ctx.sessionID,
+                assistantMessageID: ctx.v2AssistantMessageID,
                 finish: value.reason,
                 cost: usage.cost,
                 tokens: usage.tokens,
@@ -622,6 +645,7 @@ export const layer = Layer.effect(
             ) {
               ctx.needsCompaction = true
             }
+            ctx.v2AssistantMessageID = undefined
             return
           }
 
@@ -735,6 +759,20 @@ export const layer = Layer.effect(
           const part = match.part
           const end = Date.now()
           const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
+          yield* events.publish(SessionEvent.Tool.Failed, {
+            sessionID: ctx.sessionID,
+            assistantMessageID: match.call.assistantMessageID,
+            callID: toolCallID,
+            error: {
+              type: "unknown",
+              message: "Tool execution aborted",
+            },
+            provider: {
+              executed: part.metadata?.providerExecuted === true,
+              metadata: { ...metadata, interrupted: true },
+            },
+            timestamp: DateTime.makeUnsafe(end),
+          })
           yield* session.updatePart({
             ...part,
             state: {
@@ -760,11 +798,14 @@ export const layer = Layer.effect(
           return
         }
         if (!ctx.assistantMessage.summary) {
+          const assistantMessageID = yield* ensureV2AssistantMessage()
           yield* events.publish(SessionEvent.Step.Failed, {
             sessionID: ctx.sessionID,
+            assistantMessageID,
             error: toAssistantError(error),
             timestamp: DateTime.makeUnsafe(Date.now()),
           })
+          ctx.v2AssistantMessageID = undefined
         }
         ctx.assistantMessage.error = error
         yield* events.publish(Session.Event.Error, {

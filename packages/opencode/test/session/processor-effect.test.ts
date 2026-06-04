@@ -832,14 +832,16 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
 
         const parts = yield* MessageV2.parts(msg.id)
         const call = parts.find((part): part is SessionLegacy.ToolPart => part.type === "tool")
-        const seen = (yield* database.db.select().from(EventTable).all().pipe(Effect.orDie))
+        const eventRows = (yield* database.db.select().from(EventTable).all().pipe(Effect.orDie))
           .filter((evt) => (evt.data as { sessionID?: string }).sessionID === chat.id)
-          .map((evt) => evt.type)
-        const toolSuccess = (yield* database.db.select().from(EventTable).all().pipe(Effect.orDie)).find(
-          (evt) =>
-            (evt.data as { sessionID?: string }).sessionID === chat.id &&
-            evt.type.startsWith(SessionEvent.Tool.Success.type),
-        )
+          .sort((left, right) => left.seq - right.seq)
+        const seen = eventRows.map((evt) => evt.type)
+        const stepStarted = eventRows.find((evt) => evt.type.startsWith(SessionEvent.Step.Started.type))
+        const toolInputStarted = eventRows.find((evt) => evt.type.startsWith(SessionEvent.Tool.Input.Started.type))
+        const toolInputEnded = eventRows.find((evt) => evt.type.startsWith(SessionEvent.Tool.Input.Ended.type))
+        const toolCalled = eventRows.find((evt) => evt.type.startsWith(SessionEvent.Tool.Called.type))
+        const toolSuccess = eventRows.find((evt) => evt.type.startsWith(SessionEvent.Tool.Success.type))
+        const stepEnded = eventRows.find((evt) => evt.type.startsWith(SessionEvent.Step.Ended.type))
 
         expect(handle.message.error).toBeUndefined()
         expect(value).toBe("continue")
@@ -850,6 +852,20 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
         expect(seen.some((type) => type.startsWith(SessionEvent.Tool.Called.type))).toBe(true)
         expect(seen.some((type) => type.startsWith(SessionEvent.Tool.Success.type))).toBe(true)
         expect(seen.some((type) => type.startsWith(SessionEvent.Step.Ended.type))).toBe(true)
+        expect(eventRows.findIndex((evt) => evt.type.startsWith(SessionEvent.Step.Started.type))).toBeLessThan(
+          eventRows.findIndex((evt) => evt.type.startsWith(SessionEvent.Tool.Input.Started.type)),
+        )
+        expect((toolInputStarted?.data as { assistantMessageID?: string } | undefined)?.assistantMessageID).toBe(
+          stepStarted?.id,
+        )
+        expect((toolInputEnded?.data as { assistantMessageID?: string } | undefined)?.assistantMessageID).toBe(
+          stepStarted?.id,
+        )
+        expect((toolCalled?.data as { assistantMessageID?: string } | undefined)?.assistantMessageID).toBe(stepStarted?.id)
+        expect((toolSuccess?.data as { assistantMessageID?: string } | undefined)?.assistantMessageID).toBe(
+          stepStarted?.id,
+        )
+        expect((stepEnded?.data as { assistantMessageID?: string } | undefined)?.assistantMessageID).toBe(stepStarted?.id)
         expect((toolSuccess?.data as { title?: string } | undefined)?.title).toBe("Weather lookup")
         expect(call?.callID).toBe("call_1")
         expect(call?.tool).toBe("lookup")

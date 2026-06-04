@@ -88,6 +88,38 @@ function readMessages() {
   })
 }
 
+function insertMessage(message: SessionMessage.Message) {
+  return Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    const encoded = Schema.encodeSync(SessionMessage.Message)(message)
+    const { id, type, ...data } = encoded
+    yield* db
+      .insert(SessionMessageTable)
+      .values([
+        {
+          id: SessionMessage.ID.make(id),
+          session_id: sessionID,
+          type,
+          time_created: DateTime.toEpochMillis(message.time.created),
+          data,
+        },
+      ])
+      .run()
+      .pipe(Effect.orDie)
+  })
+}
+
+function assistantMessage(input: { id: string; created: number; completed?: number; content?: SessionMessage.Assistant["content"] }) {
+  return new SessionMessage.Assistant({
+    id: SessionMessage.ID.make(input.id),
+    type: "assistant",
+    agent: "build",
+    model,
+    time: { created: at(input.created), completed: input.completed === undefined ? undefined : at(input.completed) },
+    content: input.content ?? [],
+  })
+}
+
 function publishCompaction(input: {
   startedID: EventV2.ID
   endedID?: EventV2.ID
@@ -683,6 +715,117 @@ describe("SessionProjector", () => {
         expect(assistant?.type).toBe("assistant")
         if (assistant?.type !== "assistant") return
         expect(assistant.content[0]).toMatchObject({ type: "tool", state: { status: "completed" } })
+      }),
+    )
+  })
+
+  test("targeted step and tool events update only the assistant named by assistantMessageID", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        const events = yield* EventV2.Service
+        const firstAssistantID = eventID("target_first_assistant")
+        const secondAssistantID = eventID("target_second_assistant")
+        yield* events.publish(
+          SessionEvent.Step.Started,
+          { sessionID, timestamp: at(10), agent: "build", model },
+          { id: firstAssistantID },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Input.Started,
+          {
+            sessionID,
+            assistantMessageID: firstAssistantID,
+            timestamp: at(20),
+            callID: "target-call",
+            name: "bash",
+          },
+          { id: eventID("target_tool_started") },
+        )
+        yield* events.publish(
+          SessionEvent.Step.Started,
+          { sessionID, timestamp: at(30), agent: "build", model },
+          { id: secondAssistantID },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Called,
+          {
+            sessionID,
+            assistantMessageID: firstAssistantID,
+            timestamp: at(40),
+            callID: "target-call",
+            tool: "bash",
+            input: { command: "pwd" },
+            provider: { executed: true },
+          },
+          { id: eventID("target_tool_called") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Failed,
+          {
+            sessionID,
+            assistantMessageID: firstAssistantID,
+            timestamp: at(50),
+            callID: "target-call",
+            error: { type: "unknown", message: "boom" },
+            provider: { executed: true },
+          },
+          { id: eventID("target_tool_failed") },
+        )
+        yield* events.publish(
+          SessionEvent.Step.Failed,
+          {
+            sessionID,
+            assistantMessageID: firstAssistantID,
+            timestamp: at(60),
+            error: { type: "unknown", message: "step boom" },
+          },
+          { id: eventID("target_step_failed") },
+        )
+
+        const messages = yield* readMessages()
+        const first = messages.find((message) => message.id === firstAssistantID)
+        const second = messages.find((message) => message.id === secondAssistantID)
+        expect(first?.type).toBe("assistant")
+        expect(second?.type).toBe("assistant")
+        if (first?.type !== "assistant" || second?.type !== "assistant") return
+
+        expect(first.finish).toBe("error")
+        expect(first.error).toEqual({ type: "unknown", message: "step boom" })
+        expect(first.content[0]).toMatchObject({ type: "tool", callID: "target-call", state: { status: "error" } })
+        expect(second.finish).toBeUndefined()
+        expect(second.content).toEqual([])
+      }),
+    )
+  })
+
+  test("untargeted fallback does not revive an older incomplete assistant after a newer completed row", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* insertMessage(assistantMessage({ id: "evt_projector_stale_incomplete", created: 10 }))
+        yield* insertMessage(assistantMessage({ id: "evt_projector_newer_completed", created: 20, completed: 30 }))
+        const events = yield* EventV2.Service
+        yield* events.publish(
+          SessionEvent.Step.Ended,
+          {
+            sessionID,
+            timestamp: at(40),
+            finish: "stop",
+            cost: 1,
+            tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+          },
+          { id: eventID("untargeted_projector_step_end") },
+        )
+
+        const messages = yield* readMessages()
+        const stale = messages.find((message) => message.id === "evt_projector_stale_incomplete")
+        expect(stale?.type).toBe("assistant")
+        if (stale?.type === "assistant") expect(stale.finish).toBeUndefined()
       }),
     )
   })

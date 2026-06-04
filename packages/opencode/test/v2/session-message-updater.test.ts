@@ -5,6 +5,7 @@ import { EventV2 } from "@opencode-ai/core/event"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionMessageUpdater } from "@opencode-ai/core/session/message-updater"
 import { SessionID } from "../../src/session/schema"
 
@@ -44,6 +45,17 @@ function canonicalStateStrings(state: SessionMessageUpdater.MemoryState) {
   }
   visit(state)
   return strings
+}
+
+function assistantMessage(input: { id: string; created: number; completed?: number; content?: SessionMessage.Assistant["content"] }) {
+  return new SessionMessage.Assistant({
+    id: SessionMessage.ID.make(input.id),
+    type: "assistant",
+    agent: "build",
+    model,
+    time: { created: DateTime.makeUnsafe(input.created), completed: input.completed ? DateTime.makeUnsafe(input.completed) : undefined },
+    content: input.content ?? [],
+  })
 }
 
 test("v2 message entities use creating evt_* IDs", () => {
@@ -289,6 +301,108 @@ test("step ended carries finish, snapshot, and token usage onto current assistan
   expect(assistant.tokens).toEqual(tokens)
   expect(assistant.snapshot).toEqual({ start: "snapshot-start", end: "snapshot-end" })
   expect(assistant.time.completed).toEqual(DateTime.makeUnsafe(2))
+})
+
+test("targeted step and tool events update the assistant named by assistantMessageID", () => {
+  const firstAssistantID = eventID("first_assistant")
+  const secondAssistantID = eventID("second_assistant")
+  const firstToolID = eventID("first_tool")
+
+  const state = applyEvents([
+    {
+      id: firstAssistantID,
+      type: "session.next.step.started",
+      data: { sessionID, timestamp: DateTime.makeUnsafe(1), agent: "build", model },
+    },
+    {
+      id: firstToolID,
+      type: "session.next.tool.input.started",
+      data: {
+        sessionID,
+        assistantMessageID: firstAssistantID,
+        timestamp: DateTime.makeUnsafe(2),
+        callID: "call-first",
+        name: "bash",
+      },
+    },
+    {
+      id: secondAssistantID,
+      type: "session.next.step.started",
+      data: { sessionID, timestamp: DateTime.makeUnsafe(3), agent: "build", model },
+    },
+    {
+      id: eventID("first_tool_called"),
+      type: "session.next.tool.called",
+      data: {
+        sessionID,
+        assistantMessageID: firstAssistantID,
+        timestamp: DateTime.makeUnsafe(4),
+        callID: "call-first",
+        tool: "bash",
+        input: { command: "pwd" },
+        provider: { executed: true },
+      },
+    },
+    {
+      id: eventID("first_tool_success"),
+      type: "session.next.tool.success",
+      data: {
+        sessionID,
+        assistantMessageID: firstAssistantID,
+        timestamp: DateTime.makeUnsafe(5),
+        callID: "call-first",
+        structured: {},
+        content: [{ type: "text", text: "/tmp" }],
+        provider: { executed: true },
+      },
+    },
+    {
+      id: eventID("first_step_ended"),
+      type: "session.next.step.ended",
+      data: {
+        sessionID,
+        assistantMessageID: firstAssistantID,
+        timestamp: DateTime.makeUnsafe(6),
+        finish: "stop",
+        cost: 1,
+        tokens: { input: 1, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+    },
+  ] satisfies SessionEvent.Event[])
+
+  const first = state.messages.find((message) => message.id === firstAssistantID)
+  const second = state.messages.find((message) => message.id === secondAssistantID)
+  expect(first?.type).toBe("assistant")
+  expect(second?.type).toBe("assistant")
+  if (first?.type !== "assistant" || second?.type !== "assistant") return
+
+  expect(first.finish).toBe("stop")
+  expect(first.content[0]).toMatchObject({ type: "tool", callID: "call-first", state: { status: "completed" } })
+  expect(second.finish).toBeUndefined()
+  expect(second.content).toEqual([])
+})
+
+test("untargeted events use the newest assistant only when it is incomplete", () => {
+  const stale = assistantMessage({ id: "evt_stale_incomplete", created: 1 })
+  const newerCompleted = assistantMessage({ id: "evt_newer_completed", created: 2, completed: 3 })
+  const state: SessionMessageUpdater.MemoryState = { messages: [stale, newerCompleted] }
+
+  Effect.runSync(
+    SessionMessageUpdater.update(SessionMessageUpdater.memory(state), {
+      id: eventID("untargeted_step_ended"),
+      type: "session.next.step.ended",
+      data: {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(4),
+        finish: "stop",
+        cost: 1,
+        tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+    } satisfies SessionEvent.Event),
+  )
+
+  expect(state.messages[0]).toMatchObject({ id: "evt_stale_incomplete", type: "assistant" })
+  if (state.messages[0]?.type === "assistant") expect(state.messages[0].finish).toBeUndefined()
 })
 
 test("compaction delta is non-canonical and ended materializes summary and include", () => {

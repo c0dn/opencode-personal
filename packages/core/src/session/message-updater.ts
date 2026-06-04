@@ -20,6 +20,7 @@ export type PendingCompaction = {
 }
 
 export interface Adapter {
+  readonly getAssistant: (messageID: SessionMessage.ID) => Effect.Effect<SessionMessage.Assistant | undefined>
   readonly getCurrentAssistant: () => Effect.Effect<SessionMessage.Assistant | undefined>
   readonly getCurrentCompaction: () => Effect.Effect<SessionMessage.Compaction | undefined>
   readonly getCurrentShell: (callID: string) => Effect.Effect<SessionMessage.Shell | undefined>
@@ -36,13 +37,36 @@ export interface Adapter {
 }
 
 export function memory(state: MemoryState): Adapter {
-  const activeAssistantIndex = () =>
-    state.messages.findLastIndex((message) => message.type === "assistant" && !message.time.completed)
+  const assistantIndex = (messageID: SessionMessage.ID) =>
+    state.messages.findIndex((message) => message.type === "assistant" && message.id === messageID)
+  const activeAssistantIndex = () => {
+    const newestIndex = state.messages.reduce<number>((selected, message, index) => {
+      if (message.type !== "assistant") return selected
+      if (selected < 0) return index
+      const current = state.messages[selected]
+      if (current?.type !== "assistant") return index
+      const currentCreated = DateTime.toEpochMillis(current.time.created)
+      const messageCreated = DateTime.toEpochMillis(message.time.created)
+      if (messageCreated > currentCreated) return index
+      if (messageCreated === currentCreated && message.id > current.id) return index
+      return selected
+    }, -1)
+    const newest = state.messages[newestIndex]
+    return newest?.type === "assistant" && !newest.time.completed ? newestIndex : -1
+  }
   const activeCompactionIndex = () => state.messages.findLastIndex((message) => message.type === "compaction")
   const activeShellIndex = (callID: string) =>
     state.messages.findLastIndex((message) => message.type === "shell" && message.callID === callID)
 
   return {
+    getAssistant(messageID) {
+      return Effect.sync(() => {
+        const index = assistantIndex(messageID)
+        if (index < 0) return
+        const assistant = state.messages[index]
+        return assistant?.type === "assistant" ? assistant : undefined
+      })
+    },
     getCurrentAssistant() {
       return Effect.sync(() => {
         const index = activeAssistantIndex()
@@ -69,7 +93,7 @@ export function memory(state: MemoryState): Adapter {
     },
     updateAssistant(assistant) {
       return Effect.sync(() => {
-        const index = activeAssistantIndex()
+        const index = assistantIndex(assistant.id)
         if (index < 0) return
         const current = state.messages[index]
         if (current?.type !== "assistant") return
@@ -144,6 +168,9 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
     assistant?.content.findLast(
       (item): item is DraftReasoning => item.type === "reasoning" && item.reasoningID === reasoningID,
     )
+
+  const targetAssistant = (assistantMessageID?: string) =>
+    assistantMessageID ? adapter.getAssistant(SessionMessage.ID.make(assistantMessageID)) : adapter.getCurrentAssistant()
 
   return Effect.gen(function* () {
     yield* SessionEvent.All.match(event, {
@@ -245,7 +272,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       },
       "session.next.step.ended": (event) => {
         return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
+          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
           if (currentAssistant) {
             yield* adapter.updateAssistant(
               produce(currentAssistant, (draft) => {
@@ -261,7 +288,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       },
       "session.next.step.failed": (event) => {
         return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
+          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
           if (currentAssistant) {
             yield* adapter.updateAssistant(
               produce(currentAssistant, (draft) => {
@@ -313,7 +340,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       },
       "session.next.tool.input.started": (event) => {
         return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
+          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
           if (currentAssistant) {
             yield* adapter.updateAssistant(
               produce(currentAssistant, (draft) => {
@@ -349,7 +376,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       "session.next.tool.input.ended": () => Effect.void,
       "session.next.tool.called": (event) => {
         return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
+          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
           if (currentAssistant) {
             yield* adapter.updateAssistant(
               produce(currentAssistant, (draft) => {
@@ -387,7 +414,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       },
       "session.next.tool.success": (event) => {
         return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
+          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
           if (currentAssistant) {
             yield* adapter.updateAssistant(
               produce(currentAssistant, (draft) => {
@@ -410,7 +437,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       },
       "session.next.tool.failed": (event) => {
         return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
+          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
           if (currentAssistant) {
             yield* adapter.updateAssistant(
               produce(currentAssistant, (draft) => {

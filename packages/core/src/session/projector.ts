@@ -38,6 +38,11 @@ function usage(part: (typeof SessionLegacy.Event.PartUpdated.Type)["data"]["part
   return { cost: value.cost as Usage["cost"], tokens: value.tokens as Usage["tokens"] }
 }
 
+function compareMessageIDDescending(left: string, right: string) {
+  if (left === right) return 0
+  return left > right ? -1 : 1
+}
+
 function sessionRow(info: SessionLegacy.SessionInfo): typeof SessionTable.$inferInsert {
   return {
     id: info.id,
@@ -112,6 +117,25 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
   return Effect.gen(function* () {
     if (yield* hasProjectedIdentity(db, event)) return
     const adapter: SessionMessageUpdater.Adapter = {
+      getAssistant(messageID) {
+        return Effect.gen(function* () {
+          const row = yield* db
+            .select()
+            .from(SessionMessageTable)
+            .where(
+              and(
+                eq(SessionMessageTable.session_id, event.data.sessionID),
+                eq(SessionMessageTable.id, messageID),
+                eq(SessionMessageTable.type, "assistant"),
+              ),
+            )
+            .get()
+            .pipe(Effect.orDie)
+          if (!row) return undefined
+          const message = decodeMessage({ ...row.data, id: row.id, type: row.type })
+          return message.type === "assistant" ? message : undefined
+        })
+      },
       getCurrentAssistant() {
         return Effect.gen(function* () {
           const rows = yield* db
@@ -122,11 +146,16 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
             )
             .all()
             .pipe(Effect.orDie)
-          return rows
+          const assistants = rows
             .map((row) => decodeMessage({ ...row.data, id: row.id, type: row.type }))
-            .find(
-              (message): message is SessionMessage.Assistant => message.type === "assistant" && !message.time.completed,
-            )
+            .filter((message): message is SessionMessage.Assistant => message.type === "assistant")
+            .sort((left, right) => {
+              const leftCreated = DateTime.toEpochMillis(left.time.created)
+              const rightCreated = DateTime.toEpochMillis(right.time.created)
+              return rightCreated - leftCreated || compareMessageIDDescending(left.id, right.id)
+            })
+          const newest = assistants[0]
+          return newest && !newest.time.completed ? newest : undefined
         })
       },
       getCurrentCompaction() {
