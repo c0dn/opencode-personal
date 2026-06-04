@@ -1,14 +1,13 @@
 import { afterEach, describe, expect } from "bun:test"
 import { SessionLegacy } from "@opencode-ai/core/session/legacy"
 import { Database } from "@opencode-ai/core/database/database"
-import { Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Config } from "@/config/config"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Session } from "@/session/session"
-import { MessageV2 } from "../../src/session/message-v2"
 import type { SessionPrompt } from "../../src/session/prompt"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionRunState } from "@/session/run-state"
@@ -30,6 +29,11 @@ afterEach(async () => {
 const ref = {
   providerID: ProviderV2.ID.make("test"),
   modelID: ProviderV2.ModelID.make("test-model"),
+}
+
+const contextModel = {
+  providerID: ref.providerID,
+  id: ref.modelID,
 }
 
 const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
@@ -230,7 +234,7 @@ describe("tool.task", () => {
           messageID: assistant.id,
           agent: "build",
           abort: new AbortController().signal,
-          extra: { promptOps },
+          extra: { model: contextModel, promptOps },
           messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
@@ -266,7 +270,7 @@ describe("tool.task", () => {
             messageID: assistant.id,
             agent: "build",
             abort: new AbortController().signal,
-            extra: { promptOps, ...extra },
+            extra: { model: contextModel, promptOps, ...extra },
             messages: [],
             metadata: () => Effect.void,
             ask: (input) =>
@@ -325,7 +329,7 @@ describe("tool.task", () => {
             messageID: assistant.id,
             agent: "build",
             abort: abort.signal,
-            extra: { promptOps },
+            extra: { model: contextModel, promptOps },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -363,7 +367,7 @@ describe("tool.task", () => {
           messageID: assistant.id,
           agent: "build",
           abort: new AbortController().signal,
-          extra: { promptOps },
+          extra: { model: contextModel, promptOps },
           messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
@@ -377,6 +381,116 @@ describe("tool.task", () => {
       expect(result.output).toContain(`<task id="${result.metadata.sessionId}" state="completed">`)
       expect(seen?.sessionID).toBe(result.metadata.sessionId)
     }),
+  )
+
+  it.instance("inherits the active context model without reading the legacy transcript message", () =>
+    Effect.gen(function* () {
+      const { chat } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: MessageID.ascending(),
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { model: contextModel, promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.metadata.model).toEqual(ref)
+      expect(seen?.model).toEqual(ref)
+      expect(result.output).toContain(`state="completed"`)
+    }),
+  )
+
+  it.instance("fails clearly when no subagent or context model is available", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const exit = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        expect(String(Cause.squash(exit.cause))).toContain("TaskTool requires next.model or ctx.extra.model")
+      }
+    }),
+  )
+
+  it.instance(
+    "explicit subagent model overrides the inherited context model",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+        const expected = {
+          providerID: ProviderV2.ID.make("override-provider"),
+          modelID: ProviderV2.ModelID.make("override-model"),
+        }
+
+        const result = yield* def.execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "modelled",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { model: contextModel, promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(result.metadata.model).toEqual(expected)
+        expect(seen?.model).toEqual(expected)
+      }),
+    {
+      config: {
+        agent: {
+          modelled: {
+            mode: "subagent",
+            model: "override-provider/override-model",
+          },
+        },
+      },
+    },
   )
 
   it.instance(
@@ -401,7 +515,7 @@ describe("tool.task", () => {
             messageID: assistant.id,
             agent: "build",
             abort: new AbortController().signal,
-            extra: { promptOps },
+            extra: { model: contextModel, promptOps },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -469,7 +583,7 @@ describe("tool.task", () => {
             messageID: assistant.id,
             agent: "build",
             abort: new AbortController().signal,
-            extra: { promptOps: stubOps() },
+            extra: { model: contextModel, promptOps: stubOps() },
             messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
@@ -501,6 +615,7 @@ describe("tool.task", () => {
           agent: "build",
           abort: new AbortController().signal,
           extra: {
+            model: contextModel,
             promptOps: {
               ...stubOps(),
               prompt: () => Effect.never,
@@ -539,7 +654,7 @@ describe("tool.task", () => {
           messageID: assistant.id,
           agent: "build",
           abort: new AbortController().signal,
-          extra: { promptOps: stubOps({ text: "background done" }) },
+          extra: { model: contextModel, promptOps: stubOps({ text: "background done" }) },
           messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
@@ -580,6 +695,7 @@ describe("tool.task", () => {
           agent: "build",
           abort: new AbortController().signal,
           extra: {
+            model: contextModel,
             promptOps: {
               ...stubOps({ text: "background done" }),
               prompt: (input) =>
@@ -626,6 +742,7 @@ describe("tool.task", () => {
           agent: "build",
           abort: new AbortController().signal,
           extra: {
+            model: contextModel,
             promptOps: {
               cancel: (sessionID) =>
                 Effect.sync(() => {
@@ -674,6 +791,7 @@ describe("tool.task", () => {
           agent: "build",
           abort: new AbortController().signal,
           extra: {
+            model: contextModel,
             promptOps: {
               ...stubOps(),
               prompt: () => Effect.never,
@@ -713,6 +831,7 @@ describe("tool.task", () => {
           agent: "build",
           abort: new AbortController().signal,
           extra: {
+            model: contextModel,
             promptOps: {
               ...stubOps(),
               prompt: () => Effect.never,
@@ -752,6 +871,7 @@ describe("tool.task", () => {
           agent: "build",
           abort: new AbortController().signal,
           extra: {
+            model: contextModel,
             promptOps: {
               ...stubOps(),
               prompt: () => Effect.never,

@@ -5,7 +5,6 @@ import { SessionLegacy } from "@opencode-ai/core/session/legacy"
 import { BackgroundJob } from "@/background/job"
 import { Session } from "@/session/session"
 import { SessionID, MessageID } from "../session/schema"
-import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
@@ -13,9 +12,9 @@ import { Config } from "@/config/config"
 import { Cause, DateTime, Effect, Exit, Schema } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { Database } from "@opencode-ai/core/database/database"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session/event"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -76,6 +75,27 @@ function errorText(error: unknown) {
   return String(error)
 }
 
+function inheritedModel(extra: Tool.Context["extra"]) {
+  const model = extra?.model
+  if (!model || typeof model !== "object") return undefined
+  const providerID = "providerID" in model && typeof model.providerID === "string" ? model.providerID : undefined
+  const modelID =
+    "id" in model && typeof model.id === "string"
+      ? model.id
+      : "modelID" in model && typeof model.modelID === "string"
+        ? model.modelID
+        : undefined
+  if (!providerID || !modelID) return undefined
+  return {
+    modelID: ProviderV2.ModelID.make(modelID),
+    providerID: ProviderV2.ID.make(providerID),
+  }
+}
+
+function resolveModel(input: { next: Agent.Info; extra: Tool.Context["extra"] }) {
+  return input.next.model ?? inheritedModel(input.extra)
+}
+
 const backgroundEvent = (input: {
   sessionID: SessionID
   parentSessionID: SessionID
@@ -99,7 +119,6 @@ export const TaskTool = Tool.define(
     const config = yield* Config.Service
     const sessions = yield* Session.Service
     const flags = yield* RuntimeFlags.Service
-    const database = yield* Database.Service
     const events = yield* EventV2Bridge.Service
 
     const run = Effect.fn("TaskTool.execute")(function* (
@@ -157,16 +176,8 @@ export const TaskTool = Tool.define(
           ],
         }))
 
-      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
-        Effect.provideService(Database.Service, database),
-        Effect.orDie,
-      )
-      if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
-
-      const model = next.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      const model = resolveModel({ next, extra: ctx.extra })
+      if (!model) return yield* Effect.fail(new Error("TaskTool requires next.model or ctx.extra.model"))
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
