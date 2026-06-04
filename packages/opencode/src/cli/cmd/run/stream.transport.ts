@@ -18,6 +18,7 @@
 import type { Event, GlobalEvent, OpencodeClient } from "@opencode-ai/sdk/v2"
 import { Context, Deferred, Effect, Exit, Layer, Scope, Stream } from "effect"
 import { makeRuntime } from "@/effect/run-service"
+import { TranscriptV2Display } from "@/session/transcript-v2-display"
 import {
   blockerStatus,
   bootstrapSessionData,
@@ -27,7 +28,7 @@ import {
   reduceSessionData,
   type SessionData,
 } from "./session-data"
-import { replaySession } from "./session-replay"
+import { replaySession, replaySessionV2 } from "./session-replay"
 import {
   bootstrapSubagentCalls,
   bootstrapSubagentData,
@@ -256,6 +257,22 @@ export function formatUnknownError(error: unknown): string {
   }
 
   return "unknown error"
+}
+
+function requireV2ReplayData(response: Awaited<ReturnType<OpencodeClient["v2"]["session"]["messages"]>>) {
+  if ("error" in response && response.error) {
+    throw new Error(`failed to load v2 replay messages: ${formatUnknownError(response.error)}`)
+  }
+
+  if (!response.data) {
+    throw new Error("failed to load v2 replay messages: missing response data")
+  }
+
+  return response.data
+}
+
+function requireV2ReplayItems(response: Awaited<ReturnType<OpencodeClient["v2"]["session"]["messages"]>>) {
+  return requireV2ReplayData(response).items
 }
 
 function sameView(a: FooterView, b: FooterView) {
@@ -594,6 +611,63 @@ function createLayer(input: StreamInput) {
             Effect.orElseSucceed(() => []),
           )
 
+        const primaryReplayMessages = Effect.fn("RunStreamTransport.primaryReplayMessages")(function* () {
+          if (!input.replay) {
+            return undefined
+          }
+
+          const rows =
+            input.replayLimit === undefined
+              ? yield* primaryReplayAllMessages()
+              : yield* primaryReplayLatestMessages(input.replayLimit)
+          return TranscriptV2Display.toDisplayTranscriptV2FromWire(rows, { status: "ready" })
+        })
+
+        const primaryReplayLatestMessages = Effect.fn("RunStreamTransport.primaryReplayLatestMessages")(function* (
+          limit: number,
+        ) {
+          const response = yield* Effect.promise(() =>
+            input.sdk.v2.session.messages(
+              {
+                sessionID: input.sessionID,
+                limit,
+                order: "desc",
+              },
+              { throwOnError: true },
+            ),
+          )
+          return requireV2ReplayItems(response)
+        })
+
+        const primaryReplayAllMessages = Effect.fn("RunStreamTransport.primaryReplayAllMessages")(function* () {
+          const rows: unknown[] = []
+          let cursor: string | undefined
+          do {
+            const response = yield* Effect.promise(() =>
+              input.sdk.v2.session.messages(
+                cursor
+                  ? {
+                      sessionID: input.sessionID,
+                      limit: 200,
+                      order: "asc",
+                      cursor,
+                    }
+                  : {
+                      sessionID: input.sessionID,
+                      limit: 200,
+                      order: "asc",
+                    },
+                { throwOnError: true },
+              ),
+            )
+            const data = requireV2ReplayData(response)
+            rows.push(...data.items)
+            cursor = data.cursor.next
+          } while (cursor)
+
+          return rows
+        })
+
         const bootstrapSubagentHistory = Effect.fn("RunStreamTransport.bootstrapSubagentHistory")(function* (
           sessions: string[],
         ) {
@@ -627,16 +701,9 @@ function createLayer(input: StreamInput) {
         })
 
         const bootstrap = Effect.fn("RunStreamTransport.bootstrap")(function* () {
-          const [messagesList, children, permissions, questions] = yield* Effect.all(
+          const [replayMessages, children, permissions, questions] = yield* Effect.all(
             [
-              messages(
-                input.sessionID,
-                input.replay
-                  ? input.replayLimit === undefined
-                    ? undefined
-                    : Math.max(input.replayLimit, SUBAGENT_BOOTSTRAP_LIMIT)
-                  : SUBAGENT_BOOTSTRAP_LIMIT,
-              ),
+              primaryReplayMessages(),
               Effect.promise(() =>
                 input.sdk.session.children({
                   sessionID: input.sessionID,
@@ -658,28 +725,29 @@ function createLayer(input: StreamInput) {
               concurrency: "unbounded",
             },
           )
+          // Primary v2 replay owns main-session transcript rendering. Legacy
+          // main-session messages remain needed only to discover parent task
+          // calls for child/subagent bootstrap until that path gets its own v2
+          // cutover slice.
+          const messagesList = input.replay
+            ? children.length > 0
+              ? yield* messages(input.sessionID, SUBAGENT_BOOTSTRAP_LIMIT)
+              : []
+            : yield* messages(input.sessionID, SUBAGENT_BOOTSTRAP_LIMIT)
 
           const sessionPermissions = permissions.filter((item) => item.sessionID === input.sessionID)
           const sessionQuestions = questions.filter((item) => item.sessionID === input.sessionID)
-          const history = input.replay
-            ? replaySession({
-                messages: messagesList,
+          const history = replayMessages
+            ? replaySessionV2({
+                messages: replayMessages,
                 permissions: sessionPermissions,
                 questions: sessionQuestions,
                 thinking: input.thinking,
                 limits: input.limits(),
+                sessionID: input.sessionID,
               })
             : undefined
-          const replay =
-            history && input.replayLimit !== undefined && messagesList.length > input.replayLimit
-              ? replaySession({
-                  messages: messagesList.slice(-input.replayLimit),
-                  permissions: sessionPermissions,
-                  questions: sessionQuestions,
-                  thinking: input.thinking,
-                  limits: input.limits(),
-                })
-              : history
+          const replay = history
 
           replayedParts.clear()
           if (history) {
@@ -696,6 +764,9 @@ function createLayer(input: StreamInput) {
           }
 
           if (replay) {
+            for (const partID of replay.data.ids) {
+              replayedParts.add(partID)
+            }
             for (const [partID] of replay.data.text) {
               if (!replay.data.part.has(partID)) {
                 continue

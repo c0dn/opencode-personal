@@ -7,6 +7,8 @@ type EventStream = Awaited<ReturnType<OpencodeClient["event"]["subscribe"]>>["st
 type GlobalEventStream = Awaited<ReturnType<OpencodeClient["global"]["event"]>>["stream"]
 type SdkEvent = EventStream extends AsyncGenerator<infer T, unknown, unknown> ? T : never
 type SessionMessage = NonNullable<Awaited<ReturnType<OpencodeClient["session"]["messages"]>>["data"]>[number]
+type V2SessionMessagesResponse = NonNullable<Awaited<ReturnType<OpencodeClient["v2"]["session"]["messages"]>>["data"]>
+type V2SessionMessage = V2SessionMessagesResponse["items"][number]
 type SessionChild = NonNullable<Awaited<ReturnType<OpencodeClient["session"]["children"]>>["data"]>[number]
 type SessionToolPart = Extract<SessionMessage["parts"][number], { type: "tool" }>
 type SessionStatusMap = NonNullable<Awaited<ReturnType<OpencodeClient["session"]["status"]>>["data"]>
@@ -160,6 +162,10 @@ function ok<T>(data: T) {
   })
 }
 
+function okV2Messages(items: V2SessionMessage[], cursor: V2SessionMessagesResponse["cursor"] = {}) {
+  return ok({ items, cursor })
+}
+
 function sse(stream: EventStream) {
   return Promise.resolve({ stream })
 }
@@ -215,6 +221,52 @@ function assistantMessage(input: { sessionID: string; id: string; parts: Session
       },
     },
     parts: input.parts,
+  }
+}
+
+function v2User(id: string, text: string, created = 1): V2SessionMessage {
+  return {
+    id,
+    type: "user",
+    text,
+    files: [],
+    agents: [],
+    references: [],
+    time: { created },
+  }
+}
+
+function v2Assistant(id: string, content: Extract<V2SessionMessage, { type: "assistant" }>["content"], created = 2): V2SessionMessage {
+  return {
+    id,
+    type: "assistant",
+    agent: "build",
+    model: {
+      providerID: "openai",
+      id: "gpt-5",
+    },
+    content,
+    time: { created, completed: created + 1 },
+  }
+}
+
+function v2Text(id: string, text: string): Extract<Extract<V2SessionMessage, { type: "assistant" }>["content"][number], { type: "text" }> {
+  return { id, type: "text", text }
+}
+
+function v2RunningTool(id: string, callID = "call-1"): Extract<Extract<V2SessionMessage, { type: "assistant" }>["content"][number], { type: "tool" }> {
+  return {
+    id,
+    type: "tool",
+    callID,
+    name: "bash",
+    state: {
+      status: "running",
+      input: { command: "pwd" },
+      structured: {},
+      content: [],
+    },
+    time: { created: 2, ran: 2 },
   }
 }
 
@@ -398,6 +450,7 @@ function sdk(
     promptAsync?: OpencodeClient["session"]["promptAsync"]
     status?: OpencodeClient["session"]["status"]
     messages?: OpencodeClient["session"]["messages"]
+    v2Messages?: OpencodeClient["v2"]["session"]["messages"]
     children?: OpencodeClient["session"]["children"]
     permissions?: OpencodeClient["permission"]["list"]
     questions?: OpencodeClient["question"]["list"]
@@ -411,6 +464,7 @@ function sdk(
   const promptAsync: OpencodeClient["session"]["promptAsync"] = input.promptAsync ?? (() => ok(undefined))
   const status: OpencodeClient["session"]["status"] = input.status ?? (() => ok({}))
   const messages: OpencodeClient["session"]["messages"] = input.messages ?? (() => ok([]))
+  const v2Messages: OpencodeClient["v2"]["session"]["messages"] = input.v2Messages ?? (() => okV2Messages([]))
   const children: OpencodeClient["session"]["children"] = input.children ?? (() => ok([]))
   const permissions: OpencodeClient["permission"]["list"] = input.permissions ?? (() => ok([]))
   const questions: OpencodeClient["question"]["list"] = input.questions ?? (() => ok([]))
@@ -420,6 +474,7 @@ function sdk(
   spyOn(client.session, "promptAsync").mockImplementation(promptAsync)
   spyOn(client.session, "status").mockImplementation(status)
   spyOn(client.session, "messages").mockImplementation(messages)
+  spyOn(client.v2.session, "messages").mockImplementation(v2Messages)
   spyOn(client.session, "children").mockImplementation(children)
   spyOn(client.permission, "list").mockImplementation(permissions)
   spyOn(client.question, "list").mockImplementation(questions)
@@ -471,27 +526,16 @@ describe("run stream transport", () => {
   test("replays persisted main-session history during bootstrap when enabled", async () => {
     const src = eventFeed()
     const ui = footer()
+    const legacyMessages = mock(() => ok([]))
+    const v2Messages = mock(({ order, limit, cursor }) => {
+      expect({ order, limit, cursor }).toEqual({ order: "asc", limit: 200, cursor: undefined })
+      return okV2Messages([v2Assistant("evt-assistant-1", [v2Text("evt-text-1", "Hello.")])])
+    })
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
-        messages: async ({ sessionID }) =>
-          sessionID === "session-1"
-            ? ok([
-                assistantMessage({
-                  sessionID: "session-1",
-                  id: "msg-1",
-                  parts: [
-                    {
-                      ...textPart("text-1", "msg-1", "Hello."),
-                      time: {
-                        start: 1,
-                        end: 2,
-                      },
-                    },
-                  ],
-                }),
-              ])
-            : ok([]),
+        messages: legacyMessages,
+        v2Messages,
       }),
       sessionID: "session-1",
       thinking: true,
@@ -503,6 +547,100 @@ describe("run stream transport", () => {
     try {
       await waitFor(() => ui.commits.find((item) => item.kind === "assistant" && item.text === "Hello."))
       expect(ui.idleCalls).toBeGreaterThan(0)
+      expect(legacyMessages).not.toHaveBeenCalled()
+      expect(v2Messages).toHaveBeenCalledTimes(1)
+      expect(JSON.stringify(ui.commits)).not.toContain("msg_")
+      expect(JSON.stringify(ui.commits)).not.toContain("prt_")
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
+
+  test("paginates all v2 replay messages with explicit ascending pages", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const calls: unknown[] = []
+    const v2Messages = mock((params) => {
+      calls.push(params)
+      if ("cursor" in params && params.cursor === "next-1") {
+        return okV2Messages([v2Assistant("evt-assistant-2", [v2Text("evt-text-2", "two")], 3)])
+      }
+      return okV2Messages([v2Assistant("evt-assistant-1", [v2Text("evt-text-1", "one")], 1)], { next: "next-1" })
+    })
+    const transport = await createSessionTransport({
+      sdk: sdk({ stream: src.stream, v2Messages }),
+      sessionID: "session-1",
+      thinking: true,
+      replay: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      await waitFor(() => (ui.commits.filter((item) => item.kind === "assistant").length === 2 ? true : undefined))
+      expect(calls).toEqual([
+        expect.objectContaining({ sessionID: "session-1", order: "asc", limit: 200 }),
+        expect.objectContaining({ sessionID: "session-1", order: "asc", cursor: "next-1", limit: 200 }),
+      ])
+      expect(ui.commits.filter((item) => item.kind === "assistant").map((item) => item.text)).toEqual(["one", "two"])
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
+
+  test("replay with children uses legacy only for subagent bootstrap", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const legacyMessages = mock(({ sessionID }) =>
+      sessionID === "session-1"
+        ? ok([
+            assistantMessage({
+              sessionID: "session-1",
+              id: "msg-legacy-parent",
+              parts: [
+                runningTool({
+                  sessionID: "session-1",
+                  messageID: "msg-legacy-parent",
+                  id: "task-1",
+                  callID: "call-1",
+                  tool: "task",
+                  body: { description: "Explore run.ts", subagent_type: "explore" },
+                  metadata: { sessionId: "child-1" },
+                }),
+              ],
+            }),
+          ])
+        : ok([]),
+    )
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        stream: src.stream,
+        v2Messages: async () => okV2Messages([v2Assistant("evt-assistant-1", [v2Text("evt-text-1", "primary")])]),
+        messages: legacyMessages,
+        children: async () => ok([child("child-1")]),
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      replay: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      await waitFor(() => ui.commits.find((item) => item.kind === "assistant" && item.text === "primary"))
+      const state = await waitFor(() => {
+        const item = ui.events.findLast((event) => event.type === "stream.subagent")
+        return item?.type === "stream.subagent" && item.state.tabs.some((tab) => tab.sessionID === "child-1")
+          ? item.state
+          : undefined
+      })
+      expect(state.tabs).toEqual([expect.objectContaining({ sessionID: "child-1", status: "running" })])
+      expect(legacyMessages.mock.calls.map((call) => call[0])).toEqual([
+        expect.objectContaining({ sessionID: "session-1" }),
+        expect.objectContaining({ sessionID: "child-1" }),
+      ])
     } finally {
       src.close()
       await transport.close()
@@ -512,42 +650,14 @@ describe("run stream transport", () => {
   test("caps replayed bootstrap history to the configured number of messages", async () => {
     const src = eventFeed()
     const ui = footer()
+    const v2Messages = mock(({ order, limit }) => {
+      expect({ order, limit }).toEqual({ order: "desc", limit: 1 })
+      return okV2Messages([v2Assistant("evt-assistant-2", [v2Text("evt-text-2", "World.")], 3)])
+    })
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
-        messages: async ({ sessionID }) =>
-          ok(
-            sessionID === "session-1"
-              ? [
-                  assistantMessage({
-                    sessionID: "session-1",
-                    id: "msg-1",
-                    parts: [
-                      {
-                        ...textPart("text-1", "msg-1", "Hello."),
-                        time: {
-                          start: 1,
-                          end: 2,
-                        },
-                      },
-                    ],
-                  }),
-                  assistantMessage({
-                    sessionID: "session-1",
-                    id: "msg-2",
-                    parts: [
-                      {
-                        ...textPart("text-2", "msg-2", "World."),
-                        time: {
-                          start: 3,
-                          end: 4,
-                        },
-                      },
-                    ],
-                  }),
-                ]
-              : [],
-          ),
+        v2Messages,
       }),
       sessionID: "session-1",
       thinking: true,
@@ -564,10 +674,72 @@ describe("run stream transport", () => {
           text: "World.",
         }),
       ])
+      expect(v2Messages).toHaveBeenCalledTimes(1)
     } finally {
       src.close()
       await transport.close()
     }
+  })
+
+  test("renders limited latest v2 messages in ascending display order", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        stream: src.stream,
+        v2Messages: async () =>
+          okV2Messages([
+            v2Assistant("evt-assistant-3", [v2Text("evt-text-3", "three")], 3),
+            v2Assistant("evt-assistant-2", [v2Text("evt-text-2", "two")], 2),
+          ]),
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      replay: true,
+      replayLimit: 2,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      await waitFor(() => (ui.commits.filter((item) => item.kind === "assistant").length === 2 ? true : undefined))
+      expect(ui.commits.filter((item) => item.kind === "assistant").map((item) => item.text)).toEqual(["two", "three"])
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
+
+  test("rejects startup when v2 replay is not ready or invalid", async () => {
+    await expect(
+      createSessionTransport({
+        sdk: sdk({
+          v2Messages: async () =>
+            ({
+              data: undefined,
+              error: { _tag: "SessionMessagesNotReadyError", sessionID: "session-1", status: "upgrade_pending" },
+              request: new Request("https://opencode.test"),
+              response: new Response(undefined, { status: 503 }),
+            }) as never,
+        }),
+        sessionID: "session-1",
+        thinking: true,
+        replay: true,
+        limits: () => ({}),
+        footer: footer().api,
+      }),
+    ).rejects.toThrow("failed to load v2 replay messages")
+
+    await expect(
+      createSessionTransport({
+        sdk: sdk({ v2Messages: async () => okV2Messages([{ ...v2User("msg_legacy", "bad"), id: "msg_legacy" }]) }),
+        sessionID: "session-1",
+        thinking: true,
+        replay: true,
+        limits: () => ({}),
+        footer: footer().api,
+      }),
+    ).rejects.toThrow()
   })
 
   test("skips buffered pre-bootstrap deltas already covered by replay history", async () => {
@@ -578,19 +750,9 @@ describe("run stream transport", () => {
     const task = createSessionTransport({
       sdk: sdk({
         stream: src.stream,
-        messages: async ({ sessionID }) => {
-          if (sessionID !== "session-1") {
-            return ok([])
-          }
-
+        v2Messages: async () => {
           await gate.promise
-          return ok([
-            assistantMessage({
-              sessionID: "session-1",
-              id: "msg-1",
-              parts: [textPart("text-1", "msg-1", "Hello")],
-            }),
-          ])
+          return okV2Messages([v2Assistant("evt-assistant-1", [v2Text("evt-text-1", "Hello")])])
         },
       }),
       sessionID: "session-1",
@@ -602,7 +764,7 @@ describe("run stream transport", () => {
 
     try {
       await Promise.resolve()
-      src.push(textDelta("msg-1", "text-1", "lo"))
+      src.push(textDelta("evt-assistant-1", "evt-text-1", "lo"))
       gate.resolve()
       transport = await task
 
@@ -627,19 +789,9 @@ describe("run stream transport", () => {
     const task = createSessionTransport({
       sdk: sdk({
         stream: src.stream,
-        messages: async ({ sessionID }) => {
-          if (sessionID !== "session-1") {
-            return ok([])
-          }
-
+        v2Messages: async () => {
           await gate.promise
-          return ok([
-            assistantMessage({
-              sessionID: "session-1",
-              id: "msg-1",
-              parts: [textPart("text-1", "msg-1", "")],
-            }),
-          ])
+          return okV2Messages([v2Assistant("evt-assistant-1", [], 2)])
         },
       }),
       sessionID: "session-1",
@@ -651,7 +803,8 @@ describe("run stream transport", () => {
 
     try {
       await Promise.resolve()
-      src.push(textDelta("msg-1", "text-1", "Hello"))
+      src.push(textDelta("evt-assistant-1", "evt-text-1", "Hello"))
+      src.push(textUpdated(textPart("evt-text-1", "evt-assistant-1", "", "session-1")))
       gate.resolve()
       transport = await task
 
@@ -674,27 +827,7 @@ describe("run stream transport", () => {
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
-        messages: async ({ sessionID }) =>
-          sessionID === "session-1"
-            ? ok([
-                assistantMessage({
-                  sessionID: "session-1",
-                  id: "msg-1",
-                  parts: [
-                    runningTool({
-                      sessionID: "session-1",
-                      messageID: "msg-1",
-                      id: "bash-1",
-                      callID: "call-1",
-                      tool: "bash",
-                      body: {
-                        command: "pwd",
-                      },
-                    }),
-                  ],
-                }),
-              ])
-            : ok([]),
+        v2Messages: async () => okV2Messages([v2Assistant("evt-assistant-1", [v2RunningTool("evt-tool-1")])]),
       }),
       sessionID: "session-1",
       thinking: true,
