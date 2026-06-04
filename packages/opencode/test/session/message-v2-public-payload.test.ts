@@ -15,11 +15,21 @@ const model = {
   variant: ModelV2.VariantID.make("default"),
 }
 
+const modelWithoutVariant = {
+  providerID: ProviderV2.ID.make("provider"),
+  id: ModelV2.ID.make("model"),
+} satisfies SessionMessage.Assistant["model"]
+
 const sessionModel = {
   providerID: ProviderV2.ID.make("provider"),
   id: ProviderV2.ModelID.make("model"),
   variant: "default",
 }
+
+const sessionModelWithoutVariant = {
+  providerID: ProviderV2.ID.make("provider"),
+  id: ProviderV2.ModelID.make("model"),
+} satisfies NonNullable<Session.Info["model"]>
 
 describe("session.transcript-v2-public-payload", () => {
   test("wraps public envelope and strictly whitelists session fields", () => {
@@ -238,6 +248,140 @@ describe("session.transcript-v2-public-payload", () => {
     }
   })
 
+  test("local envelope validator accepts producer output with variant-less models and remaining content branches", () => {
+    const payload = TranscriptV2PublicPayload.toPublicTranscriptPayloadV2(
+      session({ model: sessionModelWithoutVariant }),
+      [
+        user("variantless", 1, {
+          taskRequests: [
+            new SessionMessage.UserTaskRequest({
+              type: "task-request",
+              id: id("variantless_task"),
+              prompt: "secret prompt",
+              description: "secret description",
+              agent: "build",
+              model: modelWithoutVariant,
+            }),
+          ],
+        }),
+        assistant(
+          "variantless",
+          2,
+          [
+            patch("variantless", ["/home/william/project/src/index.ts"]),
+            tool("pending", new SessionMessage.ToolStatePending({ status: "pending", input: "ls" })),
+            tool(
+              "running",
+              new SessionMessage.ToolStateRunning({
+                status: "running",
+                input: { cmd: "pwd" },
+                structured: { cwd: "/home/william/project" },
+                content: [new ToolOutput.TextContent({ type: "text", text: "running output" })],
+              }),
+            ),
+          ],
+          { model: modelWithoutVariant },
+        ),
+      ],
+      { status: "ready" },
+    )
+
+    expect(payload.session.model).toStrictEqual(sessionModelWithoutVariant)
+    const taskRequests = payload.messages[0]?.type === "user" ? payload.messages[0].taskRequests : undefined
+    expect(taskRequests?.[0]?.model).toStrictEqual(modelWithoutVariant)
+    const assistantMessage = payload.messages[1]
+    if (assistantMessage?.type !== "assistant") throw new Error("expected assistant")
+    expect(assistantMessage.model).toStrictEqual(modelWithoutVariant)
+    expect(assistantMessage.content.map((item) => item.type)).toStrictEqual(["patch", "tool", "tool"])
+    expect(() => TranscriptV2PublicPayload.assertPublicTranscriptPayloadV2(payload)).not.toThrow()
+  })
+
+  test("converts public v2 import payload to canonical redacted messages", () => {
+    const payload = withValue(publicPayloadForValidation(), ["messages", 1, "id"], id("validation_assistant")) as TranscriptV2PublicPayload.PublicTranscriptPayloadV2
+
+    const messages = TranscriptV2PublicPayload.publicTranscriptPayloadV2ToCanonicalMessages(payload)
+
+    expect(messages[0]).toMatchObject({ type: "user", files: [], agents: [], references: [] })
+    const assistantMessage = messages[1]
+    if (assistantMessage?.type !== "assistant") throw new Error("expected assistant")
+    const toolContent = assistantMessage.content.find((item) => item.type === "tool")
+    if (toolContent?.type !== "tool" || toolContent.state.status !== "error") throw new Error("expected error tool")
+    expect(toolContent.state.input).toStrictEqual({ redacted: true })
+    expect(toolContent.state.structured).toStrictEqual({ redacted: true })
+    expect(toolContent.state.error).toStrictEqual({ type: "unknown", message: "[redacted]" })
+    expect(toolContent.state.content).toEqual([
+      { type: "text", text: "[redacted]" },
+      { type: "file", uri: "redacted://file", mime: "text/plain", name: "[redacted]" },
+    ])
+    expect(() => TranscriptV2PublicPayload.publicTranscriptPayloadV2ToCanonicalMessages(withValue(payload, ["messages", 2, "reason"], "future") as TranscriptV2PublicPayload.PublicTranscriptPayloadV2)).toThrow(
+      TranscriptV2PublicPayload.PublicTranscriptPayloadValidationError,
+    )
+    expect(() => TranscriptV2PublicPayload.publicTranscriptPayloadV2ToCanonicalMessages(withValue(payload, ["messages", 1, "id"], payload.messages[0]!.id) as TranscriptV2PublicPayload.PublicTranscriptPayloadV2)).toThrow(
+      TranscriptV2PublicPayload.PublicTranscriptPayloadValidationError,
+    )
+  })
+
+  test("local envelope validator deeply rejects unknown fields and unsafe variants", () => {
+    const valid = publicPayloadForValidation()
+
+    for (const invalid of [
+      withValue(valid, ["extra"], true),
+      withValue(valid, ["session", "metadata"], { unsafe: true }),
+      withValue(valid, ["messages", 0, "parts"], []),
+      withValue(valid, ["messages", 0, "taskRequests", 0, "metadata"], { unsafe: true }),
+      withValue(valid, ["messages", 0, "type"], "synthetic"),
+      withValue(valid, ["messages", 0, "type"], "shell"),
+      withValue(valid, ["messages", 0, "type"], "agent-switched"),
+      withValue(valid, ["messages", 0, "type"], "model-switched"),
+      withValue(valid, ["messages", 1, "content", 0, "metadata"], { unsafe: true }),
+      withValue(valid, ["messages", 1, "content", 1, "metadata"], { unsafe: true }),
+      withValue(valid, ["messages", 1, "content", 0, "type"], "reasoning"),
+      withValue(valid, ["messages", 1, "content", 1, "state", "status"], "future"),
+      withValue(valid, ["messages", 1, "content", 1, "state", "content", 0, "type"], "json"),
+      withValue(valid, ["messages", 1, "content", 1, "provider", "metadata"], { secret: true }),
+      withValue(valid, ["messages", 1, "content", 1, "state", "output"], "secret"),
+    ]) {
+      expect(() => TranscriptV2PublicPayload.assertPublicTranscriptPayloadV2(invalid)).toThrow()
+    }
+  })
+
+  test("local envelope validator rejects malformed fields, legacy IDs, and unredacted public-only fields", () => {
+    const valid = publicPayloadForValidation()
+
+    for (const invalid of [
+      null,
+      [],
+      withValue(valid, ["session", "id"], "msg_session"),
+      withValue(valid, ["session", "title"], 123),
+      withValue(valid, ["session", "version"], 2),
+      withValue(valid, ["session", "time", "created"], Number.NaN),
+      withValue(valid, ["session", "time", "updated"], Infinity),
+      withValue(valid, ["session", "model", "id"], 123),
+      withValue(valid, ["session", "model", "variant"], 123),
+      withValue(valid, ["messages", 0, "id"], "msg_user"),
+      withValue(valid, ["messages", 0, "time", "created"], "100"),
+      withValue(valid, ["messages", 0, "taskRequests", 0, "id"], "prt_task"),
+      withValue(valid, ["messages", 0, "taskRequests", 0, "model", "variant"], 123),
+      withValue(valid, ["messages", 0, "taskRequests", 0, "prompt"], "secret prompt"),
+      withValue(valid, ["messages", 0, "taskRequests", 0, "description"], "secret description"),
+      withValue(valid, ["messages", 0, "taskRequests", 0, "command"], "cat secret"),
+      withValue(valid, ["messages", 1, "model", "variant"], 123),
+      withValue(valid, ["messages", 1, "content", 0, "id"], "prt_text"),
+      withValue(valid, ["messages", 1, "content", 1, "callID"], "msg_call"),
+      withValue(valid, ["messages", 1, "content", 1, "title"], "secret title"),
+      withValue(valid, ["messages", 1, "content", 1, "state", "input"], { path: "/home/william" }),
+      withValue(valid, ["messages", 1, "content", 1, "state", "structured"], { output: "secret" }),
+      withValue(valid, ["messages", 1, "content", 1, "state", "content", 0, "text"], "secret output"),
+      withValue(valid, ["messages", 1, "content", 1, "state", "content", 1, "uri"], "file:///home/william/secret.txt"),
+      withValue(valid, ["messages", 1, "content", 1, "state", "content", 1, "name"], "secret.txt"),
+      withValue(valid, ["messages", 1, "content", 1, "state", "error"], "secret error"),
+      withValue(valid, ["messages", 2, "include"], "prt_include"),
+      withValue(valid, ["messages", 2, "summary"], "secret summary"),
+    ]) {
+      expect(() => TranscriptV2PublicPayload.assertPublicTranscriptPayloadV2(invalid)).toThrow()
+    }
+  })
+
   test("source-purity guard does not import legacy readers, database services, or CLI export", async () => {
     const source = await Bun.file(new URL("../../src/session/transcript-v2-public-payload.ts", import.meta.url)).text()
 
@@ -345,6 +489,55 @@ function tool(suffix: string, state: SessionMessage.ToolState) {
 
 function toolRaw(suffix: string, state: SessionMessage.ToolState) {
   return { type: "tool", id: id(`tool_${suffix}`), callID: `call-${suffix}`, name: "bash", state, time: { created: time(1) } } as SessionMessage.AssistantTool
+}
+
+function publicPayloadForValidation() {
+  const payload = TranscriptV2PublicPayload.toPublicTranscriptPayloadV2(
+    session(),
+    [
+      user("validation", 1, {
+        taskRequests: [
+          new SessionMessage.UserTaskRequest({
+            type: "task-request",
+            id: id("validation_task"),
+            prompt: "secret prompt",
+            description: "secret description",
+            agent: "build",
+            model,
+            command: "secret command",
+          }),
+        ],
+      }),
+      assistant("validation", 2, [
+        text("validation", "safe text"),
+        tool(
+          "validation",
+          new SessionMessage.ToolStateError({
+            status: "error",
+            input: { secret: true },
+            structured: { output: "secret" },
+            content: [
+              new ToolOutput.TextContent({ type: "text", text: "secret output" }),
+              new ToolOutput.FileContent({ type: "file", uri: "file:///home/william/secret.txt", mime: "text/plain", name: "secret.txt" }),
+            ],
+            error: { type: "unknown", message: "secret error" },
+          }),
+        ),
+      ]),
+      new SessionMessage.Compaction({ type: "compaction", id: id("validation_compaction"), reason: "manual", summary: "secret summary", include: id("validation"), time: { created: time(3) } }),
+    ],
+    { status: "ready" },
+  )
+  expect(() => TranscriptV2PublicPayload.assertPublicTranscriptPayloadV2(payload)).not.toThrow()
+  return payload
+}
+
+function withValue(value: unknown, path: readonly (string | number)[], replacement: unknown) {
+  const copy = structuredClone(value)
+  let cursor = copy as Record<string | number, unknown>
+  for (const key of path.slice(0, -1)) cursor = cursor[key] as Record<string | number, unknown>
+  cursor[path[path.length - 1]!] = replacement
+  return copy
 }
 
 function expectNoLegacyIDs(value: unknown) {
