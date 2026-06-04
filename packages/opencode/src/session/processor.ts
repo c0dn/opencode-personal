@@ -37,6 +37,7 @@ export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
   readonly message: SessionLegacy.Assistant
+  readonly outputText: () => string | undefined
   readonly updateToolCall: (
     toolCallID: string,
     update: (part: SessionLegacy.ToolPart) => SessionLegacy.ToolPart,
@@ -79,6 +80,7 @@ interface ProcessorContext extends Input {
   blocked: boolean
   needsCompaction: boolean
   currentText: SessionLegacy.TextPart | undefined
+  outputText: string[]
   reasoningMap: Record<string, SessionLegacy.ReasoningPart>
   v2AssistantMessageID: string | undefined
 }
@@ -160,6 +162,7 @@ export const layer = Layer.effect(
         blocked: false,
         needsCompaction: false,
         currentText: undefined,
+        outputText: [],
         reasoningMap: {},
         v2AssistantMessageID: undefined,
       }
@@ -715,6 +718,7 @@ export const layer = Layer.effect(
             }
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             yield* session.updatePart(ctx.currentText)
+            ctx.outputText.push(ctx.currentText.text)
             ctx.currentText = undefined
             return
 
@@ -832,6 +836,7 @@ export const layer = Layer.effect(
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            ctx.outputText = []
             yield* status.set(ctx.sessionID, { type: "busy" })
             const stream = llm.stream(streamInput)
 
@@ -895,6 +900,10 @@ export const layer = Layer.effect(
       return {
         get message() {
           return ctx.assistantMessage
+        },
+        outputText() {
+          const text = ctx.outputText.join("\n\n")
+          return text === "" ? undefined : text
         },
         updateToolCall,
         completeToolCall,

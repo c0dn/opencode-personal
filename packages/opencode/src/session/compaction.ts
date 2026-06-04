@@ -29,6 +29,7 @@ import { asc, eq } from "drizzle-orm"
 import { CompactionV2Context } from "./compaction-v2-context"
 import { CompactionV2Process } from "./compaction-v2-process"
 import { CompactionV2Prompt } from "./compaction-v2-prompt"
+import { CompactionV2SourcePolicy } from "./compaction-v2-source-policy"
 import { ensureBackfillReady } from "./session-v2-backfill-readiness"
 
 const log = Log.create({ service: "session.compaction" })
@@ -485,6 +486,27 @@ export const layer = Layer.effect(
         return "stop"
       }
 
+      if (processor.message.error) return "stop"
+
+      const source = CompactionV2SourcePolicy.select({
+        current: { summary: processor.outputText(), include: v2TailStartID },
+      })
+      if (source.status !== "selected") {
+        processor.message.error = new SessionLegacy.APIError({
+          message: `Compaction output unavailable: ${source.reason}`,
+          isRetryable: false,
+        }).toObject()
+        processor.message.finish = "error"
+        yield* session.updateMessage(processor.message)
+        log.warn("compaction source not selected", {
+          sessionID: input.sessionID,
+          status: source.status,
+          reason: source.reason,
+          detail: "detail" in source ? source.detail : undefined,
+        })
+        return "stop"
+      }
+
       if (compactionPart && legacyTailStartID && compactionPart.tail_start_id !== legacyTailStartID) {
         yield* session.updatePart({
           ...compactionPart,
@@ -576,21 +598,12 @@ export const layer = Layer.effect(
         }
       }
 
-      if (processor.message.error) return "stop"
       if (result === "continue") {
-        const summary = summaryText(
-          (yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
-            (item) => item.info.id === msg.id,
-          ) ?? {
-            info: msg,
-            parts: [],
-          },
-        )
         yield* events.publish(SessionEvent.Compaction.Ended, {
           sessionID: input.sessionID,
           timestamp: DateTime.makeUnsafe(Date.now()),
-          text: summary ?? "",
-          include: v2TailStartID,
+          text: source.summary,
+          include: source.include,
         })
         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
       }

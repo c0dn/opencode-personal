@@ -274,6 +274,18 @@ const boot = Effect.fn("test.boot")(function* () {
   return { processors, session, provider }
 })
 
+function streamInput(input: { parent: SessionLegacy.User; sessionID: SessionID; model: Provider.Model; text: string }) {
+  return {
+    user: input.parent,
+    sessionID: input.sessionID,
+    model: input.model,
+    agent: agent(),
+    system: [],
+    messages: [{ role: "user" as const, content: input.text }],
+    tools: {},
+  } satisfies LLM.StreamInput
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -321,6 +333,70 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         expect(value).toBe("continue")
         expect(calls).toBe(1)
         expect(parts.some((part) => part.type === "text" && part.text === "hello")).toBe(true)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor outputText exposes finalized assistant text", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        yield* llm.text("hello world")
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "hi")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+        const value = yield* handle.process(streamInput({ parent, sessionID: chat.id, model: mdl, text: "hi" }))
+
+        expect(value).toBe("continue")
+        expect(handle.outputText()).toBe("hello world")
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor outputText remains empty when no text is finalized", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        yield* llm.text("stale text")
+        yield* llm.push(
+          raw({
+            head: [
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { role: "assistant" } }],
+              },
+            ],
+            tail: [
+              {
+                id: "chatcmpl-test",
+                object: "chat.completion.chunk",
+                choices: [{ delta: {}, finish_reason: "stop" }],
+              },
+            ],
+          }),
+        )
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "hi")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+
+        const first = yield* handle.process(streamInput({ parent, sessionID: chat.id, model: mdl, text: "hi" }))
+        expect(first).toBe("continue")
+        expect(handle.outputText()).toBe("stale text")
+
+        const value = yield* handle.process(streamInput({ parent, sessionID: chat.id, model: mdl, text: "hi" }))
+
+        expect(value).toBe("continue")
+        expect(handle.outputText()).toBeUndefined()
       }),
     { config: (url) => providerCfg(url) },
   ),
