@@ -3,7 +3,7 @@ import { NodeHttpServer, NodeServices } from "@effect/platform-node"
 import { SessionLegacy } from "@opencode-ai/core/session/legacy"
 import { mkdir } from "node:fs/promises"
 import path from "node:path"
-import { Cause, Config, Effect, Exit, Layer } from "effect"
+import { Cause, Config, Effect, Exit, Layer, Schema } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse, HttpRouter, HttpServer } from "effect/unstable/http"
 import { layerWebSocketConstructorGlobal } from "effect/unstable/socket/Socket"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -24,8 +24,9 @@ import { Session } from "@/session/session"
 import { MessageID, PartID, SessionID, type SessionID as SessionIDType } from "../../src/session/schema"
 import { MessageV2 } from "../../src/session/message-v2"
 import { Database } from "@opencode-ai/core/database/database"
-import { SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
+import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionMessage } from "@opencode-ai/core/session/message"
+import { DataMigrationTable } from "@opencode-ai/core/data-migration.sql"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import * as DateTime from "effect/DateTime"
@@ -180,6 +181,171 @@ const insertCorruptV2Message = (sessionID: SessionIDType, time = 1) =>
       ])
       .run()
       .pipe(Effect.orDie)
+  })
+
+const encodeSessionMessage = Schema.encodeSync(SessionMessage.Message)
+
+const insertV2Messages = (sessionID: SessionIDType, messages: SessionMessage.Message[]) =>
+  Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    yield* db
+      .insert(SessionMessageTable)
+      .values(messages.map((message) => sessionMessageRow(sessionID, message)))
+      .run()
+      .pipe(Effect.orDie)
+  })
+
+function sessionMessageRow(sessionID: SessionIDType, message: SessionMessage.Message) {
+  const encoded = encodeSessionMessage(message)
+  const { id, type, ...data } = encoded
+  return {
+    id: SessionMessage.ID.make(id),
+    session_id: sessionID,
+    type,
+    time_created: DateTime.toEpochMillis(message.time.created),
+    data: data as NonNullable<(typeof SessionMessageTable.$inferInsert)["data"]>,
+  }
+}
+
+function v2UserMessage(id: string, time: number, text: string) {
+  return new SessionMessage.User({
+    id: SessionMessage.ID.make(id),
+    type: "user",
+    text,
+    files: [],
+    agents: [],
+    references: [],
+    time: { created: DateTime.makeUnsafe(time) },
+  })
+}
+
+const insertLegacyMessages = (entries: SessionLegacy.WithParts[]) =>
+  Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    yield* db
+      .insert(MessageTable)
+      .values(entries.map((entry) => legacyMessageRow(entry.info)))
+      .run()
+      .pipe(Effect.orDie)
+    const parts = entries.flatMap((entry) => entry.parts.map(legacyPartRow))
+    if (parts.length > 0) yield* db.insert(PartTable).values(parts).run().pipe(Effect.orDie)
+  })
+
+function legacyMessageRow(info: SessionLegacy.Info): typeof MessageTable.$inferInsert {
+  const { id, sessionID, ...data } = info
+  return { id, session_id: sessionID, time_created: info.time.created, data }
+}
+
+function legacyPartRow(part: SessionLegacy.Part): typeof PartTable.$inferInsert {
+  const { id, sessionID, messageID, ...data } = part
+  return { id, session_id: sessionID, message_id: messageID, time_created: 1, data }
+}
+
+function legacyUser(sessionID: SessionIDType, id: string, time: number): SessionLegacy.User {
+  return {
+    id: SessionLegacy.MessageID.ascending(id),
+    sessionID,
+    role: "user",
+    time: { created: time },
+    agent: "build",
+    model: { providerID: ProviderV2.ID.make("test"), modelID: ProviderV2.ModelID.make("test-model") },
+  }
+}
+
+function legacyAssistant(
+  sessionID: SessionIDType,
+  input: { id: string; parentID: string; time: number; completed?: number },
+): SessionLegacy.Assistant {
+  return {
+    id: SessionLegacy.MessageID.ascending(input.id),
+    sessionID,
+    role: "assistant",
+    time: { created: input.time, completed: input.completed },
+    parentID: SessionLegacy.MessageID.ascending(input.parentID),
+    modelID: ProviderV2.ModelID.make("test-model"),
+    providerID: ProviderV2.ID.make("test"),
+    mode: "build",
+    agent: "build",
+    path: { cwd: "/tmp/work", root: "/tmp/work" },
+    cost: 0,
+    tokens: { input: 1, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+    finish: "stop",
+  }
+}
+
+function legacyTextPart(sessionID: SessionIDType, messageID: string, id: string, text: string): SessionLegacy.TextPart {
+  return {
+    id: SessionLegacy.PartID.ascending(id),
+    sessionID,
+    messageID: SessionLegacy.MessageID.ascending(messageID),
+    type: "text",
+    text,
+  }
+}
+
+function legacySubtaskPart(sessionID: SessionIDType, messageID: string, id: string): SessionLegacy.SubtaskPart {
+  return {
+    id: SessionLegacy.PartID.ascending(id),
+    sessionID,
+    messageID: SessionLegacy.MessageID.ascending(messageID),
+    type: "subtask",
+    prompt: "review the staged changes",
+    description: "review",
+    agent: "reviewer",
+    model: { providerID: ProviderV2.ID.make("test"), modelID: ProviderV2.ModelID.make("test-model") },
+    command: "review-code",
+  }
+}
+
+function legacyPatchPart(sessionID: SessionIDType, messageID: string, id: string): SessionLegacy.PatchPart {
+  return {
+    id: SessionLegacy.PartID.ascending(id),
+    sessionID,
+    messageID: SessionLegacy.MessageID.ascending(messageID),
+    type: "patch",
+    hash: "abc123",
+    files: ["README.md"],
+  }
+}
+
+function legacyStepStartPart(sessionID: SessionIDType, messageID: string, id: string): SessionLegacy.StepStartPart {
+  return {
+    id: SessionLegacy.PartID.ascending(id),
+    sessionID,
+    messageID: SessionLegacy.MessageID.ascending(messageID),
+    type: "step-start",
+    snapshot: "before.patch",
+  }
+}
+
+function legacyStepFinishPart(sessionID: SessionIDType, messageID: string, id: string): SessionLegacy.StepFinishPart {
+  return {
+    id: SessionLegacy.PartID.ascending(id),
+    sessionID,
+    messageID: SessionLegacy.MessageID.ascending(messageID),
+    type: "step-finish",
+    reason: "stop",
+    snapshot: "after.patch",
+    cost: 0,
+    tokens: { input: 1, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+  }
+}
+
+const readV2Rows = (sessionID: SessionIDType) =>
+  Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    return yield* db
+      .select()
+      .from(SessionMessageTable)
+      .where(eq(SessionMessageTable.session_id, sessionID))
+      .all()
+      .pipe(Effect.orDie)
+  })
+
+const markerExists = (name: string) =>
+  Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    return !!(yield* db.select().from(DataMigrationTable).where(eq(DataMigrationTable.name, name)).get().pipe(Effect.orDie))
   })
 
 const setLegacySummaryDiff = (sessionID: SessionIDType) =>
@@ -437,6 +603,158 @@ describe("session HttpApi", () => {
             .all()
             .pipe(Effect.orDie),
         ).toHaveLength(2)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "backfills rich legacy task requests and assistant patches through v2 message reads",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory }
+        const session = yield* createSession({ title: "rich legacy transcript" })
+        const userID = "msg_http_rich_user"
+        const assistantID = "msg_http_rich_assistant"
+        yield* insertLegacyMessages([
+          {
+            info: legacyUser(session.id, userID, 10),
+            parts: [
+              legacyTextPart(session.id, userID, "prt_http_rich_user_text", "please review"),
+              legacySubtaskPart(session.id, userID, "prt_http_rich_user_subtask"),
+            ],
+          },
+          {
+            info: legacyAssistant(session.id, { id: assistantID, parentID: userID, time: 20, completed: 30 }),
+            parts: [
+              legacyStepStartPart(session.id, assistantID, "prt_http_rich_step_start"),
+              legacyPatchPart(session.id, assistantID, "prt_http_rich_patch"),
+              legacyStepFinishPart(session.id, assistantID, "prt_http_rich_step_finish"),
+            ],
+          },
+        ])
+
+        const response = yield* requestJson<{ items: SessionMessage.Message[] }>(
+          `/api/session/${session.id}/message?order=asc`,
+          { headers },
+        )
+
+        expect(response.items).toHaveLength(2)
+        expect(response.items.map((item) => item.id)).toEqual([
+          expect.stringMatching(/^evt_legacy_backfill_m_00000000_[0-9a-f]{24}$/),
+          expect.stringMatching(/^evt_legacy_backfill_m_00000001_[0-9a-f]{24}$/),
+        ])
+        const user = response.items[0]
+        expect(user).toMatchObject({ type: "user", text: "please review" })
+        expect(user.type === "user" ? (user.taskRequests as unknown) : undefined).toEqual([
+          {
+            type: "task-request",
+            id: expect.stringMatching(/^evt_legacy_backfill_c_00000000_00000000_[0-9a-f]{24}$/),
+            prompt: "review the staged changes",
+            description: "review",
+            agent: "reviewer",
+            model: { providerID: "test", id: "test-model" },
+            command: "review-code",
+          },
+        ])
+        const assistant = response.items[1]
+        expect(assistant.type === "assistant" ? assistant.content : undefined).toContainEqual({
+          type: "patch",
+          id: expect.stringMatching(/^evt_legacy_backfill_c_00000001_00000000_[0-9a-f]{24}$/),
+          hash: "abc123",
+          files: ["README.md"],
+        })
+        expect(assistant).toMatchObject({ type: "assistant", snapshot: { start: "before.patch", end: "after.patch" } })
+        expect(JSON.stringify(response)).not.toMatch(/(?:msg_|prt_)/)
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "paginates deterministic v2 message rows with next and previous cursors",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory }
+        const session = yield* createSession({ title: "v2 message pagination" })
+        yield* insertV2Messages(session.id, [
+          v2UserMessage("evt_http_page_001", 10, "first"),
+          v2UserMessage("evt_http_page_002", 20, "second"),
+          v2UserMessage("evt_http_page_003", 30, "third"),
+        ])
+
+        const firstPage = yield* requestJson<{ items: SessionMessage.Message[]; cursor: { next?: string; previous?: string } }>(
+          `/api/session/${session.id}/message?order=asc&limit=1`,
+          { headers },
+        )
+        expect(firstPage.items.map((item) => item.id)).toEqual([SessionMessage.ID.make("evt_http_page_001")])
+        expect(firstPage.cursor.next).toBeTruthy()
+        expect(firstPage.cursor.previous).toBeTruthy()
+
+        const secondPage = yield* requestJson<{ items: SessionMessage.Message[]; cursor: { next?: string; previous?: string } }>(
+          `/api/session/${session.id}/message?cursor=${firstPage.cursor.next}&limit=1`,
+          { headers },
+        )
+        expect(secondPage.items.map((item) => item.id)).toEqual([SessionMessage.ID.make("evt_http_page_002")])
+        expect(secondPage.cursor.next).toBeTruthy()
+        expect(secondPage.cursor.previous).toBeTruthy()
+
+        const previousPage = yield* requestJson<{ items: SessionMessage.Message[] }>(
+          `/api/session/${session.id}/message?cursor=${secondPage.cursor.previous}&limit=1`,
+          { headers },
+        )
+        expect(previousPage.items.map((item) => item.id)).toEqual([SessionMessage.ID.make("evt_http_page_001")])
+
+        const descPage = yield* requestJson<{ items: SessionMessage.Message[] }>(
+          `/api/session/${session.id}/message?order=desc&limit=1`,
+          { headers },
+        )
+        expect(descPage.items.map((item) => item.id)).toEqual([SessionMessage.ID.make("evt_http_page_003")])
+      }),
+    { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  it.instance(
+    "preserves live v2 rows and skips markers when legacy backfill has an equal cutoff boundary",
+    () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory }
+        const session = yield* createSession({ title: "mixed equal boundary" })
+        const live = v2UserMessage("evt_http_live_equal_boundary", 10, "live v2")
+        yield* insertV2Messages(session.id, [live])
+        yield* insertLegacyMessages([
+          {
+            info: legacyUser(session.id, "msg_http_mixed_older", 5),
+            parts: [legacyTextPart(session.id, "msg_http_mixed_older", "prt_http_mixed_older_text", "older legacy")],
+          },
+          {
+            info: legacyUser(session.id, "msg_http_mixed_equal", 10),
+            parts: [legacyTextPart(session.id, "msg_http_mixed_equal", "prt_http_mixed_equal_text", "equal legacy")],
+          },
+        ])
+
+        const response = yield* requestJson<{ items: SessionMessage.Message[] }>(
+          `/api/session/${session.id}/message?order=asc`,
+          { headers },
+        )
+        const rows = yield* readV2Rows(session.id)
+
+        expect(response.items as unknown).toEqual([
+          {
+            id: live.id,
+            type: "user",
+            text: "live v2",
+            files: [],
+            agents: [],
+            references: [],
+            time: { created: 10 },
+          },
+        ])
+        expect(rows.map((row) => row.id)).toEqual([SessionMessage.ID.make("evt_http_live_equal_boundary")])
+        expect(rows.some((row) => row.id.startsWith("evt_legacy_backfill_"))).toBe(false)
+        expect(yield* markerExists(`legacy-session-message-backfill/v1/${session.id}`)).toBe(false)
+        expect(yield* markerExists(`legacy-session-message-backfill/v2/${session.id}`)).toBe(false)
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )
