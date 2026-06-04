@@ -1,233 +1,128 @@
 import { Session } from "@/session/session"
-import { SessionLegacy } from "@opencode-ai/core/session/legacy"
-import { MessageV2 } from "../../session/message-v2"
 import { SessionID } from "../../session/schema"
 import { TranscriptV2PublicExport } from "../../session/transcript-v2-public-export"
+import type { TranscriptV2PublicPayload } from "../../session/transcript-v2-public-payload"
 import { effectCmd, fail } from "../effect-cmd"
 import { UI } from "../ui"
 import * as prompts from "@clack/prompts"
 import { EOL } from "os"
 import { Effect } from "effect"
 
-export const SANITIZE_V2_ERROR =
-  "--sanitize is only supported with --format legacy. V2 export uses its fixed public redaction policy."
-
 type ExportFormat = "legacy" | "v2"
+const REDACTED_TEXT = "[redacted]" as const
+const REDACTED_URI = "redacted://file" as const
 
 export function validateExportOptions(args: { sanitize?: boolean; format?: ExportFormat }) {
-  const format = args.format ?? "legacy"
-  if (format === "v2" && args.sanitize) return SANITIZE_V2_ERROR
+  void args
   return undefined
+}
+
+export function resolveExportFormat(format?: ExportFormat): "v2" {
+  void format
+  return "v2"
 }
 
 function redact(kind: string, id: string, value: string) {
   return value.trim() ? `[redacted:${kind}:${id}]` : value
 }
 
-function data(kind: string, id: string, value: Record<string, unknown> | undefined) {
-  if (!value) return value
-  return Object.keys(value).length ? { redacted: `${kind}:${id}` } : value
-}
-
-function span(id: string, value: { value: string; start: number; end: number }) {
+export function sanitizePublicTranscriptPayloadV2(
+  data: TranscriptV2PublicPayload.PublicTranscriptPayloadV2,
+): TranscriptV2PublicPayload.PublicTranscriptPayloadV2 {
   return {
-    ...value,
-    value: redact("file-text", id, value.value),
+    ...data,
+    session: {
+      ...data.session,
+      title: redact("session-title", data.session.id, data.session.title),
+    },
+    messages: data.messages.map(sanitizePublicMessageV2),
   }
 }
 
-function diff(kind: string, diffs: { file?: string; patch?: string }[] | undefined) {
-  return diffs?.map((item, i) => ({
-    ...item,
-    file: item.file === undefined ? undefined : redact(`${kind}-file`, String(i), item.file),
-    patch: item.patch === undefined ? undefined : redact(`${kind}-patch`, String(i), item.patch),
-  }))
+function sanitizePublicMessageV2(
+  message: TranscriptV2PublicPayload.PublicTranscriptMessage,
+): TranscriptV2PublicPayload.PublicTranscriptMessage {
+  switch (message.type) {
+    case "user":
+      return {
+        ...message,
+        text: redact("user-text", message.id, message.text),
+        ...(message.taskRequests ? { taskRequests: message.taskRequests.map(sanitizeTaskRequestV2) } : {}),
+      }
+    case "assistant":
+      return {
+        ...message,
+        content: message.content.map(sanitizeAssistantContentV2),
+      }
+    case "compaction":
+      return {
+        ...message,
+        summary: REDACTED_TEXT,
+      }
+  }
 }
 
-function source(part: SessionLegacy.FilePart) {
-  if (!part.source) return part.source
-  if (part.source.type === "symbol") {
-    return {
-      ...part.source,
-      path: redact("file-path", part.id, part.source.path),
-      name: redact("file-symbol", part.id, part.source.name),
-      text: span(part.id, part.source.text),
-    }
-  }
-  if (part.source.type === "resource") {
-    return {
-      ...part.source,
-      clientName: redact("file-client", part.id, part.source.clientName),
-      uri: redact("file-uri", part.id, part.source.uri),
-      text: span(part.id, part.source.text),
-    }
-  }
+function sanitizeTaskRequestV2(
+  request: TranscriptV2PublicPayload.PublicTaskRequest,
+): TranscriptV2PublicPayload.PublicTaskRequest {
   return {
-    ...part.source,
-    path: redact("file-path", part.id, part.source.path),
-    text: span(part.id, part.source.text),
+    ...request,
+    prompt: REDACTED_TEXT,
+    description: REDACTED_TEXT,
+    ...(request.command ? { command: REDACTED_TEXT } : {}),
   }
 }
 
-function filepart(part: SessionLegacy.FilePart): SessionLegacy.FilePart {
-  return {
-    ...part,
-    url: redact("file-url", part.id, part.url),
-    filename: part.filename === undefined ? undefined : redact("file-name", part.id, part.filename),
-    source: source(part),
-  }
-}
-
-function part(part: SessionLegacy.Part): SessionLegacy.Part {
-  switch (part.type) {
+function sanitizeAssistantContentV2(
+  content: TranscriptV2PublicPayload.PublicAssistantContent,
+): TranscriptV2PublicPayload.PublicAssistantContent {
+  switch (content.type) {
     case "text":
+      return { ...content, text: redact("assistant-text", content.id, content.text) }
+    case "patch":
       return {
-        ...part,
-        text: redact("text", part.id, part.text),
-        metadata: data("text-metadata", part.id, part.metadata),
-      }
-    case "reasoning":
-      return {
-        ...part,
-        text: redact("reasoning", part.id, part.text),
-        metadata: data("reasoning-metadata", part.id, part.metadata),
-      }
-    case "file":
-      return filepart(part)
-    case "subtask":
-      return {
-        ...part,
-        prompt: redact("subtask-prompt", part.id, part.prompt),
-        description: redact("subtask-description", part.id, part.description),
-        command: part.command === undefined ? undefined : redact("subtask-command", part.id, part.command),
+        ...content,
+        hash: redact("patch-hash", content.id, content.hash),
+        files: content.files.map((file, index) => redact("patch-file", `${content.id}-${index}`, file)),
       }
     case "tool":
       return {
-        ...part,
-        metadata: data("tool-metadata", part.id, part.metadata),
-        state:
-          part.state.status === "pending"
-            ? {
-                ...part.state,
-                input: data("tool-input", part.id, part.state.input) ?? part.state.input,
-                raw: redact("tool-raw", part.id, part.state.raw),
-              }
-            : part.state.status === "running"
-              ? {
-                  ...part.state,
-                  input: data("tool-input", part.id, part.state.input) ?? part.state.input,
-                  title: part.state.title === undefined ? undefined : redact("tool-title", part.id, part.state.title),
-                  metadata: data("tool-state-metadata", part.id, part.state.metadata),
-                }
-              : part.state.status === "completed"
-                ? {
-                    ...part.state,
-                    input: data("tool-input", part.id, part.state.input) ?? part.state.input,
-                    output: redact("tool-output", part.id, part.state.output),
-                    title: redact("tool-title", part.id, part.state.title),
-                    metadata: data("tool-state-metadata", part.id, part.state.metadata) ?? part.state.metadata,
-                    attachments: part.state.attachments?.map(filepart),
-                  }
-                : {
-                    ...part.state,
-                    input: data("tool-input", part.id, part.state.input) ?? part.state.input,
-                    metadata: data("tool-state-metadata", part.id, part.state.metadata),
-                  },
+        ...content,
+        ...(content.title ? { title: REDACTED_TEXT } : {}),
+        state: sanitizeToolStateV2(content.state),
       }
-    case "patch":
-      return {
-        ...part,
-        hash: redact("patch", part.id, part.hash),
-        files: part.files.map((item: string, i: number) => redact("patch-file", `${part.id}-${i}`, item)),
-      }
-    case "snapshot":
-      return {
-        ...part,
-        snapshot: redact("snapshot", part.id, part.snapshot),
-      }
-    case "step-start":
-      return {
-        ...part,
-        snapshot: part.snapshot === undefined ? undefined : redact("snapshot", part.id, part.snapshot),
-      }
-    case "step-finish":
-      return {
-        ...part,
-        snapshot: part.snapshot === undefined ? undefined : redact("snapshot", part.id, part.snapshot),
-      }
-    case "agent":
-      return {
-        ...part,
-        source: !part.source
-          ? part.source
-          : {
-              ...part.source,
-              value: redact("agent-source", part.id, part.source.value),
-            },
-      }
-    default:
-      return part
   }
 }
 
-const partFn = part
+function sanitizeToolStateV2(state: TranscriptV2PublicPayload.PublicToolState): TranscriptV2PublicPayload.PublicToolState {
+  switch (state.status) {
+    case "pending":
+      return { ...state, input: REDACTED_TEXT }
+    case "running":
+    case "completed":
+      return {
+        ...state,
+        input: REDACTED_TEXT,
+        structured: REDACTED_TEXT,
+        content: state.content.map(sanitizeToolOutputV2),
+      }
+    case "error":
+      return {
+        ...state,
+        input: REDACTED_TEXT,
+        structured: REDACTED_TEXT,
+        content: state.content.map(sanitizeToolOutputV2),
+        error: REDACTED_TEXT,
+      }
+  }
+}
 
-function sanitize(data: { info: Session.Info; messages: SessionLegacy.WithParts[] }) {
+function sanitizeToolOutputV2(output: TranscriptV2PublicPayload.PublicToolOutput): TranscriptV2PublicPayload.PublicToolOutput {
+  if (output.type === "text") return { ...output, text: REDACTED_TEXT }
   return {
-    info: {
-      ...data.info,
-      title: redact("session-title", data.info.id, data.info.title),
-      directory: redact("session-directory", data.info.id, data.info.directory),
-      summary: !data.info.summary
-        ? data.info.summary
-        : {
-            ...data.info.summary,
-            diffs: diff("session-diff", data.info.summary.diffs),
-          },
-      revert: !data.info.revert
-        ? data.info.revert
-        : {
-            ...data.info.revert,
-            snapshot:
-              data.info.revert.snapshot === undefined
-                ? undefined
-                : redact("revert-snapshot", data.info.id, data.info.revert.snapshot),
-            diff:
-              data.info.revert.diff === undefined
-                ? undefined
-                : redact("revert-diff", data.info.id, data.info.revert.diff),
-          },
-    },
-    messages: data.messages.map((msg) => ({
-      info:
-        msg.info.role === "user"
-          ? {
-              ...msg.info,
-              system: msg.info.system === undefined ? undefined : redact("system", msg.info.id, msg.info.system),
-              summary: !msg.info.summary
-                ? msg.info.summary
-                : {
-                    ...msg.info.summary,
-                    title:
-                      msg.info.summary.title === undefined
-                        ? undefined
-                        : redact("summary-title", msg.info.id, msg.info.summary.title),
-                    body:
-                      msg.info.summary.body === undefined
-                        ? undefined
-                        : redact("summary-body", msg.info.id, msg.info.summary.body),
-                    diffs: diff("message-diff", msg.info.summary.diffs),
-                  },
-            }
-          : {
-              ...msg.info,
-              path: {
-                cwd: redact("cwd", msg.info.id, msg.info.path.cwd),
-                root: redact("root", msg.info.id, msg.info.path.root),
-              },
-            },
-      parts: msg.parts.map(partFn),
-    })),
+    ...output,
+    uri: REDACTED_URI,
+    ...(output.name ? { name: REDACTED_TEXT } : {}),
   }
 }
 
@@ -247,7 +142,7 @@ export const ExportCommand = effectCmd({
       .option("format", {
         describe: "export payload format",
         choices: ["legacy", "v2"] as const,
-        default: "legacy" as const,
+        default: "v2" as const,
       }),
   handler: Effect.fn("Cli.export")(function* (args) {
     return yield* run(args)
@@ -255,9 +150,9 @@ export const ExportCommand = effectCmd({
 })
 
 const run = Effect.fn("Cli.export.body")(function* (args: { sessionID?: string; sanitize?: boolean; format?: ExportFormat }) {
-  const format = args.format ?? "legacy"
   const optionError = validateExportOptions(args)
   if (optionError) return yield* fail(optionError)
+  resolveExportFormat(args.format)
 
   const svc = yield* Session.Service
   let sessionID = args.sessionID ? SessionID.make(args.sessionID) : undefined
@@ -299,25 +194,10 @@ const run = Effect.fn("Cli.export.body")(function* (args: { sessionID?: string; 
     prompts.outro("Exporting session...", { output: process.stderr })
   }
 
-  if (format === "v2") {
-    const exportData = yield* TranscriptV2PublicExport.loadPublicTranscriptPayloadV2(sessionID!).pipe(
-      Effect.catch((error) => fail(error.message)),
-    )
+  const exportData = yield* TranscriptV2PublicExport.loadPublicTranscriptPayloadV2(sessionID!).pipe(
+    Effect.catch((error) => fail(error.message)),
+  )
 
-    process.stdout.write(JSON.stringify(exportData, null, 2))
-    process.stdout.write(EOL)
-    return
-  }
-
-  // Match legacy try/catch — catches both typed failures and defects
-  // (Session.Service.get throws NotFoundError as a defect, not a typed E).
-  return yield* Effect.gen(function* () {
-    const sessionInfo = yield* svc.get(sessionID!)
-    const messages = yield* svc.messages({ sessionID: sessionInfo.id })
-
-    const exportData = { info: sessionInfo, messages }
-
-    process.stdout.write(JSON.stringify(args.sanitize ? sanitize(exportData) : exportData, null, 2))
-    process.stdout.write(EOL)
-  }).pipe(Effect.catchCause(() => fail(`Session not found: ${sessionID!}`)))
+  process.stdout.write(JSON.stringify(args.sanitize ? sanitizePublicTranscriptPayloadV2(exportData) : exportData, null, 2))
+  process.stdout.write(EOL)
 })

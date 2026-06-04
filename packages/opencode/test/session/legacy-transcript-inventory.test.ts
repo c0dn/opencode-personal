@@ -22,7 +22,6 @@ const categories = {
       "packages/core/src/session/message-backfill.ts",
       "packages/core/src/session/projector.ts",
       "packages/opencode/src/cli/cmd/debug/agent.ts",
-      "packages/opencode/src/cli/cmd/export.ts",
       "packages/opencode/src/cli/cmd/github.ts",
       "packages/opencode/src/cli/cmd/import.ts",
       "packages/opencode/src/image/image.ts",
@@ -69,7 +68,6 @@ const categories = {
     pattern:
       /(?:^|[^\w.'"`])(?:session|sessions|sessionSvc|svc)\.(?:messages|findMessage)\b|\bSession\.(?:messages|findMessage)\b/m,
     allowed: [
-      "packages/opencode/src/cli/cmd/export.ts",
       "packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts",
       "packages/opencode/src/session/compaction-v2-session.ts",
       "packages/opencode/src/session/prompt.ts",
