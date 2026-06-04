@@ -74,7 +74,6 @@ const categories = {
       "packages/opencode/src/session/revert.ts",
       "packages/opencode/src/session/session.ts",
       "packages/opencode/src/session/summary.ts",
-      "packages/opencode/src/share/share-next.ts",
     ],
   },
   SessionLegacyMutations: {

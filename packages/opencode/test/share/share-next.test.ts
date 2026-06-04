@@ -9,7 +9,6 @@ import { AccountRepo } from "../../src/account/repo"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Config } from "@/config/config"
-import { Provider } from "@/provider/provider"
 import { Session } from "@/session/session"
 import type { SessionID } from "../../src/session/schema"
 import { ShareNext } from "@/share/share-next"
@@ -48,7 +47,6 @@ function live(client: HttpClient.HttpClient) {
     Layer.provide(Config.defaultLayer),
     Layer.provide(Database.defaultLayer),
     Layer.provide(http),
-    Layer.provide(Provider.defaultLayer),
     Layer.provide(Session.defaultLayer),
   )
 }
@@ -68,7 +66,6 @@ function wired(client: HttpClient.HttpClient) {
     Layer.provide(Account.layer.pipe(Layer.provide(AccountRepo.defaultLayer), Layer.provide(http))),
     Layer.provide(Config.defaultLayer),
     Layer.provide(http),
-    Layer.provide(Provider.defaultLayer),
   )
 }
 
@@ -244,7 +241,7 @@ describe("ShareNext", () => {
     ),
   )
 
-  it.live("ShareNext coalesces rapid diff events into one delayed sync with latest data", () =>
+  it.live("ShareNext coalesces rapid events into one delayed v2 public transcript sync", () =>
     provideTmpdirInstance(
       () => {
         const seen: Array<{ url: string; body: string }> = []
@@ -310,28 +307,26 @@ describe("ShareNext", () => {
             secret: string
             data: Array<{
               type: string
-              data: Array<{
-                file: string
-                patch: string
-                additions: number
-                deletions: number
-                status?: string
-              }>
+              payload: {
+                kind: string
+                version: number
+                session: { id: string; title: string }
+                messages: unknown[]
+              }
             }>
           }
           expect(body.secret).toBe("sec_123")
           expect(body.data).toHaveLength(1)
-          expect(body.data[0].type).toBe("session_diff")
-          expect(body.data[0].data).toEqual([
-            {
-              file: "b.ts",
-              patch:
-                "Index: b.ts\n===================================================================\n--- b.ts\t\n+++ b.ts\t\n@@ -1,1 +1,1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n",
-              additions: 2,
-              deletions: 0,
-              status: "modified",
-            },
-          ])
+          expect(body.data[0].type).toBe("public_transcript_v2")
+          expect(body.data[0].payload).toMatchObject({
+            kind: "opencode.transcript",
+            version: 2,
+            session: { id: info.id, title: "first" },
+          })
+          expect(body.data[0].payload.messages).toEqual([])
+          for (const legacyType of ["session", "message", "part", "session_diff", "model"]) {
+            expect(body.data.map((item) => item.type)).not.toContain(legacyType)
+          }
         }).pipe(Effect.provide(wired(client)))
       },
       { config: { enterprise: { url: "https://legacy-share.example.com" } } },

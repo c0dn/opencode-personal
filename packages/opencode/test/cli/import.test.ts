@@ -243,17 +243,37 @@ it.instance("keeps legacy local file import on legacy tables", () =>
   }),
 )
 
-it.instance("keeps share URL import legacy-only", () =>
+it.instance("imports v2 public transcript share URLs into session_message rows only", () =>
   Effect.gen(function* () {
     const ctx = yield* requireInstance
     const { db } = yield* Database.Service
-    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify([{ type: "session", data: { id: "ses_share_empty" } }]), { status: 200 }) as never)
+    const payload = v2Payload({ sessionID: "ses_share_v2" })
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify([{ type: "public_transcript_v2", payload }]), { status: 200 }) as never)
 
     yield* runImport("https://opncd.ai/share/share_v2", ctx)
 
     expect(fetchSpy).toHaveBeenCalled()
+    expect(yield* db.select().from(SessionTable).where(eq(SessionTable.id, sid(payload.session.id))).all()).toHaveLength(1)
+    expect(yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.session_id, sid(payload.session.id))).all()).toHaveLength(3)
+    expect(yield* db.select().from(MessageTable).where(eq(MessageTable.session_id, sid(payload.session.id))).all()).toHaveLength(0)
+    expect(yield* db.select().from(PartTable).where(eq(PartTable.session_id, sid(payload.session.id))).all()).toHaveLength(0)
+  }),
+)
+
+it.instance("fails share URL import when response JSON is not an array", () =>
+  Effect.gen(function* () {
+    const ctx = yield* requireInstance
+    const { db } = yield* Database.Service
+    spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error: "not found" }), { status: 200 }) as never)
+
+    const exit = yield* Effect.exit(runImport("https://opncd.ai/share/not_array", ctx))
+
+    expect(String(exit)).toContain("CliError")
+    expect(String(exit)).toContain("Share data was not a valid array")
+    expect(yield* db.select().from(SessionTable).all()).toHaveLength(0)
     expect(yield* db.select().from(SessionMessageTable).all()).toHaveLength(0)
-    expect(yield* db.select().from(SessionTable).where(eq(SessionTable.id, sid("ses_share_empty"))).all()).toHaveLength(0)
+    expect(yield* db.select().from(MessageTable).all()).toHaveLength(0)
+    expect(yield* db.select().from(PartTable).all()).toHaveLength(0)
   }),
 )
 

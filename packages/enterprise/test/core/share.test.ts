@@ -99,6 +99,44 @@ describe.concurrent("core.share", () => {
     await Share.remove({ id: share.id, secret: share.secret })
   })
 
+  test("should accept, store, and return v2 public transcript data", async () => {
+    const sessionID = Identifier.descending()
+    const share = await Share.create({ sessionID })
+    const data: Share.Data[] = [v2Item(sessionID)]
+
+    await Share.sync({
+      share: { id: share.id, secret: share.secret },
+      data,
+    })
+
+    const result = await Share.data(share.id)
+    const snapshot = await Storage.read<{ data: Share.Data[] }>(["share_snapshot", share.id])
+
+    expect(result).toEqual(data)
+    expect(snapshot?.data).toEqual(data)
+
+    await Share.remove({ id: share.id, secret: share.secret })
+  })
+
+  test("should replace legacy snapshot data with only v2 public transcript data", async () => {
+    const sessionID = Identifier.descending()
+    const share = await Share.create({ sessionID })
+    const legacy: Share.Data[] = [
+      { type: "part", data: { id: "part1", sessionID, messageID: "msg1", type: "text", text: "Hello" } },
+      { type: "model", data: [{ id: "model1" }] as any },
+    ]
+    const v2 = v2Item(sessionID)
+
+    await Share.sync({ share: { id: share.id, secret: share.secret }, data: legacy })
+    await Share.sync({ share: { id: share.id, secret: share.secret }, data: [v2] })
+
+    const result = await Share.data(share.id)
+    expect(result).toEqual([v2])
+    expect(result.some((item) => item.type !== "public_transcript_v2")).toBe(false)
+
+    await Share.remove({ id: share.id, secret: share.secret })
+  })
+
   test("should retrieve data from multiple syncs", async () => {
     const sessionID = Identifier.descending()
     const share = await Share.create({ sessionID })
@@ -282,3 +320,30 @@ describe.concurrent("core.share", () => {
     await Share.remove({ id: share.id, secret: share.secret })
   })
 })
+
+function v2Item(sessionID: string): Share.Data {
+  return {
+    type: "public_transcript_v2",
+    payload: {
+      kind: "opencode.transcript",
+      version: 2,
+      session: {
+        id: sessionID,
+        title: "Shared v2 transcript",
+        version: "2.0.0",
+        time: { created: 1, updated: 2 },
+      },
+      messages: [
+        { type: "user", id: "evt_user", text: "hello", time: { created: 1 } },
+        {
+          type: "assistant",
+          id: "evt_assistant",
+          agent: "build",
+          model: { providerID: "provider", id: "model", variant: "default" },
+          content: [{ type: "text", id: "evt_text", text: "world" }],
+          time: { created: 2 },
+        },
+      ],
+    },
+  }
+}

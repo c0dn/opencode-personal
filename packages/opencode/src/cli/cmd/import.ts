@@ -29,6 +29,7 @@ export type ShareData =
   | { type: "part"; data: Part }
   | { type: "session_diff"; data: unknown }
   | { type: "model"; data: unknown }
+  | { type: "public_transcript_v2"; payload: PublicTranscriptPayloadV2 }
 
 /** Extract share ID from a share URL like https://opncd.ai/share/abc123 */
 export function parseShareUrl(url: string): string | null {
@@ -147,9 +148,16 @@ export const runImport = Effect.fn("Cli.import.body")(function* (file: string, c
     }
 
     const shareData = yield* Effect.tryPromise({
-      try: () => response.json() as Promise<ShareData[]>,
+      try: () => response.json() as Promise<unknown>,
       catch: () => new CliError({ message: "Share data was not valid JSON" }),
     })
+    if (!Array.isArray(shareData)) return yield* fail("Share data was not a valid array")
+    const v2Item = shareData.find((item) => item.type === "public_transcript_v2")
+    if (v2Item) {
+      yield* importPublicTranscriptPayload(v2Item.payload, ctx, db)
+      return
+    }
+
     const transformed = transformShareData(shareData)
 
     if (!transformed) {
@@ -170,35 +178,7 @@ export const runImport = Effect.fn("Cli.import.body")(function* (file: string, c
     if (Option.isNone(decoded)) return yield* fail(`Import file is not valid JSON: ${file}`)
     const localData = decoded.value
     if (hasV2EnvelopeMarker(localData)) {
-      const payload = yield* validatePublicTranscriptPayload(localData)
-      const messages = yield* convertPublicTranscriptPayload(payload)
-      const { session, sessionRow, messageRows } = yield* constructV2ImportRows(payload, ctx, messages)
-
-      yield* db
-        .transaction(
-          (tx) =>
-            Effect.gen(function* () {
-              const existingSession = yield* tx.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, session.id)).limit(1).get()
-              if (existingSession) return yield* fail(`Session already exists: ${session.id}`)
-              if (messageRows.length > 0) {
-                const existingMessages = yield* tx
-                  .select({ id: SessionMessageTable.id })
-                  .from(SessionMessageTable)
-                  .where(inArray(SessionMessageTable.id, messageRows.map((row) => row.id)))
-                  .all()
-                if (existingMessages.length > 0) {
-                  return yield* fail(`Session message already exists: ${existingMessages[0]!.id}`)
-                }
-              }
-              yield* tx.insert(SessionTable).values(sessionRow).run()
-              if (messageRows.length > 0) yield* tx.insert(SessionMessageTable).values(messageRows).run()
-            }),
-          { behavior: "immediate" },
-        )
-        .pipe(Effect.catch((error) => (error instanceof CliError ? Effect.fail(error) : fail(`Failed to import v2 transcript: ${String(error)}`))))
-
-      process.stdout.write(`Imported session: ${payload.session.id}`)
-      process.stdout.write(EOL)
+      yield* importPublicTranscriptPayload(localData, ctx, db)
       return
     }
     if (!isLegacyExportShape(localData)) return yield* fail("Unsupported import payload shape")
@@ -263,6 +243,40 @@ export const runImport = Effect.fn("Cli.import.body")(function* (file: string, c
   process.stdout.write(`Imported session: ${exportData.info.id}`)
   process.stdout.write(EOL)
 })
+
+function importPublicTranscriptPayload(value: unknown, ctx: InstanceContext, db: Database.Interface["db"]) {
+  return Effect.gen(function* () {
+    const payload = yield* validatePublicTranscriptPayload(value)
+    const messages = yield* convertPublicTranscriptPayload(payload)
+    const { session, sessionRow, messageRows } = yield* constructV2ImportRows(payload, ctx, messages)
+
+    yield* db
+      .transaction(
+        (tx) =>
+          Effect.gen(function* () {
+            const existingSession = yield* tx.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, session.id)).limit(1).get()
+            if (existingSession) return yield* fail(`Session already exists: ${session.id}`)
+            if (messageRows.length > 0) {
+              const existingMessages = yield* tx
+                .select({ id: SessionMessageTable.id })
+                .from(SessionMessageTable)
+                .where(inArray(SessionMessageTable.id, messageRows.map((row) => row.id)))
+                .all()
+              if (existingMessages.length > 0) {
+                return yield* fail(`Session message already exists: ${existingMessages[0]!.id}`)
+              }
+            }
+            yield* tx.insert(SessionTable).values(sessionRow).run()
+            if (messageRows.length > 0) yield* tx.insert(SessionMessageTable).values(messageRows).run()
+          }),
+        { behavior: "immediate" },
+      )
+      .pipe(Effect.catch((error) => (error instanceof CliError ? Effect.fail(error) : fail(`Failed to import v2 transcript: ${String(error)}`))))
+
+    process.stdout.write(`Imported session: ${payload.session.id}`)
+    process.stdout.write(EOL)
+  })
+}
 
 function hasV2EnvelopeMarker(value: unknown) {
   return isRecord(value) && ("kind" in value || "version" in value)
