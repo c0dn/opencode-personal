@@ -582,12 +582,28 @@ Required tests:
 - summary/diff snapshot and assistant patch behavior
 - revert/remove/update/fork target behavior, canonical ID operations, standalone
   snapshot unsupported-data gate, mutation policy, and rollback safety
-- payload/display policy-first fixtures before consumer cutover: payload
-  versioning, old payload accept/reject/migrate behavior, redaction, missing
-  legacy-source behavior, display ordering, task request visibility, patch
-  visibility, and no legacy part IDs
-- migrate one public consumer group at a time after policy tests pass:
-  export/import, share, CLI session-data/stats/replay, ACP/TUI/replay
+- payload/display docs-only gate (`U7a`): update spec policy for the two output
+  shapes, `PublicTranscriptPayloadV2` and `DisplayTranscriptV2`; no helper code,
+  consumer source, generated SDK/OpenAPI, import/export/share, ACP/TUI, or replay
+  changes are part of this gate
+- payload/display helper-fixture gate: add fixtures for canonical ordering,
+  exhaustiveness, explicit backfill/readiness metadata, hard-gating of mixed,
+  failed, partial, ambiguous, and missing-source states, and no raw `msg_*` or
+  `prt_*` IDs
+- public payload schema gate: when schemas are introduced or changed, test the
+  explicit `kind`/`version` envelope, redaction table, canonical IDs only,
+  unknown/legacy payload typed import rejection, and SDK/OpenAPI snapshots when
+  generated surfaces change
+- display fixture gate: test local display ordering plus visibility for task
+  requests, assistant patches, retries, rich errors, tool title/input/output and
+  result metadata, reasoning, files, synthetic messages, compaction rows, and
+  unknown future variants
+- first consumer after policy/helper tests is export-only v2 payload generation;
+  import, share, CLI session-data/stats/replay, ACP, TUI, and replay remain
+  blocked until their own tests and readiness gates exist
+- existing legacy import may remain transitional until cutover, but v2 import
+  rejects unknown or legacy payloads with a typed error; do not add best-effort
+  legacy-to-v2 payload migration unless a later approved slice defines it
 
 Commit gate example:
 
@@ -595,6 +611,10 @@ Commit gate example:
 bun --cwd packages/opencode test test/session/summary-v2-parity.test.ts test/session/revert-compact.test.ts
 bun --cwd packages/opencode typecheck
 ```
+
+For the docs-only `U7a` slice, no runtime tests are required unless the docs
+tooling changes; validate by reviewing the spec diff and, if the workplan is
+edited, running `workplan_validate`.
 
 ### Transcript phase T6 — Stop legacy writes/readers
 

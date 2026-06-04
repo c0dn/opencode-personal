@@ -113,6 +113,51 @@ Readiness categories are deliberately conservative: `already-canonical-v2`, `rea
 | Leaf v2 model/context helpers / `message-v2-model.ts`, `message-v2-context.ts` | Unwired v2 helpers | Same helpers as tested leaves | No public wire until callers switch | Required canonical fields now available | Caller gate behavior and high-risk fan-out not decided | Safe to test leaves without switching callers | medium | ready-for-leaf-semantic-tests | Permanent v2 expected-output tests plus transitional normalized parity against legacy helpers | Session owner: complete leaf tests before any caller cutover |
 | Controlled v2-only internal readers with no legacy wire dependency | v2 rows | v2 rows | No legacy public shape | Canonical rows and backfill marker/remediation | Must not affect destructive flows or old-route deletion policy | If marker missing or ambiguous, retry/skip/fail according to reader contract rather than switch to legacy post-cutover | low | ready-for-controlled-v2-cutover | Narrow reader-specific semantic tests and gate tests | Owning feature: request explicit cutover approval |
 
+## Public Payload and Display Policy
+
+This section is the R6/U7a policy-only slice. It approves docs/spec and fixture policy only; it does not approve helper code, consumer migration, generated SDK/OpenAPI changes, import/export/share changes, ACP/TUI/replay changes, or a v2-to-legacy adapter.
+
+Two v2 outputs are required and intentionally separate:
+
+- `PublicTranscriptPayloadV2` is the versioned, serializable, redacted payload for export/share/import-style public exchange. It uses canonical v2 IDs only, has an explicit `kind`/`version` envelope, and must not expose raw legacy IDs, private migration provenance, provider secrets, durable readiness diagnostics, or local-only display state.
+- `DisplayTranscriptV2` is the ordered/renderable local display and replay shape for ACP/TUI/CLI/replay-style consumers. It uses canonical v2 IDs only and may include local display fields that are not appropriate for public payload exchange.
+
+Later shared helper code may only centralize canonical ordering and exhaustiveness checks across these outputs. It must not define a v2-to-legacy adapter, legacy cursor emulation, old `parts(messageID)` behavior, or a single broad conversion shape that leaks public payload fields into display/replay or local display fields into public payloads.
+
+### Payload envelope and import behavior
+
+- V2 payloads require an explicit envelope such as `{ kind: "opencode.transcript", version: 2, ... }`. The exact field names may be refined by schema work, but the envelope must carry both kind and version and must be schema-tested before any public schema generation.
+- V2 import accepts only the approved v2 envelope and `PublicTranscriptPayloadV2` schema. Unknown kinds, missing versions, unsupported versions, legacy payloads, and unwrapped arrays/objects are rejected by v2 import with a typed error.
+- Existing legacy import may remain during transition for matching old payloads until the import cutover. That path is not a v2 import path and must not be used as best-effort v2 fallback.
+- No best-effort legacy-to-v2 payload migration, old payload coercion, or legacy wire preservation is allowed unless a later explicitly approved slice defines the import policy and tests.
+- Export-only `PublicTranscriptPayloadV2` is the first allowed consumer after policy/helper tests. Import, share, ACP, TUI, and replay stay blocked until their own schema/fixture tests and readiness gates exist.
+
+### Backfill/readiness gate
+
+Payload/display helpers must accept only already-gated canonical rows plus explicit readiness metadata, or wrappers must hard-gate before calling them. Mixed, failed, partial, ambiguous, or missing-source states cannot be silently projected into public payloads or displays.
+
+After cutover there is no legacy fallback: missing readiness returns the surface's typed not-ready/import/export/display error, retry instruction, or unsupported result according to that consumer's approved tests. Helpers must not read legacy transcript rows, infer legacy source state, or recover degraded stats from legacy tables.
+
+### Field visibility matrix
+
+| Field / variant | `PublicTranscriptPayloadV2` visibility | `DisplayTranscriptV2` visibility |
+| --- | --- | --- |
+| IDs | Include canonical v2 session/message/content/call IDs needed for references. Never include raw `msg_*`, `prt_*`, source hashes, or private migration provenance. | Include canonical v2 IDs needed for stable rendering/replay references. Never include raw legacy IDs or legacy cursors. |
+| Ordering | Include deterministic transcript order derived from `(time.created, id)` or an explicit canonical order list. | Include/render in canonical `(time.created, id)` order with stable content order inside messages. |
+| `taskRequests` | Include redacted user request metadata (`prompt`, `description`, `agent`, optional `model`/`command`) only when intentionally public. Do not include lifecycle/private child-session state. | Render as local user-side task requests; lifecycle links remain hidden unless a later display policy approves them. |
+| `AssistantPatch` | Include assistant-owned patch summary (`hash`, file list) only when public export policy approves patch metadata. No target mutation authority. | Render assistant-owned patch content for display/diff/replay fixtures; destructive target behavior remains blocked. |
+| Retries | Include redacted retry attempt/time and public error category/message when useful. No provider secrets or raw request payloads. | Display retry history and rich local diagnostics that are safe for local UI; still no raw legacy IDs. |
+| Rich assistant errors | Include typed public error category/message and safe status metadata only. Redact provider secrets, credentials, stack traces, and raw responses. | Display local diagnostic category/message and safe metadata; raw provider responses remain hidden unless a later local-debug policy approves them. |
+| Tool title | Include explicit display title only when present and safe. Do not derive from legacy provenance. | Display explicit title when present, otherwise render stable fallback from canonical tool name/call ID. |
+| Tool input | Include only schema-approved public input; redact secrets and large/private raw payloads. | Display local input according to UI policy with redaction; no private provider metadata by default. |
+| Tool output | Include public text/file output allowed by tool output policy; redact secrets and local-only paths where needed. | Render text/file/error output for local replay; preserve canonical order and redaction. |
+| Tool result metadata | Exclude private/provider metadata by default. Include only whitelisted public metadata. | Display safe local result metadata only when fixtures cover it; no provider secrets. |
+| Reasoning | Exclude by default unless the export/share policy explicitly opts in and redaction fixtures cover it. | Display reasoning when local settings/policy allow it; preserve order and IDs without public export implication. |
+| Files | Include user/tool files using public `uri`/`mime`/`name` fields after path/secret redaction. | Render user/tool files with safe local labels; avoid exposing local absolute paths unless a later UI policy approves it. |
+| Synthetic messages | Include only synthetic messages intended as public transcript content. Exclude internal prompts or compatibility scaffolding. | Render synthetic messages only when local replay policy marks them visible; otherwise hide internal scaffolding. |
+| Compaction rows | Include completed compaction rows with public `reason`, `summary`, and canonical `include` when safe. | Render compaction boundaries/summaries for replay/context display. Incomplete compactions stay hidden/unsupported. |
+| Unknown future variants | Reject/fail closed for public payload generation and import until schema policy is updated. | Render as explicit unsupported/unknown placeholder or fail closed according to display tests; never silently drop. |
+
 ## Unsupported Data and Stats
 
 The mapper must return per-session stats for mapped, degraded, and skipped inputs by legacy type and reason during the backfill call. Stats must include unsupported schema locations, malformed rows, missing parent/part associations, incomplete compaction pairs, no-active retries, `assistant_file_location_schema_missing`, `file_source_kind_unsupported`, standalone snapshots, `snapshot_parentage_unsupported`, task-request parentage unsupported data, patch parentage unsupported data, `synthetic_embedded_unsupported`, `mixed_cutoff_ambiguous`, mapped rich assistant errors, unknown assistant error degradation, assistant `structured`/`mode`/`path` degradation, total-token gaps, and tool schema fidelity gaps. Historical schema-gap counters from earlier degraded mapper slices are stale once the corresponding schema/backfill support exists and must not be treated as current behavior. Skips cannot be silent: each skipped or degraded item must have a reason suitable for logs, tests, and migration remediation. These v1 stats are not durable or consumer-visible after marker write.
