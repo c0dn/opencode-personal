@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { EventV2 } from "@opencode-ai/core/event"
+import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionMessage } from "@opencode-ai/core/session/message"
@@ -16,6 +17,12 @@ const sessionModel = {
   variant: "default",
 }
 
+const model = {
+  providerID: ProviderV2.ID.make("provider"),
+  id: ModelV2.ID.make("model"),
+  variant: ModelV2.VariantID.make("default"),
+}
+
 describe("cli export", () => {
   test("validates --sanitize is legacy-only with exact text", () => {
     expect(validateExportOptions({ format: "legacy", sanitize: true })).toBeUndefined()
@@ -30,7 +37,13 @@ describe("cli export", () => {
         ensureBackfilled: () => Effect.succeed({ status: "already_completed" }),
         readMessages: (input) => {
           readInput = input
-          return Effect.succeed([user("later", 20), user("earlier", 10)])
+          return Effect.succeed([
+            user("later", 20),
+            new SessionMessage.Shell({ type: "shell", id: id("shell"), callID: "call-secret", command: "cat msg_secret", output: "prt_secret output", time: { created: DateTime.makeUnsafe(15) } }),
+            new SessionMessage.AgentSwitched({ type: "agent-switched", id: id("agent"), agent: "reviewer", time: { created: DateTime.makeUnsafe(16) } }),
+            new SessionMessage.ModelSwitched({ type: "model-switched", id: id("model"), model, time: { created: DateTime.makeUnsafe(17) } }),
+            user("earlier", 10),
+          ])
         },
       }),
     )
@@ -39,8 +52,10 @@ describe("cli export", () => {
     expect(payload.kind).toBe("opencode.transcript")
     expect(payload.version).toBe(2)
     expect(payload.messages.map((message) => message.id)).toStrictEqual([id("earlier"), id("later")])
-    expect(JSON.stringify(payload)).not.toContain("msg_")
-    expect(JSON.stringify(payload)).not.toContain("prt_")
+    const json = JSON.stringify(payload)
+    for (const unsafe of ["shell", "agent-switched", "model-switched", "call-secret", "cat msg_secret", "prt_secret output", "command", "output", "msg_", "prt_"]) {
+      expect(json).not.toContain(unsafe)
+    }
     expect(payload).not.toHaveProperty("info")
   })
 

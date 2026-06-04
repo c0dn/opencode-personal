@@ -169,19 +169,31 @@ describe("session.transcript-v2-public-payload", () => {
     expect(json).not.toContain("Search /home/william/project/secret.txt")
   })
 
-  test("unknown and intentionally unsupported current variants fail closed", () => {
-    const failures: SessionMessage.Message[] = [
-      { ...user("unknown_message", 1), type: "future" } as unknown as SessionMessage.Message,
-      new SessionMessage.Shell({ type: "shell", id: id("shell"), callID: "call", command: "pwd", output: "/home/william", time: { created: time(1) } }),
-      new SessionMessage.AgentSwitched({ type: "agent-switched", id: id("agent"), agent: "build", time: { created: time(1) } }),
-      new SessionMessage.ModelSwitched({ type: "model-switched", id: id("model"), model, time: { created: time(1) } }),
-    ]
+  test("omits current control rows from public payload by default", () => {
+    const output = TranscriptV2PublicPayload.toPublicTranscriptPayloadV2(
+      session(),
+      [
+        user("visible", 1),
+        new SessionMessage.Shell({ type: "shell", id: id("shell"), callID: "call", command: "pwd", output: "/home/william", time: { created: time(1) } }),
+        new SessionMessage.AgentSwitched({ type: "agent-switched", id: id("agent"), agent: "build", time: { created: time(1) } }),
+        new SessionMessage.ModelSwitched({ type: "model-switched", id: id("model"), model, time: { created: time(1) } }),
+      ],
+      { status: "ready" },
+    )
 
-    for (const message of failures) {
-      expect(() => TranscriptV2PublicPayload.toPublicTranscriptPayloadV2(session(), [message], { status: "ready" })).toThrow(
-        TranscriptV2PublicPayload.PublicTranscriptUnsupportedError,
-      )
+    expect(output.messages.map((message) => message.type)).toStrictEqual(["user"])
+    const json = JSON.stringify(output)
+    for (const unsafe of ["shell", "agent-switched", "model-switched", "command", "output", "pwd", "/home/william"]) {
+      expect(json).not.toContain(unsafe)
     }
+  })
+
+  test("unknown future variants fail closed", () => {
+    expect(() =>
+      TranscriptV2PublicPayload.toPublicTranscriptPayloadV2(session(), [{ ...user("unknown_message", 1), type: "future" } as unknown as SessionMessage.Message], {
+        status: "ready",
+      }),
+    ).toThrow(TranscriptV2PublicPayload.PublicTranscriptUnsupportedError)
 
     expect(() =>
       TranscriptV2PublicPayload.toPublicTranscriptPayloadV2(

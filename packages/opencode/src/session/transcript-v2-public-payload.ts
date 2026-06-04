@@ -192,11 +192,10 @@ function publicMessage(message: SessionMessage.Message): readonly PublicTranscri
       if (message.include) assertCanonicalID(message.include)
       return [{ type: message.type, id: message.id, reason: message.reason, summary: REDACTED_TEXT, ...(message.include ? { include: message.include } : {}), time: publicMessageTime(message.time) }]
     case "synthetic":
-      return []
     case "agent-switched":
     case "model-switched":
     case "shell":
-      throw new PublicTranscriptUnsupportedError("message", message)
+      return []
     default:
       return assertNever(message, "message")
   }
