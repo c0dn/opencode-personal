@@ -403,6 +403,11 @@ IDs.
 - Every phase still needs plan-critic before implementation, focused package
   checks, `workplan_validate` when the workplan/specs change, and code-vet
   before commit.
+- Pure helper tests and production wiring are separate gates. A helper test may
+  be approved while caller wiring remains blocked by read/write boundary,
+  not-ready behavior, or legacy ID dependency.
+- Every transitional legacy-oracle helper test must name its retirement slice;
+  do not let normalized parity tests become permanent compatibility contracts.
 
 The `T*` phases below are transcript-specific groupings. They map to the more
 granular commit-sized phases in `v2-transcript-migration-contract.md`: T3 covers
@@ -425,6 +430,11 @@ Required checks:
 - fallback language is explicitly transitional only; post-cutover behavior is a
   v2 gate/error/retry policy
 - permanent and transitional tests have separate ownership and retirement paths
+- current blocker and read/write boundary tables distinguish stale historical
+  findings from remaining blockers
+- R0-R8 sequence records that R0 docs/spec is the next safe slice; R1 pure title
+  helper tests may follow, but R1 production title wiring needs its own critic
+  gate
 
 Commit gate example:
 
@@ -473,10 +483,16 @@ Required tests:
 
 - permanent v2 expected-output coverage for model messages and context filtering
 - transitional normalized parity against `MessageV2` while the legacy helper
-  still exists
+  still exists, with a retirement slice named for every oracle case
 - user text/files/agents, assistant text/reasoning/tools/errors, patch ignore
   behavior, task request ignore behavior, compaction anchors/includes, latest
   terminal assistant, and same-timestamp ordering
+- `PromptV2Title` pure helper tests before any title wiring: parent sessions,
+  non-default titles, synthetic-only first users, taskRequests-only, mixed
+  text/taskRequests, multiple real users, and ambiguous/not-ready backfill with
+  no LLM call and no title mutation
+- title production wiring is not part of this phase unless a separate critic gate
+  defines skip/retry/error behavior and proves no hidden legacy dependency
 
 Commit gate example:
 
@@ -485,7 +501,7 @@ bun --cwd packages/opencode test test/session/message-v2-legacy-parity.transitio
 bun --cwd packages/opencode typecheck
 ```
 
-### Transcript phase T3 — Prompt and compaction cutover gates
+### Transcript phase T3 — Prompt and compaction helper/cutover gates
 
 Likely files to add or extend:
 
@@ -498,8 +514,17 @@ Required tests:
 
 - provider-visible prompt content matches the semantic fixture after v2 backfill
 - task requests and patch content do not become direct provider intent
+- pure `PromptV2LoopState` tests define exact v2-native predicates for
+  assistant-after-user, terminal assistant, pending taskRequests, compaction
+  requests, and same-timestamp ties
+- prompt loop-control production cutover remains blocked until tests prove no
+  legacy ID/write dependency and no conversion to `SessionLegacy.WithParts`
 - completed compaction pairs, include translation, incomplete pair skipping, and
   ambiguous-backfill gate behavior are covered
+- compaction residual-read tests name the exact source for summaries: current
+  processor result, completed canonical compaction row, or unsupported/not-ready
+- pruning/compacted-output mutation tests remain design-only until v2
+  mutation/event source policy exists
 - pure v2 process-selection helper tests cover normal selection delegation and
   overflow replay selection only by canonical visible user ID
 - overflow process-selection tests cover no-replay reasons and canonical
@@ -510,6 +535,9 @@ Required tests:
   session-compaction, and provider/model conversion dependencies
 - production compaction wiring remains blocked until canonical replay policy and
   post-cutover gates are explicit
+- processor doom-loop live-state tests, when added, must cover repeated identical
+  tool calls, provider-executed tools, pending/running/completed transitions,
+  cancellation, and interruption without using legacy part IDs
 
 Commit gate example:
 
@@ -552,9 +580,14 @@ Likely files to add or extend:
 Required tests:
 
 - summary/diff snapshot and assistant patch behavior
-- revert/remove/update/fork target behavior and rollback safety
-- v2 export/import/share redaction, replay ordering, ACP/TUI display policy,
-  task request visibility, patch visibility, and no legacy part IDs
+- revert/remove/update/fork target behavior, canonical ID operations, standalone
+  snapshot unsupported-data gate, mutation policy, and rollback safety
+- payload/display policy-first fixtures before consumer cutover: payload
+  versioning, old payload accept/reject/migrate behavior, redaction, missing
+  legacy-source behavior, display ordering, task request visibility, patch
+  visibility, and no legacy part IDs
+- migrate one public consumer group at a time after policy tests pass:
+  export/import, share, CLI session-data/stats/replay, ACP/TUI/replay
 
 Commit gate example:
 
@@ -576,8 +609,13 @@ Required tests:
 
 - new runs write canonical v2 rows and no migrated consumer needs fresh legacy
   transcript rows
+- `Session.messages/findMessage` and `MessageV2.page/get/parts` callers have
+  explicit v2-native replacements or unsupported behavior; no hidden
+  v2-to-legacy adapter remains
 - v2 routes and migrated consumers still pass after legacy helper tests are
   deleted or replaced
+- transitional oracle tests from R1-R7 are retired or replaced by permanent v2
+  expected-output tests
 - old local databases remain covered by backfill tests until the final storage
   removal plan is complete
 

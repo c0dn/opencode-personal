@@ -119,15 +119,50 @@ The mapper must return per-session stats for mapped, degraded, and skipped input
 
 ## Safe Migration Order and Remaining Work
 
-1. Complete this matrix/spec refresh and keep it as the consumer cutover gate.
-2. Add permanent v2 expected-output tests for model/context helpers, plus transitional legacy-oracle semantic parity tests that are explicitly deleted or replaced at final cutover.
-3. Do not build a v2-to-legacy adapter. Legacy HTTP routes, old cursors, old `parts(messageID)`, and `MessageV2.page/get/parts` are removed or replaced once v2 semantic consumers and payloads are ready.
-4. Add public v2 HTTP/API payload tests for canonical IDs, v2 cursors, ordering, patch/taskRequests/snapshot fields, and no raw legacy IDs. Do not add tests for legacy cursor or part-shape compatibility.
-5. Cut over high-risk prompt, compaction, latest/filtering, and `Session.messages`-style helpers one at a time. Transitional fallback may use legacy while both paths exist; post-cutover behavior must use v2 readiness gates, retry, or explicit errors rather than legacy reads.
-6. Leave destructive summary/revert/remove/update/fork, share/export/import/SDK, ACP/TUI, and replay blocked until v2 payload/display policies, gate behavior, and destructive-semantics policies are tested.
-7. Stop legacy transcript writes last, only after all consumers have v2 semantic coverage, rollback/remediation paths, a full old-session materialization/verification plan, and an explicit cutover decision.
+Current approved production cutovers are limited to already-landed prompt/compaction provider-input leaves and TaskTool/PlanExitTool context-model leaves. All remaining production cutovers below require their own focused tests and critic gate. R0 is the next safe slice; after R0, R1 pure title helper tests may be considered, but R1 title production wiring needs a separate gate.
 
-What remains: consumer source changes are not approved by this schema slice. Runtime patch events still need target-ID projection; destructive revert behavior must prove parity; legacy HTTP/wire surfaces need deletion/versioning policy, not adapter identity policy; public payloads need v2 version policy; high-risk prompt/compaction/latest helpers need leaf semantic tests plus post-cutover ambiguous-backfill gates.
+### Current remaining blocker table
+
+This table records current blockers only. Historical findings for mixed cutoff, marker locking, deterministic ordering, provenance leakage, and schema gaps are stale when the contract sections above define the policy and tests already cover the landed implementation.
+
+| Blocked surface | Current blocker | Required gate / next allowed slice | Owner |
+| --- | --- | --- | --- |
+| Prompt title | Ambiguity between a pure v2 title helper and production wiring that calls the LLM/sets title from run-loop state | R1 pure helper/tests first; production wiring only after not-ready/ambiguous behavior is defined and proven to make no LLM call when gated | Prompt owner |
+| Prompt loop control | Exact v2 ordering/state contract is missing for assistant-after-user, terminal assistant, pending taskRequests, compaction requests, and same-timestamp ties | R2 pure `PromptV2LoopState` contract/tests; production cutover blocked until no hidden legacy ID/write dependency remains | Prompt/session owner |
+| `Session.messages/findMessage` and `MessageV2.page/get/parts` | Transitional wrappers can become a hidden v2-to-legacy adapter | Inventory callers; replace with v2-native domain helpers or explicit unsupported behavior; then delete/disable wrappers | Session owner |
+| V2 reads with legacy live writes | Mixed read/write boundary is implicit and can pass canonical IDs into legacy mutations or legacy IDs into v2 reads | Use the boundary table below for every phase; remove a boundary only after v2 live writer/mutation policy exists for that surface | Session/runtime owner |
+| Compaction residual reads/pruning | Source for compaction-ended summary and mutation source for pruning/compacted tool output are not fixed | R3 names source exactly: current processor result, completed canonical compaction row, or unsupported/not-ready; pruning mutation blocked until v2 mutation/event policy | Compaction owner |
+| Processor doom-loop | Runtime detection reads legacy parts for live assistant state and may race stale DB state | R4 pure/live-state helper design using processor current state or canonical v2 events; no cutover until stale-read and legacy-part-ID risks are removed | Processor owner |
+| Payload/display/share/export/import/ACP/CLI/replay | Version, display, redaction, missing legacy-source, and old payload behavior are not defined | R6 policy-first slices before any consumer group cutover | Share/CLI/ACP/UI owners |
+| Summary/revert/remove/update/fork | Destructive operations lack canonical target-ID and unsupported-data mutation policy | R7 target-ID/mutation policy, standalone snapshot unsupported-data gate, and parity/rollback tests | Runtime/session owner |
+| Stop legacy writers/readers | Remaining consumers still depend on legacy readers/writers or transitional oracle tests | R8 only after all migrated consumers have v2 semantic coverage and old-session remediation verification | Migration owner |
+
+### Read/write boundary while legacy writes remain
+
+| Phase / surface | Allowed v2 reads | Allowed legacy writes/mutations | ID crossing rule | Post-cutover gate behavior | Prerequisite to remove boundary |
+| --- | --- | --- | --- | --- | --- |
+| R1 title pure helper | In-memory canonical v2 rows supplied to helper | None in helper; existing production title path unchanged | Helper accepts canonical v2 IDs only and never returns legacy IDs | Ambiguous/not-ready means no LLM call and no title mutation | Separate title wiring gate with explicit skip/retry/error behavior |
+| R2 prompt loop-control helper | Canonical v2 rows ordered by `(time.created, id)` | Existing prompt run loop may still write legacy state until live writer policy changes | Do not coerce v2 rows to `SessionLegacy.WithParts`; do not pass v2 IDs to legacy writer IDs | Retry/typed gate/observable stop, not legacy fallback, after production cutover | V2 live writer/loop mutation policy or proof no mutation needs legacy IDs |
+| R3 compaction residual reads | Canonical v2 rows, current processor result, or completed canonical compaction rows only | Existing pruning/compacted-output legacy mutation remains until replaced | Summary/include IDs are canonical only; legacy `tail_start_id` is migration input only | Unsupported/not-ready when exact source is unavailable | V2 mutation/event policy for pruning/compacted output |
+| R4 processor doom-loop | Processor in-memory tool-call window or canonical v2 live events | Existing runtime writes remain until v2 writer policy | No legacy part IDs in helper state; call identity uses canonical/event/runtime IDs | Gate/skip detection rather than stale DB legacy read | Proven live-state helper with cancellation/interruption and provider-tool tests |
+| R5 API routes | Canonical v2 route reads through `SessionV2.messages` | Legacy routes may continue old reads while internal consumers still use them | No v2-to-legacy route adapter; old IDs stay only on old routes | Old routes removed or explicit unsupported only at final route slice | Internal SDK/CLI/share/ACP callers stop using old wire |
+| R6 payload/display consumers | Canonical v2 payload/display helpers | Legacy import/export/share/display may remain until each group migrates | Payloads use canonical IDs; old payloads are accepted/rejected/migrated only by explicit version policy | Versioned accept/reject/migrate or missing-source error | Policy-first tests plus one consumer group migrated |
+| R7 destructive mutations | Canonical v2 snapshots, assistant patches, and target IDs | Legacy destructive behavior remains until parity proven | Mutations target canonical IDs only after cutover; no legacy part-ID operations | Unsupported-data gate for standalone snapshots and missing target proof | Destructive parity, rollback, and target-ID tests |
+| R8 stop legacy | Canonical v2 readers only | None after cutover | Legacy IDs cannot be required by any runtime/public path | Final stop-legacy gate fails on any legacy writer/reader dependency | All boundaries above removed and transitional oracles retired |
+
+### Revised remaining sequence R0-R8
+
+1. **R0 — docs/spec/workplan reconcile.** Reconcile stale historical findings with current blockers, persist this table-driven plan, and keep no-adapter language. No production code. This is the next safe slice.
+2. **R1 — prompt title helper before wiring.** Add pure `PromptV2Title` helper/tests first. Required title tests: parent sessions, non-default titles, synthetic-only first users, taskRequests-only, mixed text/taskRequests, multiple real users, and ambiguous/not-ready with no LLM call. Production title wiring is a separate critic-gated slice after gate behavior is defined.
+3. **R2 — prompt loop-control helper/tests.** Add pure `PromptV2LoopState` over canonical rows with exact predicates for assistant-after-user, terminal assistant, pending taskRequests, compaction requests, and same-timestamp ties. Production cutover is blocked until no hidden legacy ID/write dependency remains.
+4. **R3 — compaction residual reads.** Separate already-cut-over provider-input compaction from residual reads. Summary source must be exactly current processor result, completed canonical compaction row, or unsupported/not-ready. Pruning/compacted-output mutation stays blocked until a v2 mutation/event source policy exists.
+5. **R4 — processor doom-loop live state.** Design/test a v2/live-state helper using processor current state or canonical v2 events. Cover repeated identical tool calls, provider-executed tools, pending/running/completed transitions, cancellation, and interruption. Do not switch to stale DB legacy reads.
+6. **R5 — public API route policy.** Keep old routes while internal SDK/CLI/share/ACP consumers still use old wire. Old routes are removed or unsupported only after internal consumers stop using them; no v2-to-legacy emulation.
+7. **R6 — payload/display policy-first slices.** Define versioning, old payload accept/reject/migrate behavior, redaction, missing legacy-source behavior, and display fixtures before production cutover. Then migrate one consumer group at a time: export/import, share, CLI session-data/stats/replay, ACP/TUI/replay.
+8. **R7 — destructive/session mutation gate.** Define patch target IDs, canonical ID operations, standalone snapshot unsupported-data gate, and mutation rollback policy. Add parity tests before summary/revert/remove/update/fork production changes.
+9. **R8 — stop legacy writers/readers last.** Stop legacy writes/readers only after all consumers have v2 semantic coverage and materialization/remediation verification. Retire transitional oracle tests at this final stop-legacy gate.
+
+What remains: consumer source changes are not approved by this docs/spec slice. Runtime patch events still need target-ID projection; destructive revert behavior must prove parity; legacy HTTP/wire surfaces need deletion/versioning policy, not adapter identity policy; public payloads need v2 version policy; high-risk prompt/compaction/latest helpers need leaf semantic tests plus post-cutover ambiguous-backfill gates.
 
 ## No-Adapter Semantic Test Plan
 
@@ -144,6 +179,7 @@ Transitional tests:
 - Legacy-oracle parity tests should be named as migration-only, for example `message-v2-legacy-parity.transitional.test.ts`.
 - They may import `packages/opencode/src/session/message-v2.ts` only to prove pre-cutover semantic parity.
 - Their retirement criterion is final removal or replacement when the last legacy consumer relying on that helper is deleted.
+- Each new helper slice must state its own oracle retirement rule in the test file or adjacent plan note. Examples: R1 title oracle retires when title wiring reads only v2 or is intentionally skipped; R2 loop-control oracle retires when prompt no longer calls `MessageV2.latest/filterCompactedEffect`; R3 compaction oracle retires when residual compaction reads no longer call legacy session/message helpers; R4 doom-loop oracle retires when runtime detection no longer calls `MessageV2.parts`; R6/R7 oracles retire per consumer group when that group no longer uses old wire or legacy part IDs.
 
 Permanent tests:
 
