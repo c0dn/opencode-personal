@@ -432,9 +432,9 @@ Required checks:
 - permanent and transitional tests have separate ownership and retirement paths
 - current blocker and read/write boundary tables distinguish stale historical
   findings from remaining blockers
-- R0-R8 sequence records that R0 docs/spec is the next safe slice; R1 pure title
-  helper tests may follow, but R1 production title wiring needs its own critic
-  gate
+- R0-R8 sequence is recorded as historical mapping, not a current next-safe-slice
+  list; current gating comes from the blocker table, and R1 production title
+  wiring still needs its own critic gate
 
 Commit gate example:
 
@@ -598,7 +598,8 @@ Required tests:
   requests, assistant patches, retries, rich errors, tool title/input/output and
   result metadata, reasoning, files, synthetic messages, compaction rows, and
   unknown future variants
-- first consumer after policy/helper tests is export-only v2 payload generation;
+- export-only v2 payload generation is complete through U7e (`export --format
+  v2`, including control-row omission). The U7 parent remains in-progress:
   import, share, CLI session-data/stats/replay, ACP, TUI, and replay remain
   blocked until their own tests and readiness gates exist
 - existing legacy import may remain transitional until cutover, but v2 import
@@ -612,9 +613,14 @@ bun --cwd packages/opencode test test/session/summary-v2-parity.test.ts test/ses
 bun --cwd packages/opencode typecheck
 ```
 
-For the docs-only `U7a` slice, no runtime tests are required unless the docs
-tooling changes; validate by reviewing the spec diff and, if the workplan is
-edited, running `workplan_validate`.
+For checkpoint docs after U7 export-only completion, no runtime tests are
+required unless the docs tooling changes. Validate by reviewing the spec diff
+and running `git diff --check` on the touched spec files; if the workplan is
+edited, also run `workplan_validate`.
+
+Remaining phase-9 blockers: U5 production loop-control remains NO-GO; U8
+destructive/session mutation policy is still draft; U9 stop legacy remains
+blocked until all consumers migrate or become explicitly unsupported.
 
 ### Transcript phase T6 — Stop legacy writes/readers
 

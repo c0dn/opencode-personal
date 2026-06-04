@@ -115,7 +115,17 @@ Readiness categories are deliberately conservative: `already-canonical-v2`, `rea
 
 ## Public Payload and Display Policy
 
-This section is the R6/U7a policy-only slice. It approves docs/spec and fixture policy only; it does not approve helper code, consumer migration, generated SDK/OpenAPI changes, import/export/share changes, ACP/TUI/replay changes, or a v2-to-legacy adapter.
+This section began as the R6/U7a policy-only slice. It now records the U7 export-only checkpoint through U7e. The export-only sub-scope is complete, but the U7 parent remains open/in-progress because import, share, ACP/TUI/replay/display consumers, generated public schema work, and old legacy route/reader cleanup still have separate gates.
+
+Completed U7 export-only commits:
+
+- U7a `0b45e5aad` — documented public payload/display policy.
+- U7b `c3692e54f` — added display helper coverage needed by export fixtures.
+- U7c `f51c0522f` — added public payload helper coverage.
+- U7d `ef6858cc5` — added `export --format v2` export-only path.
+- U7e `e457a056b` — omitted control rows from v2 export payloads.
+
+These commits approve only the export CLI path for versioned v2 payload generation from already-gated canonical rows. They do not approve v2 import, share, generated schema/SDK/OpenAPI changes, ACP/TUI/replay migration, old legacy route deletion, destructive/session mutation behavior, or a v2-to-legacy adapter.
 
 Two v2 outputs are required and intentionally separate:
 
@@ -130,7 +140,7 @@ Later shared helper code may only centralize canonical ordering and exhaustivene
 - V2 import accepts only the approved v2 envelope and `PublicTranscriptPayloadV2` schema. Unknown kinds, missing versions, unsupported versions, legacy payloads, and unwrapped arrays/objects are rejected by v2 import with a typed error.
 - Existing legacy import may remain during transition for matching old payloads until the import cutover. That path is not a v2 import path and must not be used as best-effort v2 fallback.
 - No best-effort legacy-to-v2 payload migration, old payload coercion, or legacy wire preservation is allowed unless a later explicitly approved slice defines the import policy and tests.
-- Export-only `PublicTranscriptPayloadV2` is the first allowed consumer after policy/helper tests. Import, share, ACP, TUI, and replay stay blocked until their own schema/fixture tests and readiness gates exist.
+- Export-only `PublicTranscriptPayloadV2` is the first completed consumer after policy/helper tests. Import, share, ACP, TUI, and replay stay blocked until their own schema/fixture tests and readiness gates exist.
 
 ### Backfill/readiness gate
 
@@ -166,23 +176,22 @@ The mapper must return per-session stats for mapped, degraded, and skipped input
 
 ## Safe Migration Order and Remaining Work
 
-Current approved production cutovers are limited to already-landed prompt/compaction provider-input leaves and TaskTool/PlanExitTool context-model leaves. All remaining production cutovers below require their own focused tests and critic gate. R0 is the next safe slice; after R0, R1 pure title helper tests may be considered, but R1 title production wiring needs a separate gate.
+Current approved production/runtime cutovers include the landed U1 assistant targeting, U2 tool fidelity, U3 event boundary, U4 title wiring, prompt/compaction provider-input leaves, TaskTool/PlanExitTool context-model leaves, U6 compaction current-output residual source, and the U7 export-only v2 CLI payload path through U7e. U7 as a parent remains in-progress. All remaining production cutovers below require their own focused tests and critic gate.
 
 ### Current remaining blocker table
 
-This table records current blockers only. Historical findings for mixed cutoff, marker locking, deterministic ordering, provenance leakage, and schema gaps are stale when the contract sections above define the policy and tests already cover the landed implementation.
+This table records current blockers only. Historical findings for mixed cutoff, marker locking, deterministic ordering, provenance leakage, and schema gaps are stale when the contract sections above define the policy and tests already cover the landed implementation. U7 export-only is complete, but these gates keep the U7 parent and phase-9 stop-legacy path open.
 
 | Blocked surface | Current blocker | Required gate / next allowed slice | Owner |
 | --- | --- | --- | --- |
-| Prompt title | Ambiguity between a pure v2 title helper and production wiring that calls the LLM/sets title from run-loop state | R1 pure helper/tests first; production wiring only after not-ready/ambiguous behavior is defined and proven to make no LLM call when gated | Prompt owner |
-| Prompt loop control | Exact v2 ordering/state contract is missing for assistant-after-user, terminal assistant, pending taskRequests, compaction requests, and same-timestamp ties | R2 pure `PromptV2LoopState` contract/tests; production cutover blocked until no hidden legacy ID/write dependency remains | Prompt/session owner |
-| `Session.messages/findMessage` and `MessageV2.page/get/parts` | Transitional wrappers can become a hidden v2-to-legacy adapter | Inventory callers; replace with v2-native domain helpers or explicit unsupported behavior; then delete/disable wrappers | Session owner |
-| V2 reads with legacy live writes | Mixed read/write boundary is implicit and can pass canonical IDs into legacy mutations or legacy IDs into v2 reads | Use the boundary table below for every phase; remove a boundary only after v2 live writer/mutation policy exists for that surface | Session/runtime owner |
-| Compaction residual reads/pruning | Source for compaction-ended summary and mutation source for pruning/compacted tool output are not fixed | R3 names source exactly: current processor result, completed canonical compaction row, or unsupported/not-ready; pruning mutation blocked until v2 mutation/event policy | Compaction owner |
-| Processor doom-loop | Runtime detection reads legacy parts for live assistant state and may race stale DB state | R4 pure/live-state helper design using processor current state or canonical v2 events; no cutover until stale-read and legacy-part-ID risks are removed | Processor owner |
-| Payload/display/share/export/import/ACP/CLI/replay | Version, display, redaction, missing legacy-source, and old payload behavior are not defined | R6 policy-first slices before any consumer group cutover | Share/CLI/ACP/UI owners |
-| Summary/revert/remove/update/fork | Destructive operations lack canonical target-ID and unsupported-data mutation policy | R7 target-ID/mutation policy, standalone snapshot unsupported-data gate, and parity/rollback tests | Runtime/session owner |
-| Stop legacy writers/readers | Remaining consumers still depend on legacy readers/writers or transitional oracle tests | R8 only after all migrated consumers have v2 semantic coverage and old-session remediation verification | Migration owner |
+| V2 import | Deep untrusted schema validation, transaction/collision/write/import semantics, and old-payload rejection policy beyond the shallow validator are not complete | Define typed import validation and write semantics, reject old/unknown payloads intentionally, then add import round-trip and failure tests | CLI/import owner |
+| Share | V2 share redaction, payload version, and network sync policy/tests are not complete | Define share-specific redaction/version/network sync policy and add tests before switching share output | Share owner |
+| ACP/TUI/replay/display consumers | Per-consumer display fixtures, readiness behavior, and error gates are not complete | Add display/replay fixtures and typed not-ready/unsupported behavior for each consumer before migration | ACP/UI/CLI owners |
+| Generated public schema/SDK/OpenAPI | No generated public HTTP/API schema has changed for the U7 export CLI path | Generate/update only when public HTTP/API schemas change; current export-only CLI payload path does not require SDK/OpenAPI regeneration | API/SDK owner |
+| Old legacy routes/readers | Internal consumers still depend on old wire/readers or transitional oracle tests | Keep old routes/readers until internal consumers stop depending on them or become explicitly unsupported | API/session owner |
+| Prompt loop control | U5 production loop-control remains NO-GO: v2 exit authority can skip pending legacy compaction work, interrupted orphan tool exit is not representable in v2 yet, and loop return/write ownership still depends on legacy shape | Do not replace production loop decisions until pending compaction input, orphan-tool policy, and v2-native return/write ownership are resolved | Prompt/session owner |
+| Destructive/session mutation policy | U8 target-ID, canonical mutation, unsupported standalone snapshot, and rollback policy is still draft | Complete U8 policy and parity/rollback tests before summary/revert/remove/update/fork changes | Runtime/session owner |
+| Stop legacy writers/readers | U9 stop legacy is blocked until all consumers migrate or become explicitly unsupported | Stop legacy only after all migrated consumers have v2 semantic coverage, transitional oracles are retired, and unsupported legacy surfaces are deliberate | Migration owner |
 
 ### Read/write boundary while legacy writes remain
 
@@ -197,19 +206,21 @@ This table records current blockers only. Historical findings for mixed cutoff, 
 | R7 destructive mutations | Canonical v2 snapshots, assistant patches, and target IDs | Legacy destructive behavior remains until parity proven | Mutations target canonical IDs only after cutover; no legacy part-ID operations | Unsupported-data gate for standalone snapshots and missing target proof | Destructive parity, rollback, and target-ID tests |
 | R8 stop legacy | Canonical v2 readers only | None after cutover | Legacy IDs cannot be required by any runtime/public path | Final stop-legacy gate fails on any legacy writer/reader dependency | All boundaries above removed and transitional oracles retired |
 
-### Revised remaining sequence R0-R8
+### Historical R0-R8 sequence and current mapping
 
-1. **R0 — docs/spec/workplan reconcile.** Reconcile stale historical findings with current blockers, persist this table-driven plan, and keep no-adapter language. No production code. This is the next safe slice.
+This R-series sequence records the earlier remaining-work decomposition. Several early items have since landed through U-series commits, so it is no longer a "next safe slice" list. Use the blocker table above for current gating decisions.
+
+1. **R0 — docs/spec/workplan reconcile.** Completed by the table-driven planning and later U7 checkpoint docs; keep no-adapter language and refresh blocker tables as slices land.
 2. **R1 — prompt title helper before wiring.** Add pure `PromptV2Title` helper/tests first. Required title tests: parent sessions, non-default titles, synthetic-only first users, taskRequests-only, mixed text/taskRequests, multiple real users, and ambiguous/not-ready with no LLM call. Production title wiring is a separate critic-gated slice after gate behavior is defined.
 3. **R2 — prompt loop-control helper/tests.** Add pure `PromptV2LoopState` over canonical rows with exact predicates for assistant-after-user, terminal assistant, pending taskRequests, compaction requests, and same-timestamp ties. Production cutover is blocked until no hidden legacy ID/write dependency remains.
 4. **R3 — compaction residual reads.** Separate already-cut-over provider-input compaction from residual reads. Summary source must be exactly current processor result, completed canonical compaction row, or unsupported/not-ready. Pruning/compacted-output mutation stays blocked until a v2 mutation/event source policy exists.
 5. **R4 — processor doom-loop live state.** Design/test a v2/live-state helper using processor current state or canonical v2 events. Cover repeated identical tool calls, provider-executed tools, pending/running/completed transitions, cancellation, and interruption. Do not switch to stale DB legacy reads.
 6. **R5 — public API route policy.** Keep old routes while internal SDK/CLI/share/ACP consumers still use old wire. Old routes are removed or unsupported only after internal consumers stop using them; no v2-to-legacy emulation.
-7. **R6 — payload/display policy-first slices.** Define versioning, old payload accept/reject/migrate behavior, redaction, missing legacy-source behavior, and display fixtures before production cutover. Then migrate one consumer group at a time: export/import, share, CLI session-data/stats/replay, ACP/TUI/replay.
+7. **R6 — payload/display policy-first slices.** Export-only v2 payload generation is complete through U7e. Import, share, CLI session-data/stats/replay, ACP/TUI/replay, and generated public schemas remain blocked on their own policy/test gates.
 8. **R7 — destructive/session mutation gate.** Define patch target IDs, canonical ID operations, standalone snapshot unsupported-data gate, and mutation rollback policy. Add parity tests before summary/revert/remove/update/fork production changes.
 9. **R8 — stop legacy writers/readers last.** Stop legacy writes/readers only after all consumers have v2 semantic coverage and materialization/remediation verification. Retire transitional oracle tests at this final stop-legacy gate.
 
-What remains: consumer source changes are not approved by this docs/spec slice. Runtime patch events still need target-ID projection; destructive revert behavior must prove parity; legacy HTTP/wire surfaces need deletion/versioning policy, not adapter identity policy; public payloads need v2 version policy; high-risk prompt/compaction/latest helpers need leaf semantic tests plus post-cutover ambiguous-backfill gates.
+What remains: U7 export-only is complete, but other consumer source changes are not approved by this checkpoint. Runtime patch events still need target-ID projection; destructive revert behavior must prove parity; legacy HTTP/wire surfaces need deletion/versioning policy, not adapter identity policy; import/share/ACP/TUI/replay and generated schema work need their own v2 policies/tests; high-risk prompt loop-control and stop-legacy paths remain blocked by the table above.
 
 ## No-Adapter Semantic Test Plan
 
