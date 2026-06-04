@@ -6,6 +6,7 @@ import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { AgentAttachment, FileAttachment, ReferenceAttachment } from "@opencode-ai/core/session/prompt"
 import { ToolOutput } from "@opencode-ai/core/tool-output"
+import type { SessionMessage as WireSessionMessage } from "@opencode-ai/sdk/v2"
 import { DateTime } from "effect"
 import { TranscriptV2Display } from "../../src/session/transcript-v2-display"
 
@@ -261,6 +262,61 @@ describe("session.transcript-v2-display", () => {
     ).toThrow(TranscriptV2Display.DisplayTranscriptUnsupportedError)
   })
 
+  test("decodes SDK-wire v2 rows to display messages with numeric times and canonical ordering", () => {
+    const output = TranscriptV2Display.toDisplayTranscriptV2FromWire(wireMessages(), { status: "ready" })
+
+    expect(output.map((message) => message.type)).toStrictEqual(["user", "assistant", "compaction"])
+    expect(output.map((message) => message.id)).toStrictEqual([id("wire_user"), id("wire_assistant"), id("wire_compaction")])
+    expect(output[0]).toMatchObject({ type: "user", time: { created: 1000 }, text: "wire prompt" })
+    expect(output[2]).toMatchObject({ type: "compaction", time: { created: 3000 }, include: id("wire_user") })
+
+    const assistantOutput = output[1]
+    if (assistantOutput.type !== "assistant") throw new Error("expected assistant output")
+    expect(assistantOutput.time).toStrictEqual({ created: 2000, completed: 2600 })
+    expect(assistantOutput.content).toMatchObject([
+      { type: "text", id: id("wire_text"), text: "wire answer" },
+      { type: "tool", id: id("wire_tool"), state: { status: "completed" } },
+    ])
+    const toolOutput = assistantOutput.content[1]
+    if (toolOutput.type !== "tool") throw new Error("expected tool output")
+    expect(toolOutput.time).toStrictEqual({ created: 2100, ran: 2200, completed: 2300, pruned: 2400 })
+    expect(toolOutput.state).toMatchObject({
+      status: "completed",
+      input: { command: "pwd" },
+      structured: { ok: true },
+      content: [{ type: "text", text: "/work" }],
+    })
+    expectNoLegacyIDs(output)
+  })
+
+  test("wire display readiness is checked before malformed rows", () => {
+    expect(() => TranscriptV2Display.toDisplayTranscriptV2FromWire([{ type: "not-valid" }], { status: "upgrade_pending" })).toThrow(
+      TranscriptV2Display.DisplayTranscriptNotReadyError,
+    )
+  })
+
+  test("malformed ready wire rows fail with a display decode error", () => {
+    expect(() => TranscriptV2Display.toDisplayTranscriptV2FromWire([{ type: "not-valid" }], { status: "ready" })).toThrow(
+      TranscriptV2Display.DisplayTranscriptDecodeError,
+    )
+  })
+
+  test("legacy-looking SDK-wire IDs fail closed at the display boundary", () => {
+    const [message] = wireMessages()
+    expect(() => TranscriptV2Display.toDisplayTranscriptV2FromWire([{ ...message, id: "msg_legacy" }], { status: "ready" })).toThrow(
+      TranscriptV2Display.DisplayTranscriptUnsupportedError,
+    )
+
+    const assistantMessage = wireMessages()[1]
+    if (assistantMessage.type !== "assistant") throw new Error("expected assistant wire message")
+    expect(() =>
+      TranscriptV2Display.toDisplayTranscriptV2FromWire(
+        [{ ...assistantMessage, content: [{ type: "text", id: "prt_legacy", text: "oops" }] }],
+        { status: "ready" },
+      ),
+    ).toThrow(TranscriptV2Display.DisplayTranscriptUnsupportedError)
+  })
+
   test("source-purity guard does not import legacy readers or database services", async () => {
     const source = await Bun.file(new URL("../../src/session/transcript-v2-display.ts", import.meta.url)).text()
 
@@ -366,6 +422,70 @@ function toolRaw(suffix: string, state: SessionMessage.ToolState) {
     state,
     time: { created: time(4) },
   } as SessionMessage.AssistantTool
+}
+
+function wireMessages() {
+  return [
+    {
+      type: "compaction",
+      id: id("wire_compaction"),
+      reason: "manual",
+      summary: "wire summary",
+      include: id("wire_user"),
+      metadata: { secret: "msg_metadata" },
+      time: { created: 3000 },
+    },
+    {
+      type: "assistant",
+      id: id("wire_assistant"),
+      agent: "build",
+      model: { providerID: "provider", id: "model", variant: "default" },
+      content: [
+        { type: "text", id: id("wire_text"), text: "wire answer" },
+        {
+          type: "tool",
+          id: id("wire_tool"),
+          callID: "call-wire",
+          name: "bash",
+          title: "Run pwd",
+          provider: {
+            executed: true,
+            metadata: { secret: "msg_provider" },
+            resultMetadata: { secret: "prt_provider" },
+          },
+          state: {
+            status: "completed",
+            input: { command: "pwd" },
+            structured: { ok: true },
+            content: [{ type: "text", text: "/work" }],
+          },
+          time: { created: 2100, ran: 2200, completed: 2300, pruned: 2400 },
+        },
+      ],
+      retries: [{ attempt: 1, error: { message: "retry", isRetryable: true }, time: { created: 2050 } }],
+      time: { created: 2000, completed: 2600 },
+    },
+    {
+      type: "user",
+      id: id("wire_user"),
+      text: "wire prompt",
+      files: [],
+      agents: [],
+      references: [],
+      taskRequests: [
+        {
+          type: "task-request",
+          id: id("wire_task"),
+          prompt: "delegate",
+          description: "delegate work",
+          agent: "build",
+          command: "task",
+        },
+      ],
+      metadata: { secret: "prt_metadata" },
+      time: { created: 1000 },
+    },
+  ] satisfies WireSessionMessage[]
 }
 
 function expectNoLegacyIDs(value: unknown) {

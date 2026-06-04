@@ -1,5 +1,5 @@
 import { SessionMessage } from "@opencode-ai/core/session/message"
-import { DateTime } from "effect"
+import { DateTime, Schema } from "effect"
 import { Buffer } from "node:buffer"
 
 export type DisplayReadiness = { status: "ready" } | { status: string; reason?: string }
@@ -176,6 +176,16 @@ export class DisplayTranscriptUnsupportedError extends Error {
   }
 }
 
+export class DisplayTranscriptDecodeError extends Error {
+  constructor(
+    readonly row: unknown,
+    readonly decodeError: unknown,
+  ) {
+    super(`could not decode v2 display transcript wire message: ${variantType(row)}`)
+    this.name = "DisplayTranscriptDecodeError"
+  }
+}
+
 export function orderMessages(messages: readonly SessionMessage.Message[]) {
   return messages.slice().sort((left, right) => compareMessages(left, right))
 }
@@ -190,6 +200,25 @@ export function toDisplayTranscriptV2(
 ): readonly DisplayTranscriptMessage[] {
   requireReady(readiness)
   return orderMessages(messages).map(displayMessage)
+}
+
+export function toDisplayTranscriptV2FromWire(
+  rows: readonly unknown[],
+  readiness: DisplayReadiness | undefined,
+): readonly DisplayTranscriptMessage[] {
+  requireReady(readiness)
+  const decoded = rows.map(decodeWireMessage)
+  return toDisplayTranscriptV2(decoded, { status: "ready" })
+}
+
+const decodeSessionMessage = Schema.decodeUnknownSync(SessionMessage.Message)
+
+function decodeWireMessage(row: unknown): SessionMessage.Message {
+  try {
+    return decodeSessionMessage(row)
+  } catch (error) {
+    throw new DisplayTranscriptDecodeError(row, error)
+  }
 }
 
 function compareMessages(left: SessionMessage.Message, right: SessionMessage.Message) {
