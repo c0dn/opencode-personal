@@ -8,7 +8,6 @@ import { InstanceState } from "@/effect/instance-state"
 import { Provider } from "@/provider/provider"
 
 import { Session } from "@/session/session"
-import { MessageV2 } from "@/session/message-v2"
 import type { SessionID } from "@/session/schema"
 import { Database } from "@opencode-ai/core/database/database"
 import { eq } from "drizzle-orm"
@@ -18,6 +17,7 @@ import { SessionShareTable } from "@opencode-ai/core/share/sql"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { EventV2 } from "@opencode-ai/core/event"
+import { SessionEvent } from "@opencode-ai/core/session/event"
 
 const log = Log.create({ service: "share-next" })
 const disabled = process.env["OPENCODE_DISABLE_SHARE"] === "true" || process.env["OPENCODE_DISABLE_SHARE"] === "1"
@@ -44,8 +44,10 @@ export type Share = typeof ShareSchema.Type
 
 type State = {
   queue: Map<SessionID, Map<string, Data>>
+  running: Set<SessionID>
   scope: Scope.Closeable
   shared: Map<SessionID, Share | null>
+  transcript: Set<SessionID>
 }
 
 type Data =
@@ -150,16 +152,85 @@ export const layer = Layer.effect(
       })
     }
 
+    const syncTranscript = Effect.fn("ShareNext.syncTranscript")(function* (sessionID: SessionID) {
+      const info = yield* session.get(sessionID)
+      const diffs = yield* session.diff(sessionID)
+      const messages = yield* session.messages({ sessionID })
+      const models = yield* Effect.forEach(
+        Array.from(
+          new Map(
+            messages
+              .filter((msg) => msg.info.role === "user")
+              .map((msg) => (msg.info as SDK.UserMessage).model)
+              .map((item) => [`${item.providerID}/${item.modelID}`, item] as const),
+          ).values(),
+        ),
+        (item) => provider.getModel(ProviderV2.ID.make(item.providerID), ModelV2.ID.make(item.modelID)),
+        { concurrency: 8 },
+      )
+
+      yield* sync(sessionID, [
+        { type: "session", data: structuredClone(info) as SDK.Session },
+        ...messages.map((item) => ({ type: "message" as const, data: structuredClone(item.info) as SDK.Message })),
+        ...messages.flatMap((item) =>
+          item.parts.map((part) => ({ type: "part" as const, data: structuredClone(part) as SDK.Part })),
+        ),
+        { type: "session_diff", data: structuredClone(diffs) as SDK.SnapshotFileDiff[] },
+        { type: "model", data: structuredClone(models) as SDK.Model[] },
+      ])
+    })
+
+    function scheduleTranscriptSync(sessionID: SessionID): Effect.Effect<void, unknown> {
+      return Effect.gen(function* () {
+        if (disabled) return
+        const share = yield* getCached(sessionID)
+        if (!share) return
+        const s = yield* InstanceState.get(state)
+        if (s.transcript.has(sessionID)) return
+        if (s.running.has(sessionID)) {
+          s.transcript.add(sessionID)
+          return
+        }
+        s.transcript.add(sessionID)
+        yield* Effect.sleep("1 second").pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              s.transcript.delete(sessionID)
+              s.running.add(sessionID)
+            }),
+          ),
+          Effect.andThen(syncTranscript(sessionID)),
+          Effect.catchCause((cause) => Effect.sync(() => log.error("share transcript sync failed", { sessionID, cause }))),
+          Effect.ensuring(
+            Effect.gen(function* () {
+              const rerun = s.transcript.delete(sessionID)
+              s.running.delete(sessionID)
+              if (rerun) yield* scheduleTranscriptSync(sessionID).pipe(Effect.ignore)
+            }),
+          ),
+          Effect.forkIn(s.scope),
+        )
+      })
+    }
+
     const state: InstanceState.InstanceState<State> = yield* InstanceState.make<State>(
       Effect.fn("ShareNext.state")(function* (_ctx) {
-        const cache: State = { queue: new Map(), scope: yield* Scope.make(), shared: new Map() }
+        const cache: State = {
+          queue: new Map(),
+          running: new Set(),
+          scope: yield* Scope.make(),
+          shared: new Map(),
+          transcript: new Set(),
+        }
 
         yield* Effect.addFinalizer(() =>
           Scope.close(cache.scope, Exit.void).pipe(
             Effect.andThen(
               Effect.sync(() => {
                 cache.queue.clear()
+                cache.running.clear()
                 cache.shared.clear()
+                cache.transcript.clear()
               }),
             ),
           ),
@@ -186,18 +257,33 @@ export const layer = Layer.effect(
             yield* sync(info.id, [{ type: "session", data: structuredClone(info) as SDK.Session }])
           }),
         )
-        yield* watch(MessageV2.Event.Updated, (data) =>
-          Effect.gen(function* () {
-            const info = data.info
-            yield* sync(info.sessionID, [{ type: "message", data: structuredClone(info) as SDK.Message }])
-            if (info.role !== "user") return
-            const model = yield* provider.getModel(info.model.providerID, info.model.modelID)
-            yield* sync(info.sessionID, [{ type: "model", data: [model] }])
-          }),
-        )
-        yield* watch(MessageV2.Event.PartUpdated, (data) =>
-          sync(data.part.sessionID, [{ type: "part", data: structuredClone(data.part) as SDK.Part }]),
-        )
+        yield* watch(SessionEvent.AgentSwitched, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.ModelSwitched, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Prompted, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.PromptLifecycle.Promoted, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Synthetic, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Shell.Started, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Shell.Ended, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Step.Started, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Step.Ended, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Step.Failed, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Text.Started, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Text.Delta, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Text.Ended, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Reasoning.Started, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Reasoning.Delta, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Reasoning.Ended, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Tool.Input.Started, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Tool.Input.Delta, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Tool.Input.Ended, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Tool.Called, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Tool.Progress, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Tool.Success, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Tool.Failed, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Retried, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Compaction.Started, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Compaction.Delta, (data) => scheduleTranscriptSync(data.sessionID))
+        yield* watch(SessionEvent.Compaction.Ended, (data) => scheduleTranscriptSync(data.sessionID))
         yield* watch(Session.Event.Diff, (data) =>
           sync(data.sessionID, [{ type: "session_diff", data: structuredClone(data.diff) as SDK.SnapshotFileDiff[] }]),
         )
@@ -273,29 +359,7 @@ export const layer = Layer.effect(
 
     const full = Effect.fn("ShareNext.full")(function* (sessionID: SessionID) {
       log.info("full sync", { sessionID })
-      const info = yield* session.get(sessionID)
-      const diffs = yield* session.diff(sessionID)
-      const messages = yield* session.messages({ sessionID })
-      const models = yield* Effect.forEach(
-        Array.from(
-          new Map(
-            messages
-              .filter((msg) => msg.info.role === "user")
-              .map((msg) => (msg.info as SDK.UserMessage).model)
-              .map((item) => [`${item.providerID}/${item.modelID}`, item] as const),
-          ).values(),
-        ),
-        (item) => provider.getModel(ProviderV2.ID.make(item.providerID), ModelV2.ID.make(item.modelID)),
-        { concurrency: 8 },
-      )
-
-      yield* sync(sessionID, [
-        { type: "session", data: info },
-        ...messages.map((item) => ({ type: "message" as const, data: item.info })),
-        ...messages.flatMap((item) => item.parts.map((part) => ({ type: "part" as const, data: part }))),
-        { type: "session_diff", data: diffs },
-        { type: "model", data: models },
-      ])
+      yield* syncTranscript(sessionID)
     })
 
     const init = Effect.fn("ShareNext.init")(function* () {
@@ -347,6 +411,8 @@ export const layer = Layer.effect(
       if (!share) {
         s.shared.delete(sessionID)
         s.queue.delete(sessionID)
+        s.running.delete(sessionID)
+        s.transcript.delete(sessionID)
         return
       }
 
@@ -360,6 +426,8 @@ export const layer = Layer.effect(
       yield* db.delete(SessionShareTable).where(eq(SessionShareTable.session_id, sessionID)).run().pipe(Effect.orDie)
       s.shared.delete(sessionID)
       s.queue.delete(sessionID)
+      s.running.delete(sessionID)
+      s.transcript.delete(sessionID)
     })
 
     return Service.of({ init, url, request, create, remove })
