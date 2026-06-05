@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionMessage } from "@opencode-ai/core/session/message"
-import { AgentAttachment } from "@opencode-ai/core/session/prompt"
+import { AgentAttachment, FileAttachment } from "@opencode-ai/core/session/prompt"
 import type { ModelMessage } from "ai"
 import { DateTime } from "effect"
 import { MessageV2Compaction } from "../../src/session/message-v2-compaction"
@@ -217,6 +217,48 @@ describe("session.message-v2-provider.prepareCompactionProviderMessages", () => 
     expect(result.modelMessages).toBe(converted)
     expect(converter.calls).toHaveLength(1)
     expect(ids(converter.calls[0])).toStrictEqual([first.id, finished.id, next.id])
+  })
+
+  test("passes compaction options through to the default converter", async () => {
+    const result = await MessageV2Provider.prepareCompactionProviderMessages({
+      messages: [
+        user("first", 1, {
+          files: [new FileAttachment({ uri: "data:application/pdf;base64,Zm9v", mime: "application/pdf", name: "doc.pdf" })],
+        }),
+      ],
+      options: { stripMedia: true },
+    })
+
+    expect(result.type).toBe("ready")
+    if (result.type !== "ready") return
+    expect(result.modelMessages).toStrictEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "first" },
+          { type: "text", text: "[Attached application/pdf: doc.pdf]" },
+        ],
+      },
+    ])
+  })
+
+  test("leaves compaction options out of custom converter calls", async () => {
+    const first = user("first", 1, {
+      files: [new FileAttachment({ uri: "data:application/pdf;base64,Zm9v", mime: "application/pdf", name: "doc.pdf" })],
+    })
+    const converter = captureConverter()
+
+    const result = await MessageV2Provider.prepareCompactionProviderMessages({
+      messages: [first],
+      options: { stripMedia: true },
+      convert: converter.convert,
+    })
+
+    expect(result.type).toBe("ready")
+    if (result.type !== "ready") return
+    expect(result.modelMessages).toBe(converted)
+    expect(converter.calls).toHaveLength(1)
+    expect(ids(converter.calls[0])).toStrictEqual([first.id])
   })
 
   test("converts candidates selected by the compaction selector composition", async () => {

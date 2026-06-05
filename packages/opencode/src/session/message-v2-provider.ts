@@ -31,16 +31,23 @@ export async function preparePromptProviderMessages(input: {
 
 export async function prepareCompactionProviderMessages(input: {
   messages: readonly CompactionCandidateMessage[]
+  options?: MessageV2Model.Options
   convert?: Converter
 }): Promise<CompactionProviderMessages> {
   const readiness = MessageV2Readiness.compactionProviderReadiness(input.messages)
 
   if (readiness.type !== "ready") return readiness
 
-  const convert = input.convert ?? MessageV2Model.toModelMessages
+  if (input.convert) {
+    return {
+      ...readiness,
+      modelMessages: await input.convert(readiness.messages),
+    }
+  }
+
   return {
     ...readiness,
-    modelMessages: await convert(readiness.messages),
+    modelMessages: await MessageV2Model.toModelMessages(readiness.messages, input.options),
   }
 }
 

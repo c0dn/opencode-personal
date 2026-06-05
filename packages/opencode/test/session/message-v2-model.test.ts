@@ -83,6 +83,49 @@ describe("session.message-v2-model.toModelMessages", () => {
     ])
   })
 
+  test("replaces user pdf media with marker when stripping media", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [
+          user("user", 1, {
+            files: [new FileAttachment({ uri: "data:application/pdf;base64,Zm9v", mime: "application/pdf", name: "doc.pdf" })],
+          }),
+        ],
+        { stripMedia: true },
+      ),
+    ).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "[Attached application/pdf: doc.pdf]" }],
+      },
+    ])
+  })
+
+  test("keeps non-media user files when stripping media", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [
+          user("user", 1, {
+            files: [new FileAttachment({ uri: "data:application/json;base64,e30=", mime: "application/json", name: "data.json" })],
+          }),
+        ],
+        { stripMedia: true },
+      ),
+    ).toStrictEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "file",
+            mediaType: "application/json",
+            filename: "data.json",
+            data: "data:application/json;base64,e30=",
+          },
+        ],
+      },
+    ])
+  })
+
   test("converts assistant text and reasoning", async () => {
     expect(
       await MessageV2Model.toModelMessages([
@@ -166,6 +209,99 @@ describe("session.message-v2-model.toModelMessages", () => {
     ])
   })
 
+  test("truncates completed tool text output at max chars", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [
+          assistant("assistant", 1, [
+            completedTool({
+              state: new SessionMessage.ToolStateCompleted({
+                status: "completed",
+                input: { cmd: "ls" },
+                structured: {},
+                content: [new ToolOutput.TextContent({ type: "text", text: "abcdef" })],
+              }),
+            }),
+          ]),
+        ],
+        { toolOutputMaxChars: 3 },
+      ),
+    ).toStrictEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { cmd: "ls" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: {
+              type: "text",
+              value: "abc\n[Tool output truncated for compaction: omitted 3 chars]",
+            },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("does not truncate completed tool text output for non-positive max chars", async () => {
+    for (const toolOutputMaxChars of [0, -1]) {
+      expect(
+        await MessageV2Model.toModelMessages(
+          [
+            assistant("assistant", 1, [
+              completedTool({
+                state: new SessionMessage.ToolStateCompleted({
+                  status: "completed",
+                  input: { cmd: "ls" },
+                  structured: {},
+                  content: [new ToolOutput.TextContent({ type: "text", text: "abcdef" })],
+                }),
+              }),
+            ]),
+          ],
+          { toolOutputMaxChars },
+        ),
+      ).toStrictEqual([
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "call-1",
+              toolName: "bash",
+              input: { cmd: "ls" },
+              providerExecuted: undefined,
+            },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              toolName: "bash",
+              output: { type: "text", value: "abcdef" },
+            },
+          ],
+        },
+      ])
+    }
+  })
+
   test("converts completed tool file content from ToolOutput.FileContent without attachments field", async () => {
     expect(
       await MessageV2Model.toModelMessages([
@@ -215,6 +351,116 @@ describe("session.message-v2-model.toModelMessages", () => {
                 { type: "media", mediaType: "image/png", data: "Zm9v" },
               ],
             },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("truncates completed tool text output when file contents are present", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [
+          assistant("assistant", 1, [
+            completedTool({
+              state: new SessionMessage.ToolStateCompleted({
+                status: "completed",
+                input: { path: "image.png" },
+                structured: {},
+                content: [
+                  new ToolOutput.TextContent({ type: "text", text: "read image" }),
+                  new ToolOutput.FileContent({
+                    type: "file",
+                    source: { type: "data", data: "Zm9v" },
+                    mime: "image/png",
+                    name: "image.png",
+                  }),
+                ],
+              }),
+            }),
+          ]),
+        ],
+        { toolOutputMaxChars: 4 },
+      ),
+    ).toStrictEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { path: "image.png" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: {
+              type: "content",
+              value: [
+                { type: "text", text: "read\n[Tool output truncated for compaction: omitted 6 chars]" },
+                { type: "media", mediaType: "image/png", data: "Zm9v" },
+              ],
+            },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("strips completed tool file content to plain text output", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [
+          assistant("assistant", 1, [
+            completedTool({
+              state: new SessionMessage.ToolStateCompleted({
+                status: "completed",
+                input: { path: "report.txt" },
+                structured: {},
+                content: [
+                  new ToolOutput.TextContent({ type: "text", text: "read file" }),
+                  new ToolOutput.FileContent({
+                    type: "file",
+                    source: { type: "data", data: "Zm9v" },
+                    mime: "text/plain",
+                    name: "report.txt",
+                  }),
+                ],
+              }),
+            }),
+          ]),
+        ],
+        { stripMedia: true },
+      ),
+    ).toStrictEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { path: "report.txt" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "text", value: "read file" },
           },
         ],
       },
@@ -284,6 +530,59 @@ describe("session.message-v2-model.toModelMessages", () => {
             toolCallId: "call-1",
             toolName: "bash",
             input: { cmd: "ls" },
+            providerExecuted: undefined,
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "bash",
+            output: { type: "text", value: "[Old tool result content cleared]" },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("uses pruned completed tool placeholder before truncation or stripping", async () => {
+    expect(
+      await MessageV2Model.toModelMessages(
+        [
+          assistant("assistant", 1, [
+            completedTool({
+              time: { created: DateTime.makeUnsafe(2), pruned: DateTime.makeUnsafe(4) },
+              state: new SessionMessage.ToolStateCompleted({
+                status: "completed",
+                input: { path: "image.png" },
+                structured: {},
+                content: [
+                  new ToolOutput.TextContent({ type: "text", text: "abcdef" }),
+                  new ToolOutput.FileContent({
+                    type: "file",
+                    source: { type: "data", data: "Zm9v" },
+                    mime: "image/png",
+                    name: "image.png",
+                  }),
+                ],
+              }),
+            }),
+          ]),
+        ],
+        { stripMedia: true, toolOutputMaxChars: 3 },
+      ),
+    ).toStrictEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "bash",
+            input: { path: "image.png" },
             providerExecuted: undefined,
           },
         ],
@@ -467,4 +766,46 @@ describe("session.message-v2-model.toModelMessages", () => {
     })
     expect(result[1]).toBeUndefined()
   })
+})
+
+test("implementation is pure and has no production prompt or provider-runtime dependencies", async () => {
+  const source = await Bun.file(new URL("../../src/session/message-v2-model.ts", import.meta.url)).text()
+  const forbiddenImports = [
+    "@opencode-ai/core/session/sql",
+    "@opencode-ai/core/session/session",
+    "@opencode-ai/core/v1/session",
+    "@opencode-ai/llm",
+    "./message-v2",
+    "./message-v2-provider",
+    "./message-v2-compaction",
+    "./message-v2-readiness",
+    "./prompt",
+    "./compaction",
+    "@/provider/provider",
+    "@/provider/transform",
+    "../provider/provider",
+    "../provider/transform",
+    "@/config/config",
+    "../config/config",
+    "@/plugin",
+    "../plugin",
+  ]
+  const forbiddenSymbols = [
+    "SessionMessageTable",
+    "MessageTable",
+    "PartTable",
+    "Database",
+    "SessionV1",
+    "SessionV2",
+    "LLM",
+    "llm.stream",
+  ]
+
+  for (const specifier of forbiddenImports) {
+    const escaped = specifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    expect(source).not.toMatch(new RegExp(`from\\s+["']${escaped}["']|import\\(["']${escaped}["']\\)`))
+  }
+  for (const symbol of forbiddenSymbols) {
+    expect(source).not.toContain(symbol)
+  }
 })
