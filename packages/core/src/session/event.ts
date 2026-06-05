@@ -6,6 +6,7 @@ import { ToolOutput } from "../tool-output"
 import { V2Schema } from "../v2-schema"
 import { FileAttachment, Prompt } from "./prompt"
 import { SessionSchema } from "./schema"
+import { TaskToolMetadata } from "./task-tool-metadata"
 
 export { FileAttachment }
 
@@ -493,6 +494,18 @@ export namespace Tool {
   })
   export type Progress = typeof Progress.Type
 
+  export const MetadataUpdated = EventV2.define({
+    type: "session.next.tool.metadata.updated",
+    ...options,
+    schema: {
+      ...Base,
+      ...AssistantTarget,
+      callID: Schema.String,
+      task: TaskToolMetadata.Metadata,
+    },
+  })
+  export type MetadataUpdated = typeof MetadataUpdated.Type
+
   export const Success = EventV2.define({
     type: "session.next.tool.success",
     ...options,
@@ -595,6 +608,7 @@ const DurableDefinitions = [
   Tool.Input.Started,
   Tool.Input.Ended,
   Tool.Called,
+  Tool.MetadataUpdated,
   Tool.Success,
   Tool.Failed,
   Retried,

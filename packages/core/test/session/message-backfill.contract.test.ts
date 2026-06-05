@@ -21,6 +21,7 @@ const providerID = ProviderV2.ID.make("provider")
 const modelID = ProviderV2.ModelID.make("model")
 const v1MarkerName = `legacy-session-message-backfill/v1/${sessionID}`
 const v2MarkerName = `legacy-session-message-backfill/v2/${sessionID}`
+const v3MarkerName = `legacy-session-message-backfill/v3/${sessionID}`
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
 const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Message)
 
@@ -135,6 +136,22 @@ function completedTool(messageID: string, id: string): SessionLegacy.ToolPart {
       output: "done",
       title: "Run command",
       metadata: {},
+      time: { start: 12, end: 13 },
+    },
+  }
+}
+
+function completedTaskTool(messageID: string, id: string, metadata: Record<string, unknown>): SessionLegacy.ToolPart {
+  return {
+    ...completedTool(messageID, id),
+    tool: "task",
+    callID: "task_call",
+    state: {
+      status: "completed",
+      input: { prompt: "do work" },
+      output: "done",
+      title: "Task",
+      metadata,
       time: { start: 12, end: 13 },
     },
   }
@@ -285,7 +302,7 @@ describe("SessionMessageBackfillService contract", () => {
     )
   })
 
-  test("v2 marker exists: returns already_completed and does not trip marker insert trigger", async () => {
+  test("v3 marker exists: returns already_completed and does not trip marker insert trigger", async () => {
     const dbPath = await makeDbPath()
 
     await run(
@@ -293,7 +310,7 @@ describe("SessionMessageBackfillService contract", () => {
       Effect.gen(function* () {
         yield* seedSession()
         yield* seedLegacy([user("msg_marked", 10, "already marked")])
-        yield* seedMarker(v2MarkerName)
+        yield* seedMarker(v3MarkerName)
         yield* failBackfillMarkerInsert()
 
         const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
@@ -588,6 +605,102 @@ describe("SessionMessageBackfillService contract", () => {
         expect(rows[0]?.id).toBe(existing.id)
         expect(rows[0]?.data).toEqual(existing.data)
         expect(yield* markerExists(v2MarkerName)).toBe(false)
+      }),
+    )
+  })
+
+  test("v2-marked sessions repair migration-owned task metadata through v3 marker", async () => {
+    const dbPath = await makeDbPath()
+    const entries = [
+      assistant("msg_task_metadata", 10, [
+        completedTaskTool("msg_task_metadata", "prt_task_metadata", {
+          sessionId: "ses_child_backfill",
+          toolcalls: 3,
+          parentSessionId: sessionID,
+          model: { id: "unsafe" },
+          jobId: "job_unsafe",
+          background: true,
+          structured: { result: "kept", task: { sessionID: "msg_legacy_bad" } },
+        }),
+      ]),
+    ]
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedLegacy(entries)
+        const expected = expectedRows(entries)[0]!
+        const expectedMessage = decodeMessage({ ...expected.data, id: expected.id, type: expected.type })
+        if (expectedMessage.type !== "assistant") throw new Error("expected assistant")
+        const staleMessage = new SessionMessage.Assistant({
+          ...expectedMessage,
+          content: expectedMessage.content.map((item, index) =>
+            item.type === "tool" && index === 0 && item.state.status === "completed"
+              ? new SessionMessage.AssistantTool({
+                  ...item,
+                  state: new SessionMessage.ToolStateCompleted({ ...item.state, structured: { result: "kept" } }),
+                })
+              : item,
+          ),
+        })
+        const { id: _, type: __, ...staleData } = encodeMessage(staleMessage)
+        const stale = {
+          ...expected,
+          data: staleData,
+        }
+        yield* dbInsertSessionMessage(stale)
+        yield* seedMarker(v1MarkerName)
+        yield* seedMarker(v2MarkerName)
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+        const rows = yield* readV2Rows()
+
+        expect(result.status).toBe("completed")
+        if (result.status !== "completed") throw new Error("expected completed")
+        expect(result.inserted).toBe(0)
+        expect(result.repaired).toBe(1)
+        expect(yield* markerExists(v3MarkerName)).toBe(true)
+
+        const message = decodeMessage({ ...rows[0]!.data, id: rows[0]!.id, type: rows[0]!.type })
+        expect(message.type).toBe("assistant")
+        if (message.type !== "assistant") return
+        const tool = message.content[0]
+        expect(tool?.type).toBe("tool")
+        if (tool?.type !== "tool" || tool.state.status !== "completed") return
+        expect(tool.state.structured).toEqual({
+          result: "kept",
+          task: { sessionID: SessionSchema.ID.make("ses_child_backfill"), toolCalls: 3 },
+        })
+        assertNoLegacyIDs(tool.state.structured)
+        expect(JSON.stringify(tool.state.structured)).not.toContain("parentSessionId")
+        expect(JSON.stringify(tool.state.structured)).not.toContain("jobId")
+        expect(JSON.stringify(tool.state.structured)).not.toContain("background")
+      }),
+    )
+  })
+
+  test("missing legacy source after v2 marker preserves rows and does not write v3 marker", async () => {
+    const dbPath = await makeDbPath()
+    const existing = v2Row(liveUser("evt_legacy_backfill_m_existing_v3", 10, "preserved"))
+
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        yield* seedMarker(v1MarkerName)
+        yield* seedMarker(v2MarkerName)
+        yield* dbInsertSessionMessage(existing)
+
+        const result = yield* SessionMessageBackfillService.ensureLegacySessionMessagesBackfilled(sessionID)
+        const rows = yield* readV2Rows()
+
+        expect(result.status).toBe("upgrade_unavailable")
+        if (result.status !== "upgrade_unavailable") throw new Error("expected upgrade_unavailable")
+        expect(statCount(result.stats.skipped, "legacy_source_unavailable")).toBe(1)
+        expect(rows).toHaveLength(1)
+        expect(rows[0]?.data).toEqual(existing.data)
+        expect(yield* markerExists(v3MarkerName)).toBe(false)
       }),
     )
   })

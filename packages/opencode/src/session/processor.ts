@@ -24,6 +24,7 @@ import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionEvent } from "@opencode-ai/core/session/event"
+import { TaskToolMetadata } from "@opencode-ai/core/session/task-tool-metadata"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ToolOutput } from "@opencode-ai/core/tool-output"
@@ -43,6 +44,7 @@ export interface Handle {
     toolCallID: string,
     update: (part: SessionLegacy.ToolPart) => SessionLegacy.ToolPart,
   ) => Effect.Effect<SessionLegacy.ToolPart | undefined>
+  readonly updateTaskToolMetadata: (toolCallID: string, metadata: unknown) => Effect.Effect<void>
   readonly completeToolCall: (
     toolCallID: string,
     output: {
@@ -211,6 +213,23 @@ export const layer = Layer.effect(
           sessionID: part.sessionID,
         }
         return part
+      })
+
+      const updateTaskToolMetadata = Effect.fn("SessionProcessor.updateTaskToolMetadata")(function* (
+        toolCallID: string,
+        metadata: unknown,
+      ) {
+        const match = yield* readToolCall(toolCallID)
+        if (!match || match.part.tool !== "task") return
+        const task = TaskToolMetadata.sanitize(metadata)
+        if (!task) return
+        yield* events.publish(SessionEvent.Tool.MetadataUpdated, {
+          sessionID: ctx.sessionID,
+          assistantMessageID: match.call.assistantMessageID,
+          callID: toolCallID,
+          task,
+          timestamp: DateTime.makeUnsafe(Date.now()),
+        })
       })
 
       const completeToolCall = Effect.fn("SessionProcessor.completeToolCall")(function* (
@@ -544,7 +563,10 @@ export const layer = Layer.effect(
               assistantMessageID,
               callID: value.id,
               title: output.title,
-              structured: output.metadata,
+              structured:
+                toolCall?.part.tool === "task"
+                  ? TaskToolMetadata.mergeIntoStructured({}, output.metadata)
+                  : output.metadata,
               content: [
                 new ToolOutput.TextContent({
                   type: "text",
@@ -920,6 +942,7 @@ export const layer = Layer.effect(
           return ensureV2AssistantMessage()
         },
         updateToolCall,
+        updateTaskToolMetadata,
         completeToolCall,
         process,
       } satisfies Handle

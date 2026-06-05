@@ -810,6 +810,76 @@ describe("SessionProjector", () => {
     )
   })
 
+  test("projects durable task metadata updates into running and completed task tools", async () => {
+    const dbPath = await makeDbPath()
+    await run(
+      dbPath,
+      Effect.gen(function* () {
+        yield* seedSession()
+        const events = yield* EventV2.Service
+        const assistantID = eventID("projector_task_metadata_assistant")
+        yield* events.publish(
+          SessionEvent.Step.Started,
+          { sessionID, timestamp: at(10), agent: "build", model },
+          { id: assistantID },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Input.Started,
+          { sessionID, assistantMessageID: assistantID, timestamp: at(20), callID: "task-call", name: "task" },
+          { id: eventID("projector_task_tool") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Called,
+          {
+            sessionID,
+            assistantMessageID: assistantID,
+            timestamp: at(30),
+            callID: "task-call",
+            tool: "task",
+            input: { prompt: "work" },
+            provider: { executed: true },
+          },
+          { id: eventID("projector_task_called") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.MetadataUpdated,
+          {
+            sessionID,
+            assistantMessageID: assistantID,
+            timestamp: at(40),
+            callID: "task-call",
+            task: { sessionID: SessionSchema.ID.make("ses_child_projector"), toolCalls: 1 },
+          },
+          { id: eventID("projector_task_metadata") },
+        )
+        yield* events.publish(
+          SessionEvent.Tool.Success,
+          {
+            sessionID,
+            assistantMessageID: assistantID,
+            timestamp: at(50),
+            callID: "task-call",
+            structured: { result: "kept" },
+            content: [new ToolOutput.TextContent({ type: "text", text: "done" })],
+            provider: { executed: true },
+          },
+          { id: eventID("projector_task_success") },
+        )
+
+        const assistant = (yield* readMessages())[0]
+        expect(assistant?.type).toBe("assistant")
+        if (assistant?.type !== "assistant") return
+        const tool = assistant.content[0]
+        expect(tool?.type).toBe("tool")
+        if (tool?.type !== "tool" || tool.state.status !== "completed") return
+        expect(tool.state.structured).toEqual({
+          result: "kept",
+          task: { sessionID: SessionSchema.ID.make("ses_child_projector"), toolCalls: 1 },
+        })
+      }),
+    )
+  })
+
   test("legacy settlement provider metadata is treated as result metadata", async () => {
     const dbPath = await makeDbPath()
     await run(

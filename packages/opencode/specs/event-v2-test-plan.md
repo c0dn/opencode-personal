@@ -154,6 +154,104 @@ bun --cwd packages/opencode test test/server/httpapi-event.test.ts
 bun --cwd packages/opencode typecheck
 ```
 
+## Prerequisite — Durable Task Tool Metadata
+
+This prerequisite must land before parent subagent task-tab discovery moves to
+v2. It adds a narrow durable/sync task metadata event and canonical structured
+task metadata on task tool rows. It does not approve parent task-tab v2 cutover,
+provider-visible metadata, arbitrary `ctx.metadata()` exposure, v2-to-legacy
+adapters, or synthetic legacy IDs.
+
+Likely files to add or extend:
+
+- `packages/core/test/session/projector.test.ts`
+- `packages/core/test/event-v2/registry.test.ts`
+- `packages/core/test/session/message-backfill.contract.test.ts`
+- `packages/opencode/test/v2/session-message-updater.test.ts`
+- `packages/opencode/test/tool/task.test.ts`
+- `packages/opencode/test/session/processor-effect.test.ts`
+- `packages/opencode/test/openapi/event-schemas.test.ts`
+- `packages/opencode/test/server/httpapi-event.test.ts`
+- generated SDK/OpenAPI snapshots for the new durable event schema
+
+Required unit tests:
+
+- register and encode/decode the new durable event, suggested as
+  `session.next.tool.metadata.updated`, with `sessionID`, optional
+  `assistantMessageID`, `callID`, nested `task`, and numeric timestamp fields
+- prove the event persists, replays, syncs, and exposes the same encoded schema as
+  other durable EventV2 definitions
+- assert `Tool.Called` is not reused to carry child-session task metadata
+- assert one shared sanitizer handles live `ctx.metadata()`, `TaskTool`
+  completion / `Tool.Success.structured`, and legacy backfill/remediation inputs
+- sanitizer whitelist cases: `sessionId`/`sessionID` canonicalize to
+  `sessionID`; `toolcalls`/`toolCalls`/`calls` canonicalize to finite
+  non-negative `toolCalls`; invalid/missing values are dropped as specified
+- sanitizer exclusion cases: `model`, `parentSessionId`, `jobId`, `background`,
+  arbitrary metadata, provider/private metadata, raw `msg_*`/`prt_*` IDs, and
+  unrecognized nested values never appear in canonical structured output
+- updater/projector merge `structured.task` into running, completed, and error
+  task tools without overwriting unrelated structured result fields
+- canonical structured shape is exactly nested under
+  `AssistantTool.state.structured.task = { sessionID, toolCalls? }`
+- live publishers include `assistantMessageID` whenever known, and missing-target
+  fallback is limited to one active/incomplete matching task tool; reused
+  `callID`, ambiguous completed/error updates, non-task tools, and missing tools
+  do not corrupt unrelated rows
+
+Required integration tests:
+
+- live task start/update path publishes the durable metadata event from sanitized
+  `ctx.metadata()` only when safe task metadata exists
+- `TaskTool` completion / `Tool.Success.structured` emits or preserves the same
+  sanitized `structured.task` shape and does not expose arbitrary metadata
+- replay from EventTable reconstructs the same task tool structured metadata for
+  running, completed, and error task tools
+- v2 display/bootstrap helpers can read the nested task metadata from canonical
+  rows, while provider model-context tests prove the metadata is ignored
+- SDK/OpenAPI/event-schema snapshots are regenerated and inspected for the new
+  durable public event schema
+
+Backfill/remediation tests:
+
+- already-v2-marked backfilled sessions with task tools are repaired through the
+  new task-metadata marker/remediation path, for example
+  `legacy-session-message-backfill/v3/<sessionID>`, when legacy source rows still
+  exist
+- remediation updates only migration-owned rows and preserves unrelated
+  structured result fields while adding/replacing `structured.task`
+- missing legacy source does not delete or rebuild backfilled rows blindly;
+  remediation reports missing-source/unsanitizable stats and leaves the session
+  without v2 task-tab discovery eligibility
+- raw legacy IDs and excluded metadata never appear in repaired canonical rows,
+  public v2 route payloads, SDK-shaped messages, or display transcript output
+
+Regression, failure-injection, and concurrency cases:
+
+- duplicate metadata events are idempotent and do not duplicate or corrupt tool
+  state
+- metadata events targeting missing/non-task/mismatched tool calls are no-ops or
+  typed failures according to the projector contract, without corrupting other
+  tools
+- concurrent tool settlement and metadata update preserves both task metadata and
+  unrelated completed/error structured result data
+- invalid sanitized input produces no durable task metadata update rather than an
+  empty public `task` object
+
+Commit gate examples:
+
+```bash
+bun --cwd packages/core test test/session/projector.test.ts test/event-v2/registry.test.ts test/session/message-backfill.contract.test.ts
+bun --cwd packages/core typecheck
+bun --cwd packages/opencode test test/v2/session-message-updater.test.ts test/tool/task.test.ts test/session/processor-effect.test.ts test/openapi/event-schemas.test.ts test/server/httpapi-event.test.ts
+bun --cwd packages/opencode typecheck
+./packages/sdk/js/script/build.ts
+bun --cwd packages/sdk/js typecheck
+```
+
+SDK/OpenAPI regeneration and SDK typecheck are mandatory for this prerequisite.
+Re-run plan-critic again before parent task-tab discovery cutover.
+
 ## Phase 3 — SessionMailbox Foundation
 
 Likely files to add or extend:

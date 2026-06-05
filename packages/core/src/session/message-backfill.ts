@@ -9,6 +9,7 @@ import { SessionLegacy } from "./legacy"
 import { SessionMessage } from "./message"
 import { AgentAttachment, FileAttachment, Source } from "./prompt"
 import { SessionSchema } from "./schema"
+import { TaskToolMetadata } from "./task-tool-metadata"
 
 const migrationVersion = "legacy-session-message-backfill/v1/mapper-subset"
 const backfillMessagePrefix = "evt_legacy_backfill_m_"
@@ -467,11 +468,18 @@ function mapToolAttachments(part: SessionLegacy.ToolPart, stats: Stats) {
 
 function mapToolStructured(part: SessionLegacy.ToolPart, stats: Stats) {
   if (part.state.status === "pending") return {}
+  const structured = isRecord(part.state.metadata?.structured) ? part.state.metadata.structured : {}
   if (isRecord(part.state.metadata?.structured)) {
     addStat(stats.mapped, part.type, "tool_structured_metadata")
-    return part.state.metadata.structured
   }
-  return {}
+  if (part.tool !== "task") return structured
+  const taskStructured = TaskToolMetadata.mergeIntoStructured(structured, part.state.metadata)
+  if ("task" in taskStructured) {
+    addStat(stats.mapped, part.type, "task_tool_metadata")
+    return taskStructured
+  }
+  if (part.state.metadata) addStat(stats.degraded, part.type, "task_tool_metadata_unsanitizable")
+  return taskStructured
 }
 
 function mapToolErrorContent(part: SessionLegacy.ToolPart, stats: Stats) {
@@ -486,7 +494,10 @@ function mapToolErrorContent(part: SessionLegacy.ToolPart, stats: Stats) {
 
 function degradeToolStateMetadata(part: SessionLegacy.ToolPart, stats: Stats) {
   if (part.state.status === "pending" || !part.state.metadata) return
-  const unsupportedKeys = Object.keys(part.state.metadata).filter((key) => key !== "structured" && !(part.state.status === "error" && key === "output"))
+  const supportedTaskKeys = part.tool === "task" ? new Set(["sessionId", "sessionID", "toolcalls", "toolCalls", "calls"]) : new Set()
+  const unsupportedKeys = Object.keys(part.state.metadata).filter(
+    (key) => key !== "structured" && !(part.state.status === "error" && key === "output") && !supportedTaskKeys.has(key),
+  )
   if (unsupportedKeys.length > 0) addStat(stats.degraded, part.type, "tool_state_metadata_schema_missing")
 }
 

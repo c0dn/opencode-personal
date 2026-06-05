@@ -69,6 +69,66 @@ Parentage validation rules for current and later mapper slices:
 - Skips and degradations must be visible in mapper stats. User-owned/orphaned patch, standalone snapshot metadata, and non-user/orphan subtask are unsupported parentage cases, not silent omissions.
 - V2 marker/remediation is implemented for schema-completion mapper changes. Future mapper-output changes that add newly representable legacy data must either use the current v2 remediation path or introduce a new marker version with equivalent repair semantics.
 
+## Durable Task Tool Metadata Prerequisite
+
+Parent subagent task-tab discovery cannot move from legacy transcript reads to v2 display/bootstrap until task-tool child-session metadata is represented durably in canonical v2 rows. This is a narrow prerequisite for display/bootstrap state only; it is not a provider-visible model-context feature, a general metadata exposure mechanism, a v2-to-legacy adapter, or a synthetic legacy-ID policy.
+
+### Canonical shape
+
+Task tool metadata must live under the nested structured key:
+
+```ts
+AssistantTool.state.structured.task = {
+  sessionID: string
+  toolCalls?: number
+}
+```
+
+The `task` wrapper is required so task metadata cannot collide with ordinary tool result structured data. Updaters and projectors must merge this nested `task` object into running, completed, and error task tool `state.structured` values without overwriting unrelated structured result fields. If a completed/error tool already has other structured output, the merge preserves those fields and replaces only `structured.task` with the sanitized task metadata.
+
+### Durable event
+
+Use a new durable/sync EventV2 event for task metadata updates. Do not reuse `Tool.Called`, because child-session metadata can become available or be repaired independently of the call-start event and must be replayable without broadening call input metadata.
+
+Suggested event name: `session.next.tool.metadata.updated`.
+
+Required event data:
+
+- `sessionID`: parent session that owns the assistant/tool row.
+- `assistantMessageID?`: canonical v2 assistant message ID when known; optional only for compatibility with live windows that can still target by call ID.
+- `callID`: tool call ID for the task tool to update.
+- `task`: unwrapped sanitized task metadata `{ sessionID, toolCalls? }`.
+- `timestamp`: numeric timestamp used for durable replay/sync ordering.
+
+The event is narrow to safe task-tool metadata used for canonical display/bootstrap. It must not be included in provider-visible model context, must not expose arbitrary `ctx.metadata()` values, and must not carry raw legacy message/part IDs, private provenance, job IDs, parent-session IDs, background flags, model names, or unreviewed tool metadata. The updater/projector writes the event data as `state.structured = { ...state.structured, task: event.data.task }`; it must not produce `structured.task.task`.
+
+Live publishers must include `assistantMessageID` whenever it is known. Missing-target fallback is allowed only for one active/incomplete matching task tool in the current assistant. Completed or error task tools must not be updated without an explicit assistant target if more than one matching `callID` could exist. Metadata events for missing, non-task, or ambiguous tools are no-ops or typed failures according to the projector/updater contract; they must not update a different tool by `callID` alone.
+
+### Shared sanitizer
+
+There must be one sanitizer used by all three producers/remediation paths:
+
+1. live `ctx.metadata()` projection before publishing/updating v2 task metadata,
+2. `TaskTool` completion / `Tool.Success.structured` handling, and
+3. legacy backfill/remediation when existing task tool rows are repaired.
+
+The sanitizer whitelist is intentionally small:
+
+- Accept `sessionID` from legacy/live `sessionId` or `sessionID`, canonicalize it to output key `sessionID`, and keep it only when it is a valid canonical session identifier for display/bootstrap.
+- Accept `toolCalls` from `toolcalls`, `toolCalls`, or `calls`; keep it only when it is a finite non-negative number. Normalize the output key to `toolCalls`.
+- Drop `toolCalls` when missing or invalid; drop the entire `task` object when no valid `sessionID` remains.
+- Exclude `model`, `parentSessionId`, `jobId`, `background`, arbitrary metadata keys, provider/private metadata, raw `msg_*`/`prt_*` legacy IDs, and any unrecognized nested values from public/canonical structured output.
+
+### Backfill, markers, and remediation
+
+Backfill and remediation must use a newer task-metadata marker version, for example `legacy-session-message-backfill/v3/<sessionID>`, or an equivalent explicit change to the existing marker fast path. A session marked only by an older backfill version may contain task tools lacking `structured.task`; the task-metadata remediation path must still run, detect eligible migration-owned task rows, and update them in place when the legacy source metadata can be sanitized. The current v2-marker fast path must not skip this prerequisite.
+
+Legacy task metadata source policy is precise: only `part.tool === "task"` is eligible, and only running/completed/error task states are considered. Candidate metadata comes from legacy `part.state.metadata` top-level keys and may also accept an existing nested `part.state.metadata.structured.task` only if it already satisfies the canonical sanitizer. The mapper/remediator must never copy the full legacy metadata object into v2 structured output.
+
+If the legacy source rows are gone, remediation must not blindly delete or rebuild migration-owned rows. Preserve existing rows, report remediation stats for missing source or missing safe task metadata, and leave parent task-tab v2 discovery blocked for that session until a safe canonical source exists.
+
+Parent task-tab discovery v2 cutover remains a later slice. This prerequisite is complete only after the durable event, updater/projector merge policy, shared sanitizer, live/completion/backfill use sites, marker/remediation behavior, and schema generation requirements are implemented and validated. Because this adds a durable public EventV2 schema, OpenAPI/SDK event schema regeneration and SDK typecheck are mandatory for the implementation slice.
+
 ## Mixed Session Cutoff and Live Races
 
 For sessions that already contain non-backfill v2 rows, compute the earliest non-backfill v2 row cutoff using the exact v2 row sort key `(time_created, id)` for read ordering, but do not use lexical ID ordering to decide old-vs-live at an equal timestamp in v1. Normal eligible backfill rows are only legacy candidates with `legacy_time_created < cutoff_time_created`. If any legacy candidate has `legacy_time_created == cutoff_time_created` and cannot be proven to correspond to an existing migration-owned row, the backfill must return `mixed_cutoff_ambiguous`, write no completion marker, and leave the session retryable. Implementations may choose to write no rows once ambiguity is detected; if older rows were written before detecting ambiguity, the transaction must roll back. Equal-boundary skip-with-marker is not allowed in v1.
@@ -155,6 +215,7 @@ After cutover there is no legacy fallback: missing readiness returns the surface
 | IDs | Include canonical v2 session/message/content/call IDs needed for references. Never include raw `msg_*`, `prt_*`, source hashes, or private migration provenance. | Include canonical v2 IDs needed for stable rendering/replay references. Never include raw legacy IDs or legacy cursors. |
 | Ordering | Include deterministic transcript order derived from `(time.created, id)` or an explicit canonical order list. | Include/render in canonical `(time.created, id)` order with stable content order inside messages. |
 | `taskRequests` | Include redacted user request metadata (`prompt`, `description`, `agent`, optional `model`/`command`) only when intentionally public. Do not include lifecycle/private child-session state. | Render as local user-side task requests; lifecycle links remain hidden unless a later display policy approves them. |
+| Task tool metadata | Exclude by default from public payloads unless a later public schema explicitly approves the nested `structured.task` shape. Never include arbitrary task metadata, model, parent session, job/background fields, or raw legacy IDs. | Display/bootstrap may use only sanitized `AssistantTool.state.structured.task = { sessionID, toolCalls? }` for task tools. The nested shape is display/bootstrap metadata and must not become provider context. |
 | `AssistantPatch` | Include assistant-owned patch summary (`hash`, file list) only when public export policy approves patch metadata. No target mutation authority. | Render assistant-owned patch content for display/diff/replay fixtures; destructive target behavior remains blocked. |
 | Retries | Include redacted retry attempt/time and public error category/message when useful. No provider secrets or raw request payloads. | Display retry history and rich local diagnostics that are safe for local UI; still no raw legacy IDs. |
 | Rich assistant errors | Include typed public error category/message and safe status metadata only. Redact provider secrets, credentials, stack traces, and raw responses. | Display local diagnostic category/message and safe metadata; raw provider responses remain hidden unless a later local-debug policy approves them. |
@@ -187,6 +248,7 @@ This table records current blockers only. Historical findings for mixed cutoff, 
 | V2 import | Deep untrusted schema validation, transaction/collision/write/import semantics, and old-payload rejection policy beyond the shallow validator are not complete | Define typed import validation and write semantics, reject old/unknown payloads intentionally, then add import round-trip and failure tests | CLI/import owner |
 | Share | V2 share redaction, payload version, and network sync policy/tests are not complete | Define share-specific redaction/version/network sync policy and add tests before switching share output | Share owner |
 | ACP/TUI/replay/display consumers | Per-consumer display fixtures, readiness behavior, and error gates are not complete | Add display/replay fixtures and typed not-ready/unsupported behavior for each consumer before migration | ACP/UI/CLI owners |
+| Parent subagent task-tab discovery | Canonical v2 rows do not yet durably preserve sanitized child task session metadata for running/completed/error task tools | First implement the durable task metadata event, shared sanitizer, updater/projector merge, and v2 marker/remediation tests; only then plan the parent discovery cutover | CLI/runtime owner |
 | Generated public schema/SDK/OpenAPI | No generated public HTTP/API schema has changed for the U7 export CLI path | Generate/update only when public HTTP/API schemas change; current export-only CLI payload path does not require SDK/OpenAPI regeneration | API/SDK owner |
 | Old legacy routes/readers | Internal consumers still depend on old wire/readers or transitional oracle tests | Keep old routes/readers until internal consumers stop depending on them or become explicitly unsupported | API/session owner |
 | Prompt loop control | U5 production loop-control remains NO-GO: v2 exit authority can skip pending legacy compaction work, interrupted orphan tool exit is not representable in v2 yet, and loop return/write ownership still depends on legacy shape | Do not replace production loop decisions until pending compaction input, orphan-tool policy, and v2-native return/write ownership are resolved | Prompt/session owner |
@@ -203,6 +265,7 @@ This table records current blockers only. Historical findings for mixed cutoff, 
 | R4 processor doom-loop | Processor in-memory tool-call window or canonical v2 live events | Existing runtime writes remain until v2 writer policy | No legacy part IDs in helper state; call identity uses canonical/event/runtime IDs | Gate/skip detection rather than stale DB legacy read | Proven live-state helper with cancellation/interruption and provider-tool tests |
 | R5 API routes | Canonical v2 route reads through `SessionV2.messages` | Legacy routes may continue old reads while internal consumers still use them | No v2-to-legacy route adapter; old IDs stay only on old routes | Old routes removed or explicit unsupported only at final route slice | Internal SDK/CLI/share/ACP callers stop using old wire |
 | R6 payload/display consumers | Canonical v2 payload/display helpers | Legacy import/export/share/display may remain until each group migrates | Payloads use canonical IDs; old payloads are accepted/rejected/migrated only by explicit version policy | Versioned accept/reject/migrate or missing-source error | Policy-first tests plus one consumer group migrated |
+| R6a parent task-tab discovery prerequisite | Canonical v2 rows plus sanitized task tool metadata from the durable update event | Legacy task discovery may remain until `structured.task` is available for parent task tools | Only canonical `sessionID` and finite non-negative `toolCalls` may cross the boundary; no legacy IDs or arbitrary metadata | Missing/unsanitizable task metadata means no v2 task-tab discovery for that tool/session, not legacy emulation | Durable event, sanitizer, updater/projector merge, marker/remediation, and schema tests complete |
 | R7 destructive mutations | Canonical v2 snapshots, assistant patches, and target IDs | Legacy destructive behavior remains until parity proven | Mutations target canonical IDs only after cutover; no legacy part-ID operations | Unsupported-data gate for standalone snapshots and missing target proof | Destructive parity, rollback, and target-ID tests |
 | R8 stop legacy | Canonical v2 readers only | None after cutover | Legacy IDs cannot be required by any runtime/public path | Final stop-legacy gate fails on any legacy writer/reader dependency | All boundaries above removed and transitional oracles retired |
 
@@ -217,8 +280,9 @@ This R-series sequence records the earlier remaining-work decomposition. Several
 5. **R4 — processor doom-loop live state.** Design/test a v2/live-state helper using processor current state or canonical v2 events. Cover repeated identical tool calls, provider-executed tools, pending/running/completed transitions, cancellation, and interruption. Do not switch to stale DB legacy reads.
 6. **R5 — public API route policy.** Keep old routes while internal SDK/CLI/share/ACP consumers still use old wire. Old routes are removed or unsupported only after internal consumers stop using them; no v2-to-legacy emulation.
 7. **R6 — payload/display policy-first slices.** Export-only v2 payload generation is complete through U7e. Import, share, CLI session-data/stats/replay, ACP/TUI/replay, and generated public schemas remain blocked on their own policy/test gates.
-8. **R7 — destructive/session mutation gate.** Define patch target IDs, canonical ID operations, standalone snapshot unsupported-data gate, and mutation rollback policy. Add parity tests before summary/revert/remove/update/fork production changes.
-9. **R8 — stop legacy writers/readers last.** Stop legacy writes/readers only after all consumers have v2 semantic coverage and materialization/remediation verification. Retire transitional oracle tests at this final stop-legacy gate.
+8. **R6a — parent task-tab metadata prerequisite.** Define and implement durable sanitized task metadata before parent task-tab discovery can stop using legacy transcript discovery. Parent discovery cutover itself is a later critic-gated slice.
+9. **R7 — destructive/session mutation gate.** Define patch target IDs, canonical ID operations, standalone snapshot unsupported-data gate, and mutation rollback policy. Add parity tests before summary/revert/remove/update/fork production changes.
+10. **R8 — stop legacy writers/readers last.** Stop legacy writes/readers only after all consumers have v2 semantic coverage and materialization/remediation verification. Retire transitional oracle tests at this final stop-legacy gate.
 
 What remains: U7 export-only is complete, but other consumer source changes are not approved by this checkpoint. Runtime patch events still need target-ID projection; destructive revert behavior must prove parity; legacy HTTP/wire surfaces need deletion/versioning policy, not adapter identity policy; import/share/ACP/TUI/replay and generated schema work need their own v2 policies/tests; high-risk prompt loop-control and stop-legacy paths remain blocked by the table above.
 

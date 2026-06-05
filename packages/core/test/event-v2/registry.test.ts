@@ -24,6 +24,7 @@ const sessionNextTypes = [
   "session.next.tool.input.ended",
   "session.next.tool.called",
   "session.next.tool.progress",
+  "session.next.tool.metadata.updated",
   "session.next.tool.success",
   "session.next.tool.failed",
   "session.next.retried",

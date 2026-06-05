@@ -213,6 +213,7 @@ function fake(
     outputText: () => outputText,
     ensureAssistantMessageID: () => Effect.succeed(undefined),
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
+    updateTaskToolMetadata: Effect.fn("TestSessionProcessor.updateTaskToolMetadata")(() => Effect.void),
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
     process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
   } satisfies SessionProcessorModule.SessionProcessor.Handle
@@ -240,6 +241,7 @@ const divergentSummaryLayer = Layer.effect(
           outputText: () => "current processor summary",
           ensureAssistantMessageID: () => Effect.succeed(undefined),
           updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
+          updateTaskToolMetadata: Effect.fn("TestSessionProcessor.updateTaskToolMetadata")(() => Effect.void),
           completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
           process: Effect.fn("TestSessionProcessor.process")(function* () {
             yield* ssn.updatePart({

@@ -29,7 +29,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   session: Session.Info
   processor: Pick<
     SessionProcessor.Handle,
-    "message" | "ensureAssistantMessageID" | "updateToolCall" | "completeToolCall"
+    "message" | "ensureAssistantMessageID" | "updateToolCall" | "updateTaskToolMetadata" | "completeToolCall"
   >
   bypassAgentCheck: boolean
   messages: SessionLegacy.WithParts[]
@@ -53,18 +53,21 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     agent: input.agent.name,
     messages: input.messages,
     metadata: (val) =>
-      input.processor.updateToolCall(options.toolCallId, (match) => {
-        if (!["running", "pending"].includes(match.state.status)) return match
-        return {
-          ...match,
-          state: {
-            title: val.title,
-            metadata: val.metadata,
-            status: "running",
-            input: args,
-            time: { start: Date.now() },
-          },
-        }
+      Effect.gen(function* () {
+        yield* input.processor.updateToolCall(options.toolCallId, (match) => {
+          if (!["running", "pending"].includes(match.state.status)) return match
+          return {
+            ...match,
+            state: {
+              title: val.title,
+              metadata: val.metadata,
+              status: "running",
+              input: args,
+              time: { start: Date.now() },
+            },
+          }
+        })
+        yield* input.processor.updateTaskToolMetadata(options.toolCallId, val.metadata)
       }),
     ask: (req) =>
       Effect.gen(function* () {

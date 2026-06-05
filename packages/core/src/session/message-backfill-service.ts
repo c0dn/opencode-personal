@@ -12,6 +12,7 @@ import { SessionSchema } from "./schema"
 
 export const v1MarkerPrefix = "legacy-session-message-backfill/v1/"
 export const v2MarkerPrefix = "legacy-session-message-backfill/v2/"
+export const v3MarkerPrefix = "legacy-session-message-backfill/v3/"
 // Reserved prefix for migration-owned rows; there is no private provenance column
 // to distinguish safe repair targets from live projector/API rows.
 const backfillIDPrefix = "evt_legacy_backfill_"
@@ -31,14 +32,15 @@ export const ensureLegacySessionMessagesBackfilled = Effect.fn("SessionMessageBa
   function* (sessionID: SessionSchema.ID | string) {
     const { db } = yield* Database.Service
     const marker = markerNames(sessionID)
-    if (yield* hasMarker(db, marker.v2)) return { status: "already_completed" } as Result
+    if (yield* hasMarker(db, marker.v3)) return { status: "already_completed" } as Result
 
     return yield* db
       .transaction(
         (tx) =>
           Effect.gen(function* () {
-            if (yield* hasMarker(tx, marker.v2)) return { status: "already_completed" } as Result
+            if (yield* hasMarker(tx, marker.v3)) return { status: "already_completed" } as Result
             const hasV1Marker = yield* hasMarker(tx, marker.v1)
+            const hasV2Marker = yield* hasMarker(tx, marker.v2)
 
             const cutoff = yield* tx
               .select({ id: SessionMessageTable.id, time_created: SessionMessageTable.time_created })
@@ -54,12 +56,23 @@ export const ensureLegacySessionMessagesBackfilled = Effect.fn("SessionMessageBa
               .get()
 
             const legacyMessages = yield* hydrateLegacyMessages(sessionID, tx)
-            if (hasV1Marker && legacyMessages.length === 0) {
+            if ((hasV1Marker || hasV2Marker) && legacyMessages.length === 0) {
               return {
                 status: "upgrade_unavailable",
                 stats: { mapped: [], degraded: [], skipped: [{ type: "backfill", reason: "legacy_source_unavailable", count: 1 }] },
                 inserted: 0,
                 repaired: 0,
+              } as Result
+            }
+            if (hasV2Marker) {
+              const mapped = SessionMessageBackfill.mapLegacyMessages(legacyMessages, { sessionID })
+              const repaired = yield* repairMigrationOwnedRows(tx, sessionID, mapped.messages.map((message) => targetRow(sessionID, message)))
+              yield* writeMarker(tx, marker.v3)
+              return {
+                status: "completed",
+                stats: mapped.stats,
+                inserted: 0,
+                repaired,
               } as Result
             }
             if (cutoff && legacyMessages.some((message) => message.info.time.created === cutoff.time_created)) {
@@ -105,7 +118,10 @@ export const ensureLegacySessionMessagesBackfilled = Effect.fn("SessionMessageBa
             }
             if (!hasV1Marker) yield* writeMarker(tx, marker.v1)
             const status = hasDeferredV2Inputs(mapped.stats) ? "upgrade_pending" : "completed"
-            if (status === "completed") yield* writeMarker(tx, marker.v2)
+            if (status === "completed") {
+              yield* writeMarker(tx, marker.v2)
+              yield* writeMarker(tx, marker.v3)
+            }
             return {
               status,
               stats: mapped.stats,
@@ -147,7 +163,7 @@ function logResult(sessionID: SessionSchema.ID | string, result: Result) {
 }
 
 function markerNames(sessionID: SessionSchema.ID | string) {
-  return { v1: `${v1MarkerPrefix}${sessionID}`, v2: `${v2MarkerPrefix}${sessionID}` }
+  return { v1: `${v1MarkerPrefix}${sessionID}`, v2: `${v2MarkerPrefix}${sessionID}`, v3: `${v3MarkerPrefix}${sessionID}` }
 }
 
 function hasMarker(db: Transaction | Database.Interface["db"], marker: string) {
@@ -173,6 +189,38 @@ function rowMatchesTarget(row: typeof SessionMessageTable.$inferSelect, targets:
     row.time_created === target.time_created &&
     JSON.stringify(row.data) === JSON.stringify(target.data)
   )
+}
+
+function repairMigrationOwnedRows(
+  db: Transaction,
+  sessionID: SessionSchema.ID | string,
+  targets: (typeof SessionMessageTable.$inferInsert)[],
+) {
+  return Effect.gen(function* () {
+    const rows = yield* db
+      .select()
+      .from(SessionMessageTable)
+      .where(
+        and(
+          eq(SessionMessageTable.session_id, SessionSchema.ID.make(sessionID)),
+          sql`${SessionMessageTable.id} LIKE ${`${backfillIDPrefix}%`}`,
+        ),
+      )
+      .all()
+    const repairable = rows.flatMap((row) => {
+      const target = targets.find((candidate) => candidate.id === row.id)
+      if (!target || rowMatchesTarget(row, targets)) return []
+      return [target]
+    })
+    for (const target of repairable) {
+      yield* db
+        .update(SessionMessageTable)
+        .set({ data: target.data, type: target.type, time_created: target.time_created })
+        .where(and(eq(SessionMessageTable.id, target.id), eq(SessionMessageTable.session_id, SessionSchema.ID.make(sessionID))))
+        .run()
+    }
+    return repairable.length
+  })
 }
 
 export const pendingUpgradeReasons = [

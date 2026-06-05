@@ -614,3 +614,145 @@ test("tool failed terminalizes pending tools without creating or overwriting ter
     },
   })
 })
+
+test("task metadata event merges canonical task metadata without nesting or overwriting result fields", () => {
+  const assistantID = eventID("task_metadata_assistant")
+  const state = applyEvents([
+    {
+      id: assistantID,
+      type: "session.next.step.started",
+      data: { sessionID, timestamp: DateTime.makeUnsafe(1), agent: "build", model },
+    },
+    {
+      id: eventID("task_metadata_tool"),
+      type: "session.next.tool.input.started",
+      data: { sessionID, assistantMessageID: assistantID, timestamp: DateTime.makeUnsafe(2), callID: "task-call", name: "task" },
+    },
+    {
+      id: eventID("task_metadata_called"),
+      type: "session.next.tool.called",
+      data: {
+        sessionID,
+        assistantMessageID: assistantID,
+        timestamp: DateTime.makeUnsafe(3),
+        callID: "task-call",
+        tool: "task",
+        input: { prompt: "do work" },
+        provider: { executed: true },
+      },
+    },
+    {
+      id: eventID("task_metadata_updated"),
+      type: "session.next.tool.metadata.updated",
+      data: {
+        sessionID,
+        assistantMessageID: assistantID,
+        timestamp: DateTime.makeUnsafe(4),
+        callID: "task-call",
+        task: { sessionID: SessionID.make("ses_child"), toolCalls: 2 },
+      },
+    },
+    {
+      id: eventID("task_metadata_success"),
+      type: "session.next.tool.success",
+      data: {
+        sessionID,
+        assistantMessageID: assistantID,
+        timestamp: DateTime.makeUnsafe(5),
+        callID: "task-call",
+        structured: { result: "kept" },
+        content: [{ type: "text", text: "done" }],
+        provider: { executed: true },
+      },
+    },
+  ] satisfies SessionEvent.Event[])
+
+  const assistant = state.messages[0]
+  expect(assistant?.type).toBe("assistant")
+  if (assistant?.type !== "assistant") return
+  const tool = assistant.content[0]
+  expect(tool?.type).toBe("tool")
+  if (tool?.type !== "tool" || tool.state.status !== "completed") return
+  expect(tool.state.structured).toEqual({ result: "kept", task: { sessionID: SessionID.make("ses_child"), toolCalls: 2 } })
+  expect(tool.state.structured).not.toHaveProperty("task.task")
+})
+
+test("task metadata events without a safe target do not corrupt other tools", () => {
+  const state = applyEvents([
+    {
+      id: eventID("metadata_ambiguous_assistant"),
+      type: "session.next.step.started",
+      data: { sessionID, timestamp: DateTime.makeUnsafe(1), agent: "build", model },
+    },
+    {
+      id: eventID("metadata_non_task"),
+      type: "session.next.tool.input.started",
+      data: { sessionID, timestamp: DateTime.makeUnsafe(2), callID: "same-call", name: "bash" },
+    },
+    {
+      id: eventID("metadata_non_task_called"),
+      type: "session.next.tool.called",
+      data: {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(3),
+        callID: "same-call",
+        tool: "bash",
+        input: {},
+        provider: { executed: true },
+      },
+    },
+    {
+      id: eventID("metadata_task"),
+      type: "session.next.tool.input.started",
+      data: { sessionID, timestamp: DateTime.makeUnsafe(4), callID: "same-call", name: "task" },
+    },
+    {
+      id: eventID("metadata_task_called"),
+      type: "session.next.tool.called",
+      data: {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(5),
+        callID: "same-call",
+        tool: "task",
+        input: {},
+        provider: { executed: true },
+      },
+    },
+    {
+      id: eventID("metadata_task_second"),
+      type: "session.next.tool.input.started",
+      data: { sessionID, timestamp: DateTime.makeUnsafe(6), callID: "same-call", name: "task" },
+    },
+    {
+      id: eventID("metadata_task_second_called"),
+      type: "session.next.tool.called",
+      data: {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(7),
+        callID: "same-call",
+        tool: "task",
+        input: {},
+        provider: { executed: true },
+      },
+    },
+    {
+      id: eventID("metadata_ambiguous_update"),
+      type: "session.next.tool.metadata.updated",
+      data: {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(8),
+        callID: "same-call",
+        task: { sessionID: SessionID.make("ses_child") },
+      },
+    },
+  ] satisfies SessionEvent.Event[])
+
+  const assistant = state.messages[0]
+  expect(assistant?.type).toBe("assistant")
+  if (assistant?.type !== "assistant") return
+  expect(assistant.content).toHaveLength(3)
+  for (const tool of assistant.content) {
+    expect(tool.type).toBe("tool")
+    if (tool.type === "tool" && tool.state.status === "running") expect(tool.state.structured).toEqual({})
+  }
+})

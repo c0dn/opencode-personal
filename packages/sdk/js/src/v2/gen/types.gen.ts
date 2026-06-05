@@ -38,6 +38,7 @@ export type Event =
   | EventSessionNextToolInputEnded
   | EventSessionNextToolCalled
   | EventSessionNextToolProgress
+  | EventSessionNextToolMetadataUpdated
   | EventSessionNextToolSuccess
   | EventSessionNextToolFailed
   | EventSessionNextRetried
@@ -617,6 +618,8 @@ export type Part =
   | RetryPart
   | CompactionPart
 
+export type PermissionToolMessageId = string | string
+
 export type QuestionOption = {
   /**
    * Display text (1-5 words, concise)
@@ -1083,6 +1086,17 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.tool.metadata.updated"
+        properties: {
+          timestamp: number
+          sessionID: string
+          assistantMessageID?: string
+          callID: string
+          task: SessionTaskToolMetadata
+        }
+      }
+    | {
+        id: string
         type: "session.next.tool.success"
         properties: {
           timestamp: number
@@ -1253,7 +1267,7 @@ export type GlobalEvent = {
           }
           always: Array<string>
           tool?: {
-            messageID: string
+            messageID: PermissionToolMessageId
             callID: string
           }
         }
@@ -1610,6 +1624,7 @@ export type GlobalEvent = {
     | SyncEventSessionNextToolInputStarted
     | SyncEventSessionNextToolInputEnded
     | SyncEventSessionNextToolCalled
+    | SyncEventSessionNextToolMetadataUpdated
     | SyncEventSessionNextToolSuccess
     | SyncEventSessionNextToolFailed
     | SyncEventSessionNextRetried
@@ -2491,7 +2506,7 @@ export type PermissionRequest = {
   }
   always: Array<string>
   tool?: {
-    messageID: string
+    messageID: PermissionToolMessageId
     callID: string
   }
 }
@@ -3002,6 +3017,11 @@ export type ToolFileContent = {
   name?: string
 }
 
+export type SessionTaskToolMetadata = {
+  sessionID: string
+  toolCalls?: number
+}
+
 export type SessionNextRetryError = {
   message: string
   statusCode?: number
@@ -3451,6 +3471,21 @@ export type SyncEventSessionNextToolCalled = {
         [key: string]: unknown
       }
     }
+  }
+}
+
+export type SyncEventSessionNextToolMetadataUpdated = {
+  type: "sync"
+  name: "session.next.tool.metadata.updated.1"
+  id: string
+  seq: number
+  aggregateID: "sessionID"
+  data: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID?: string
+    callID: string
+    task: SessionTaskToolMetadata
   }
 }
 
@@ -4500,6 +4535,18 @@ export type EventSessionNextToolProgress = {
   }
 }
 
+export type EventSessionNextToolMetadataUpdated = {
+  id: string
+  type: "session.next.tool.metadata.updated"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID?: string
+    callID: string
+    task: SessionTaskToolMetadata
+  }
+}
+
 export type EventSessionNextToolSuccess = {
   id: string
   type: "session.next.tool.success"
@@ -4687,7 +4734,7 @@ export type EventPermissionAsked = {
     }
     always: Array<string>
     tool?: {
-      messageID: string
+      messageID: PermissionToolMessageId
       callID: string
     }
   }

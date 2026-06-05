@@ -3,6 +3,7 @@ import { DateTime, Effect, Schema } from "effect"
 import { ToolOutput } from "../tool-output"
 import { SessionEvent } from "./event"
 import { SessionMessage } from "./message"
+import { TaskToolMetadata } from "./task-tool-metadata"
 
 const decodeToolContent = Schema.decodeUnknownSync(ToolOutput.Content)
 
@@ -160,6 +161,25 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
     assistant?.content.findLast(
       (item): item is DraftTool => item.type === "tool" && (callID === undefined || item.callID === callID),
     )
+
+  const taskMetadataTarget = (assistant: DraftAssistant, callID: string, allowTerminal: boolean) => {
+    const matches = assistant.content.filter(
+      (item): item is DraftTool =>
+        item.type === "tool" &&
+        item.callID === callID &&
+        item.name === "task" &&
+        item.state.status !== "pending" &&
+        (allowTerminal || item.state.status === "running"),
+    )
+    return matches.length === 1 ? matches[0] : undefined
+  }
+
+  const taskStructured = (toolName: string, structured: Record<string, unknown>, existing: Record<string, unknown>) => {
+    if (toolName !== "task") return structured
+    const incoming = TaskToolMetadata.mergeIntoStructured(structured, structured)
+    if ("task" in incoming) return incoming
+    return TaskToolMetadata.mergeIntoStructured(incoming, existing)
+  }
 
   const latestText = (assistant: DraftAssistant | undefined) =>
     assistant?.content.findLast((item): item is DraftText => item.type === "text")
@@ -443,6 +463,20 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }
         })
       },
+      "session.next.tool.metadata.updated": (event) => {
+        return Effect.gen(function* () {
+          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
+          if (!currentAssistant) return
+          yield* adapter.updateAssistant(
+            produce(currentAssistant, (draft) => {
+              const match = taskMetadataTarget(draft, event.data.callID, event.data.assistantMessageID !== undefined)
+              if (!match) return
+              if (match.state.status === "pending") return
+              match.state.structured = TaskToolMetadata.mergeIntoStructured(match.state.structured, event.data.task)
+            }),
+          )
+        })
+      },
       "session.next.tool.success": (event) => {
         return Effect.gen(function* () {
           const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
@@ -457,7 +491,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
                   match.state = new SessionMessage.ToolStateCompleted({
                     status: "completed",
                     input: match.state.input,
-                    structured: event.data.structured,
+                    structured: taskStructured(match.name, event.data.structured, match.state.structured),
                     content: event.data.content.map((item) => decodeToolContent(item)),
                   }) as DraftTool["state"]
                 }
@@ -480,7 +514,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
                     status: "error",
                     error: event.data.error,
                     input: failedInput(match),
-                    structured: failedStructured(match),
+                    structured: taskStructured(match.name, failedStructured(match), failedStructured(match)),
                     content: failedContent(match),
                   }) as DraftTool["state"]
                 }
