@@ -59,9 +59,7 @@ const categories = {
   },
   MessageV2LegacyEvents: {
     pattern: /\bMessageV2\.Event\.(?:Updated|Removed|PartUpdated|PartRemoved)\b/,
-    allowed: [
-      "packages/opencode/src/cli/cmd/github.ts",
-    ],
+    allowed: [],
   },
   SessionLegacyReaders: {
     pattern:

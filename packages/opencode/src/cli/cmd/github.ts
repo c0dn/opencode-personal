@@ -27,9 +27,9 @@ import { Session } from "@/session/session"
 import type { SessionID } from "../../session/schema"
 import { MessageID, PartID } from "../../session/schema"
 import { Provider } from "@/provider/provider"
-import { MessageV2 } from "../../session/message-v2"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
+import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionPrompt } from "@/session/prompt"
 import { Git } from "@/git"
 import { setTimeout as sleep } from "node:timers/promises"
@@ -154,6 +154,35 @@ const SUPPORTED_EVENTS = [...USER_EVENTS, ...REPO_EVENTS] as const
 type UserEvent = (typeof USER_EVENTS)[number]
 type RepoEvent = (typeof REPO_EVENTS)[number]
 
+const TOOL: Record<string, [string, string]> = {
+  todowrite: ["Todo", UI.Style.TEXT_WARNING_BOLD],
+  bash: ["Shell", UI.Style.TEXT_DANGER_BOLD],
+  edit: ["Edit", UI.Style.TEXT_SUCCESS_BOLD],
+  glob: ["Glob", UI.Style.TEXT_INFO_BOLD],
+  grep: ["Grep", UI.Style.TEXT_INFO_BOLD],
+  list: ["List", UI.Style.TEXT_INFO_BOLD],
+  read: ["Read", UI.Style.TEXT_HIGHLIGHT_BOLD],
+  write: ["Write", UI.Style.TEXT_SUCCESS_BOLD],
+  websearch: ["Search", UI.Style.TEXT_DIM_BOLD],
+}
+
+export type GitHubSessionEventPayload = Pick<EventV2.Payload, "type" | "data">
+type GitHubToolCall = {
+  tool: string
+  input: Record<string, unknown>
+}
+export type GitHubSessionEventDisplayAction =
+  | {
+      type: "text"
+      text: string
+    }
+  | {
+      type: "tool"
+      color: string
+      tool: string
+      title: string
+    }
+
 export { parseGitHubRemote }
 
 /**
@@ -181,6 +210,46 @@ export function formatPromptTooLargeError(files: { filename: string; content: st
       ? `\n\nFiles in prompt:\n${files.map((f) => `  - ${f.filename} (${((f.content.length * 0.75) / 1024).toFixed(0)} KB)`).join("\n")}`
       : ""
   return `PROMPT_TOO_LARGE: The prompt exceeds the model's context limit.${fileDetails}`
+}
+
+export function createGitHubSessionEventDisplay(sessionID: SessionID) {
+  const toolCalls = new Map<string, GitHubToolCall>()
+
+  return (evt: GitHubSessionEventPayload): GitHubSessionEventDisplayAction | undefined => {
+    if (evt.type === SessionEvent.Text.Ended.type) {
+      const data = evt.data as EventV2.Data<typeof SessionEvent.Text.Ended>
+      if (data.sessionID !== sessionID) return
+      return { type: "text", text: data.text }
+    }
+
+    if (evt.type === SessionEvent.Tool.Called.type) {
+      const data = evt.data as EventV2.Data<typeof SessionEvent.Tool.Called>
+      if (data.sessionID !== sessionID) return
+      toolCalls.set(data.callID, { tool: data.tool, input: data.input })
+      return
+    }
+
+    if (evt.type === SessionEvent.Tool.Success.type) {
+      const data = evt.data as EventV2.Data<typeof SessionEvent.Tool.Success>
+      if (data.sessionID !== sessionID) return
+      const call = toolCalls.get(data.callID)
+      toolCalls.delete(data.callID)
+      if (!call) return
+      const [tool, color] = TOOL[call.tool] ?? [call.tool, UI.Style.TEXT_INFO_BOLD]
+      return {
+        type: "tool",
+        color,
+        tool,
+        title: data.title || (Object.keys(call.input).length > 0 ? JSON.stringify(call.input) : "Unknown"),
+      }
+    }
+
+    if (evt.type === SessionEvent.Tool.Failed.type) {
+      const data = evt.data as EventV2.Data<typeof SessionEvent.Tool.Failed>
+      if (data.sessionID !== sessionID) return
+      toolCalls.delete(data.callID)
+    }
+  }
 }
 
 export const GithubCommand = cmd({
@@ -876,18 +945,6 @@ export const GithubRunCommand = effectCmd({
       }
 
       async function subscribeSessionEvents() {
-        const TOOL: Record<string, [string, string]> = {
-          todowrite: ["Todo", UI.Style.TEXT_WARNING_BOLD],
-          bash: ["Shell", UI.Style.TEXT_DANGER_BOLD],
-          edit: ["Edit", UI.Style.TEXT_SUCCESS_BOLD],
-          glob: ["Glob", UI.Style.TEXT_INFO_BOLD],
-          grep: ["Grep", UI.Style.TEXT_INFO_BOLD],
-          list: ["List", UI.Style.TEXT_INFO_BOLD],
-          read: ["Read", UI.Style.TEXT_HIGHLIGHT_BOLD],
-          write: ["Write", UI.Style.TEXT_SUCCESS_BOLD],
-          websearch: ["Search", UI.Style.TEXT_DIM_BOLD],
-        }
-
         function printEvent(color: string, type: string, title: string) {
           UI.println(
             color + `|`,
@@ -897,36 +954,21 @@ export const GithubRunCommand = effectCmd({
           )
         }
 
-        let text = ""
+        const display = createGitHubSessionEventDisplay(session.id)
         await runLocalEffect(
           events.listen((evt) => {
-            if (evt.type !== MessageV2.Event.PartUpdated.type) return Effect.void
-            const data = evt.data as EventV2.Data<typeof MessageV2.Event.PartUpdated>
-            if (data.part.sessionID !== session.id) return Effect.void
-            //if (evt.properties.part.messageID === messageID) return
-            const part = data.part
+            const action = display(evt)
+            if (!action) return Effect.void
 
-            if (part.type === "tool" && part.state.status === "completed") {
-              const [tool, color] = TOOL[part.tool] ?? [part.tool, UI.Style.TEXT_INFO_BOLD]
-              const title =
-                part.state.title || Object.keys(part.state.input).length > 0
-                  ? JSON.stringify(part.state.input)
-                  : "Unknown"
+            if (action.type === "tool") {
               console.log()
-              printEvent(color, tool, title)
+              printEvent(action.color, action.tool, action.title)
+              return Effect.void
             }
 
-            if (part.type === "text") {
-              text = part.text
-
-              if (part.time?.end) {
-                UI.empty()
-                UI.println(UI.markdown(text))
-                UI.empty()
-                text = ""
-                return Effect.void
-              }
-            }
+            UI.empty()
+            UI.println(UI.markdown(action.text))
+            UI.empty()
             return Effect.void
           }),
         )
