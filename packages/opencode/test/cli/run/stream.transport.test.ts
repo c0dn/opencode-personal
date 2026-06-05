@@ -291,6 +291,51 @@ function v2CompletedTool(
   }
 }
 
+function v2TaskTool(input: {
+  id?: string
+  callID?: string
+  sessionID?: string
+  status?: "running" | "completed" | "error"
+  description?: string
+  subagentType?: string
+  toolCalls?: number
+  created?: number
+} = {}): Extract<Extract<V2SessionMessage, { type: "assistant" }>["content"][number], { type: "tool" }> {
+  const status = input.status ?? "running"
+  return {
+    id: input.id ?? `evt-task-${input.sessionID ?? "child-1"}`,
+    type: "tool",
+    callID: input.callID ?? "call-task-1",
+    name: "task",
+    title: "Task",
+    state:
+      status === "error"
+        ? {
+            status,
+            input: {
+              description: input.description ?? "Explore run.ts",
+              subagent_type: input.subagentType ?? "explore",
+            },
+            structured: { task: { sessionID: input.sessionID ?? "child-1", ...(input.toolCalls !== undefined ? { toolCalls: input.toolCalls } : {}) } },
+            content: [],
+            error: { type: "unknown", message: "failed" },
+          }
+        : {
+            status,
+            input: {
+              description: input.description ?? "Explore run.ts",
+              subagent_type: input.subagentType ?? "explore",
+            },
+            structured: { task: { sessionID: input.sessionID ?? "child-1", ...(input.toolCalls !== undefined ? { toolCalls: input.toolCalls } : {}) } },
+            content: [],
+          },
+    time:
+      status === "running"
+        ? { created: input.created ?? 2, ran: input.created ?? 2 }
+        : { created: input.created ?? 2, ran: input.created ?? 2, completed: (input.created ?? 2) + 1 },
+  }
+}
+
 function runningTool(input: {
   sessionID: string
   messageID: string
@@ -507,6 +552,7 @@ describe("run stream transport", () => {
   test("does not replay persisted main-session history during bootstrap by default", async () => {
     const src = eventFeed()
     const ui = footer()
+    const legacyMessages = mock(() => ok([]))
     const v2Messages = mock(({ sessionID, order, limit }) => {
       expect({ sessionID, order, limit }).toEqual({ sessionID: "session-1", order: "desc", limit: 200 })
       return okV2Messages([])
@@ -515,24 +561,7 @@ describe("run stream transport", () => {
       sdk: sdk({
         stream: src.stream,
         v2Messages,
-        messages: async ({ sessionID }) =>
-          sessionID === "session-1"
-            ? ok([
-                assistantMessage({
-                  sessionID: "session-1",
-                  id: "msg-1",
-                  parts: [
-                    {
-                      ...textPart("text-1", "msg-1", "Hello."),
-                      time: {
-                        start: 1,
-                        end: 2,
-                      },
-                    },
-                  ],
-                }),
-              ])
-            : ok([]),
+        messages: legacyMessages,
       }),
       sessionID: "session-1",
       thinking: true,
@@ -544,6 +573,7 @@ describe("run stream transport", () => {
       expect(ui.commits).toEqual([])
       expect(ui.idleCalls).toBe(0)
       expect(v2Messages).toHaveBeenCalledTimes(1)
+      expect(legacyMessages).not.toHaveBeenCalled()
     } finally {
       src.close()
       await transport.close()
@@ -679,34 +709,14 @@ describe("run stream transport", () => {
     }
   })
 
-  test("replay with children uses legacy only for subagent bootstrap", async () => {
+  test("replay with children reuses v2 replay rows for subagent bootstrap", async () => {
     const src = eventFeed()
     const ui = footer()
-    const legacyMessages = mock(({ sessionID }) =>
-      sessionID === "session-1"
-        ? ok([
-            assistantMessage({
-              sessionID: "session-1",
-              id: "msg-legacy-parent",
-              parts: [
-                runningTool({
-                  sessionID: "session-1",
-                  messageID: "msg-legacy-parent",
-                  id: "task-1",
-                  callID: "call-1",
-                  tool: "task",
-                  body: { description: "Explore run.ts", subagent_type: "explore" },
-                  metadata: { sessionId: "child-1" },
-                }),
-              ],
-            }),
-          ])
-        : ok([]),
-    )
+    const legacyMessages = mock(() => ok([]))
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
-        v2Messages: async () => okV2Messages([v2Assistant("evt-assistant-1", [v2Text("evt-text-1", "primary")])]),
+        v2Messages: async () => okV2Messages([v2Assistant("evt-assistant-1", [v2Text("evt-text-1", "primary"), v2TaskTool()])]),
         messages: legacyMessages,
         children: async () => ok([child("child-1")]),
       }),
@@ -726,43 +736,21 @@ describe("run stream transport", () => {
           : undefined
       })
       expect(state.tabs).toEqual([expect.objectContaining({ sessionID: "child-1", status: "running" })])
-      expect(legacyMessages.mock.calls.map((call) => call[0])).toContainEqual(
-        expect.objectContaining({ sessionID: "session-1" }),
-      )
+      expect(legacyMessages).not.toHaveBeenCalled()
     } finally {
       src.close()
       await transport.close()
     }
   })
 
-  test("no-replay discovers subagent tabs from legacy primary messages when children are empty", async () => {
+  test("no-replay discovers subagent tabs from v2 primary bootstrap when children are empty", async () => {
     const src = eventFeed()
     const ui = footer()
-    const legacyMessages = mock(({ sessionID }) =>
-      sessionID === "session-1"
-        ? ok([
-            assistantMessage({
-              sessionID: "session-1",
-              id: "msg-legacy-parent",
-              parts: [
-                runningTool({
-                  sessionID: "session-1",
-                  messageID: "msg-legacy-parent",
-                  id: "task-1",
-                  callID: "call-1",
-                  tool: "task",
-                  body: { description: "Explore run.ts", subagent_type: "explore" },
-                  metadata: { sessionId: "child-1" },
-                }),
-              ],
-            }),
-          ])
-        : ok([]),
-    )
+    const legacyMessages = mock(() => ok([]))
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
-        v2Messages: async () => okV2Messages([]),
+        v2Messages: async () => okV2Messages([v2Assistant("evt-parent-assistant-1", [v2TaskTool()])]),
         messages: legacyMessages,
         children: async () => ok([]),
       }),
@@ -781,9 +769,7 @@ describe("run stream transport", () => {
           : undefined
       })
       expect(state.tabs).toEqual([expect.objectContaining({ sessionID: "child-1", status: "running" })])
-      expect(legacyMessages.mock.calls.map((call) => call[0])).toEqual([
-        { sessionID: "session-1", limit: 200 },
-      ])
+      expect(legacyMessages).not.toHaveBeenCalled()
     } finally {
       src.close()
       await transport.close()
@@ -818,6 +804,52 @@ describe("run stream transport", () => {
         }),
       ])
       expect(v2Messages).toHaveBeenCalledTimes(1)
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
+
+  test("replay limit with children uses separate v2 latest slice for subagent bootstrap", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const legacyMessages = mock(() => ok([]))
+    const calls: unknown[] = []
+    const v2Messages = mock(({ sessionID, order, limit }) => {
+      calls.push({ sessionID, order, limit })
+      if (limit === 1) {
+        return okV2Messages([v2Assistant("evt-replay-latest", [v2Text("evt-text-latest", "latest")])])
+      }
+
+      return okV2Messages([v2Assistant("evt-parent-bootstrap", [v2TaskTool()])])
+    })
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        stream: src.stream,
+        messages: legacyMessages,
+        v2Messages,
+        children: async () => ok([child("child-1")]),
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      replay: true,
+      replayLimit: 1,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      await waitFor(() => {
+        const item = ui.events.findLast((event) => event.type === "stream.subagent")
+        return item?.type === "stream.subagent" && item.state.tabs.some((tab) => tab.sessionID === "child-1")
+          ? item
+          : undefined
+      })
+      expect(calls.filter((call) => (call as { sessionID?: string }).sessionID === "session-1")).toEqual([
+        { sessionID: "session-1", order: "desc", limit: 1 },
+        { sessionID: "session-1", order: "desc", limit: 200 },
+      ])
+      expect(legacyMessages).not.toHaveBeenCalled()
     } finally {
       src.close()
       await transport.close()
@@ -915,6 +947,37 @@ describe("run stream transport", () => {
         footer: footer().api,
       }),
     ).rejects.toThrow()
+  })
+
+  test("rejects startup when separate v2 parent subagent discovery fails", async () => {
+    let calls = 0
+    await expect(
+      createSessionTransport({
+        sdk: sdk({
+          messages: mock(() => ok([])),
+          children: async () => ok([child("child-1")]),
+          v2Messages: async () => {
+            calls += 1
+            if (calls === 1) {
+              return okV2Messages([v2Assistant("evt-replay-latest", [v2Text("evt-text-latest", "latest")])])
+            }
+
+            return {
+              data: undefined,
+              error: { _tag: "SessionMessagesNotReadyError", sessionID: "session-1", status: "upgrade_pending" },
+              request: new Request("https://opencode.test"),
+              response: new Response(undefined, { status: 503 }),
+            } as never
+          },
+        }),
+        sessionID: "session-1",
+        thinking: true,
+        replay: true,
+        replayLimit: 1,
+        limits: () => ({}),
+        footer: footer().api,
+      }),
+    ).rejects.toThrow("failed to load v2 replay messages")
   })
 
   test("skips buffered pre-bootstrap deltas already covered by replay history", async () => {
@@ -1035,34 +1098,7 @@ describe("run stream transport", () => {
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
-        messages: async ({ sessionID }) => {
-          if (sessionID !== "session-1") {
-            return ok([])
-          }
-
-          return ok([
-            assistantMessage({
-              sessionID: "session-1",
-              id: "msg-1",
-              parts: [
-                completedTool({
-                  sessionID: "session-1",
-                  messageID: "msg-1",
-                  id: "task-1",
-                  callID: "call-1",
-                  tool: "task",
-                  body: {
-                    description: "Explore run folder",
-                    subagent_type: "explore",
-                  },
-                  metadata: {
-                    sessionId: "child-1",
-                  },
-                }),
-              ],
-            }),
-          ])
-        },
+        v2Messages: async () => okV2Messages([v2Assistant("evt-parent-assistant-1", [v2TaskTool({ status: "completed" })])]),
         children: async () => ok([child("child-1")]),
       }),
       sessionID: "session-1",
@@ -1091,34 +1127,6 @@ describe("run stream transport", () => {
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
-        messages: async ({ sessionID }) => {
-          if (sessionID === "session-1") {
-            return ok([
-              assistantMessage({
-                sessionID: "session-1",
-                id: "msg-1",
-                parts: [
-                  runningTool({
-                    sessionID: "session-1",
-                    messageID: "msg-1",
-                    id: "task-1",
-                    callID: "call-1",
-                    tool: "task",
-                    body: {
-                      description: "Explore run folder",
-                      subagent_type: "explore",
-                    },
-                    metadata: {
-                      sessionId: "child-1",
-                    },
-                  }),
-                ],
-              }),
-            ])
-          }
-
-          throw new Error(`unexpected legacy child history read: ${sessionID}`)
-        },
         v2Messages: async ({ sessionID }) =>
           sessionID === "child-1"
             ? okV2Messages([
@@ -1134,7 +1142,7 @@ describe("run stream transport", () => {
                   ),
                 ]),
               ])
-            : okV2Messages([]),
+              : okV2Messages([v2Assistant("evt-parent-assistant-1", [v2TaskTool({ description: "Explore run folder" })])]),
         children: async () => ok([child("child-1")]),
         permissions: async () =>
           ok([
@@ -1240,34 +1248,7 @@ describe("run stream transport", () => {
 
   test("bootstraps child session output before selection", async () => {
     const ui = footer()
-    const legacyMessages = mock(async ({ sessionID }) => {
-      if (sessionID !== "session-1") {
-        throw new Error(`unexpected legacy child history read: ${sessionID}`)
-      }
-
-      return ok([
-        assistantMessage({
-          sessionID: "session-1",
-          id: "msg-1",
-          parts: [
-            runningTool({
-              sessionID: "session-1",
-              messageID: "msg-1",
-              id: "task-1",
-              callID: "call-1",
-              tool: "task",
-              body: {
-                description: "Explore run.ts",
-                subagent_type: "explore",
-              },
-              metadata: {
-                sessionId: "child-1",
-              },
-            }),
-          ],
-        }),
-      ])
-    })
+    const legacyMessages = mock(() => ok([]))
     const v2Messages = mock(async ({ sessionID, order, limit }) => {
       if (sessionID === "child-1") {
         expect({ sessionID, order, limit }).toEqual({
@@ -1278,7 +1259,7 @@ describe("run stream transport", () => {
         return okV2Messages([v2Assistant("evt-child-assistant-1", [v2Text("evt-child-text-1", "subagent summary")])])
       }
 
-      return okV2Messages([])
+      return okV2Messages([v2Assistant("evt-parent-assistant-1", [v2TaskTool()])])
     })
     const transport = await createSessionTransport({
       sdk: sdk({
@@ -1327,9 +1308,7 @@ describe("run stream transport", () => {
         { sessionID: "child-1", limit: 80, order: "desc" },
         expect.objectContaining({ throwOnError: true, signal: expect.any(AbortSignal) }),
       )
-      expect(legacyMessages.mock.calls.map((call) => call[0])).not.toContainEqual(
-        expect.objectContaining({ sessionID: "child-1" }),
-      )
+      expect(legacyMessages).not.toHaveBeenCalled()
     } finally {
       await transport.close()
     }
@@ -1342,40 +1321,12 @@ describe("run stream transport", () => {
 
     const task = createSessionTransport({
       sdk: sdk({
-        messages: async ({ sessionID }) => {
-          if (sessionID !== "session-1") {
-            throw new Error(`unexpected legacy child history read: ${sessionID}`)
-          }
-
-          return ok([
-            assistantMessage({
-              sessionID: "session-1",
-              id: "msg-1",
-              parts: [
-                runningTool({
-                  sessionID: "session-1",
-                  messageID: "msg-1",
-                  id: "task-1",
-                  callID: "call-1",
-                  tool: "task",
-                  body: {
-                    description: "Explore run.ts",
-                    subagent_type: "explore",
-                  },
-                  metadata: {
-                    sessionId: "child-1",
-                  },
-                }),
-              ],
-            }),
-          ])
-        },
         v2Messages: async ({ sessionID }) => {
           if (sessionID === "child-1") {
             return pending.promise
           }
 
-          return okV2Messages([])
+          return okV2Messages([v2Assistant("evt-parent-assistant-1", [v2TaskTool()])])
         },
         children: async () => ok([child("child-1")]),
       }),
@@ -1415,41 +1366,14 @@ describe("run stream transport", () => {
     const gate = defer<void>()
     const ui = footer()
     const trace = { write: mock(() => {}) }
-    const legacyMessages = mock(async ({ sessionID }) => {
-      if (sessionID !== "session-1") {
-        throw new Error(`unexpected legacy child history read: ${sessionID}`)
-      }
-
-      return ok([
-        assistantMessage({
-          sessionID: "session-1",
-          id: "msg-1",
-          parts: [
-            runningTool({
-              sessionID: "session-1",
-              messageID: "msg-1",
-              id: "task-1",
-              callID: "call-1",
-              tool: "task",
-              body: {
-                description: "Explore run.ts",
-                subagent_type: "explore",
-              },
-              metadata: {
-                sessionId: "child-1",
-              },
-            }),
-          ],
-        }),
-      ])
-    })
+    const legacyMessages = mock(() => ok([]))
     const v2Messages = mock(async ({ sessionID }) => {
       if (sessionID === "child-1") {
         await gate.promise
         throw new Error("v2 unavailable")
       }
 
-      return okV2Messages([])
+      return okV2Messages([v2Assistant("evt-parent-assistant-1", [v2TaskTool()])])
     })
     const transport = await createSessionTransport({
       sdk: sdk({
@@ -1493,9 +1417,7 @@ describe("run stream transport", () => {
         "subagent.history.error",
         expect.objectContaining({ sessionID: "child-1", error: "v2 unavailable" }),
       )
-      expect(legacyMessages.mock.calls.map((call) => call[0])).not.toContainEqual(
-        expect.objectContaining({ sessionID: "child-1" }),
-      )
+      expect(legacyMessages).not.toHaveBeenCalled()
     } finally {
       await transport.close()
     }

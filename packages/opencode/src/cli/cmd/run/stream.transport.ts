@@ -30,9 +30,8 @@ import {
 } from "./session-data"
 import { bootstrapSessionDataV2Display, replaySession, replaySessionV2 } from "./session-replay"
 import {
-  bootstrapSubagentCalls,
   bootstrapSubagentCallsV2Display,
-  bootstrapSubagentData,
+  bootstrapSubagentDataV2Display,
   clearFinishedSubagents,
   createSubagentData,
   listSubagentPermissions,
@@ -602,17 +601,6 @@ function createLayer(input: StreamInput) {
           }
         })
 
-        const messages = (sessionID: string, limit?: number) =>
-          Effect.promise(() =>
-            input.sdk.session.messages({
-              sessionID,
-              ...(typeof limit === "number" ? { limit } : {}),
-            }),
-          ).pipe(
-            Effect.map((item) => item.data ?? []),
-            Effect.orElseSucceed(() => []),
-          )
-
         const primaryReplayMessages = Effect.fn("RunStreamTransport.primaryReplayMessages")(function* () {
           if (!input.replay) {
             return undefined
@@ -659,6 +647,20 @@ function createLayer(input: StreamInput) {
             ),
           )
           return requireV2ReplayItems(response)
+        })
+
+        const primarySubagentLatestMessages = Effect.fn("RunStreamTransport.primarySubagentLatestMessages")(function* () {
+          const response = yield* Effect.promise(() =>
+            input.sdk.v2.session.messages(
+              {
+                sessionID: input.sessionID,
+                limit: SUBAGENT_BOOTSTRAP_LIMIT,
+                order: "desc",
+              },
+              { throwOnError: true },
+            ),
+          )
+          return TranscriptV2Display.toDisplayTranscriptV2FromWire(requireV2ReplayItems(response), { status: "ready" })
         })
 
         const primaryReplayAllMessages = Effect.fn("RunStreamTransport.primaryReplayAllMessages")(function* () {
@@ -775,15 +777,11 @@ function createLayer(input: StreamInput) {
               concurrency: "unbounded",
             },
           )
-          // Primary v2 replay/bootstrap owns main-session transcript state.
-          // Legacy main-session messages remain needed only to discover parent
-          // task calls for child/subagent bootstrap until that path gets its own
-          // v2 cutover slice. Replay mode keeps its narrower legacy fetch policy.
-          const subagentBootstrapMessages = input.replay
-            ? children.length > 0
-              ? yield* messages(input.sessionID, SUBAGENT_BOOTSTRAP_LIMIT)
-              : []
-            : yield* messages(input.sessionID, SUBAGENT_BOOTSTRAP_LIMIT)
+          const subagentBootstrapMessages = replayMessages
+            ? input.replayLimit !== undefined && children.length > 0
+              ? yield* primarySubagentLatestMessages()
+              : replayMessages
+            : (noReplayBootstrapMessages ?? [])
 
           const sessionPermissions = permissions.filter((item) => item.sessionID === input.sessionID)
           const sessionQuestions = questions.filter((item) => item.sessionID === input.sessionID)
@@ -812,13 +810,6 @@ function createLayer(input: StreamInput) {
                 permissions: sessionPermissions,
                 questions: sessionQuestions,
               })
-            } else {
-              bootstrapSessionData({
-                data: state.data,
-                messages: subagentBootstrapMessages,
-                permissions: sessionPermissions,
-                questions: sessionQuestions,
-              })
             }
           }
 
@@ -835,7 +826,7 @@ function createLayer(input: StreamInput) {
             }
           }
 
-          bootstrapSubagentData({
+          bootstrapSubagentDataV2Display({
             data: state.subagent,
             messages: subagentBootstrapMessages,
             children,

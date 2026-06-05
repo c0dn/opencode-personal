@@ -5,6 +5,7 @@ import {
   bootstrapSubagentCalls,
   bootstrapSubagentCallsV2Display,
   bootstrapSubagentData,
+  bootstrapSubagentDataV2Display,
   clearFinishedSubagents,
   createSubagentData,
   reduceSubagentData,
@@ -14,6 +15,57 @@ import type { TranscriptV2Display } from "@/session/transcript-v2-display"
 
 type SessionMessage = Parameters<typeof bootstrapSubagentData>[0]["messages"][number]
 type ChildMessage = Parameters<typeof bootstrapSubagentCalls>[0]["messages"][number]
+type DisplayTool = TranscriptV2Display.DisplayAssistantTool
+
+function displayAssistant(content: TranscriptV2Display.DisplayAssistantContent[]) {
+  return {
+    type: "assistant",
+    id: "evt-parent-assistant-1",
+    agent: "build",
+    model: { providerID: "openai", id: "gpt-5" } as TranscriptV2Display.DisplayAssistant["model"],
+    time: { created: 1, completed: 4 },
+    content,
+  } satisfies TranscriptV2Display.DisplayAssistant
+}
+
+function displayTask(
+  input: Partial<DisplayTool> & {
+    id?: string
+    name?: string
+    status?: "pending" | "running" | "completed" | "error"
+    task?: unknown
+    input?: unknown
+  } = {},
+): DisplayTool {
+  const status = input.status ?? "running"
+  const stateInput = input.input ?? { description: "Scan reducer paths", subagent_type: "explore" }
+  const structured = "task" in input ? (input.task === undefined ? {} : { task: input.task }) : { task: { sessionID: "child-1", toolCalls: 4 } }
+  return {
+    type: "tool",
+    id: input.id ?? `evt-tool-${status}`,
+    callID: input.callID ?? `call-${status}`,
+    name: input.name ?? "task",
+    title: input.title ?? "Reducer touchpoints",
+    time: input.time ?? (status === "running" ? { created: 1, ran: 2 } : { created: 1, ran: 2, completed: 3 }),
+    state:
+      status === "pending"
+        ? { status: "pending", input: JSON.stringify(stateInput) }
+        : status === "error"
+          ? {
+              status,
+              input: stateInput as Record<string, unknown>,
+              structured,
+              content: [],
+              error: { type: "unknown", message: "failed" },
+            }
+          : {
+              status,
+              input: stateInput as Record<string, unknown>,
+              structured,
+              content: [],
+            },
+  }
+}
 
 function visible(commits: Array<Parameters<typeof entryBody>[0]>) {
   return commits.flatMap((item) => {
@@ -234,6 +286,105 @@ describe("run subagent data", () => {
     })
     expect(snapshot.permissions.map((item) => item.id)).toEqual(["perm-1"])
     expect(snapshot.questions.map((item) => item.id)).toEqual(["question-1"])
+  })
+
+  test("bootstraps tabs from canonical v2 task display rows", () => {
+    const data = createSubagentData()
+
+    expect(
+      bootstrapSubagentDataV2Display({
+        data,
+        messages: [displayAssistant([displayTask({ status: "completed" })])],
+        children: [{ id: "child-1" }],
+        permissions: [],
+        questions: [],
+      }),
+    ).toBe(true)
+
+    expect(snapshotSubagentData(data).tabs).toEqual([
+      expect.objectContaining({
+        sessionID: "child-1",
+        partID: "evt-tool-completed",
+        callID: "call-completed",
+        label: "Explore",
+        description: "Scan reducer paths",
+        title: "Reducer touchpoints",
+        status: "completed",
+        toolCalls: 4,
+        lastUpdatedAt: 3,
+      }),
+    ])
+  })
+
+  test("strictly validates v2 task display metadata", () => {
+    const rejected = [
+      displayTask({ status: "pending" }),
+      displayTask({ name: "bash" }),
+      displayTask({ task: undefined }),
+      displayTask({ task: { sessionID: "msg_legacy" } }),
+      displayTask({ task: { sessionID: "prt_legacy" } }),
+      displayTask({ task: { sessionID: "child-1", toolCalls: -1 } }),
+      displayTask({ task: { sessionID: "child-1", toolCalls: Number.NaN } }),
+      displayTask({ task: { sessionID: "child-1", toolCalls: Number.POSITIVE_INFINITY } }),
+      displayTask({ task: { sessionId: "child-1" } }),
+      displayTask({ task: { sessionID: "child-1", toolcalls: 1 } }),
+      displayTask({ task: { sessionID: "child-1", calls: 1 } }),
+      displayTask({ task: { sessionID: "child-1", model: "gpt" } }),
+    ]
+
+    for (const tool of rejected) {
+      const data = createSubagentData()
+      expect(
+        bootstrapSubagentDataV2Display({
+          data,
+          messages: [displayAssistant([tool])],
+          children: [],
+          permissions: [],
+          questions: [],
+        }),
+      ).toBe(false)
+      expect(snapshotSubagentData(data).tabs).toEqual([])
+    }
+  })
+
+  test("filters v2 task tabs by known children and accepts valid metadata when children are empty", () => {
+    const filtered = createSubagentData()
+    bootstrapSubagentDataV2Display({
+      data: filtered,
+      messages: [displayAssistant([displayTask({ task: { sessionID: "child-2" } })])],
+      children: [{ id: "child-1" }],
+      permissions: [],
+      questions: [],
+    })
+    expect(snapshotSubagentData(filtered).tabs).toEqual([])
+
+    const unfiltered = createSubagentData()
+    bootstrapSubagentDataV2Display({
+      data: unfiltered,
+      messages: [displayAssistant([displayTask({ task: { sessionID: "child-2" } })])],
+      children: [],
+      permissions: [],
+      questions: [],
+    })
+    expect(snapshotSubagentData(unfiltered).tabs).toEqual([expect.objectContaining({ sessionID: "child-2" })])
+  })
+
+  test("preserves v2 blocker fallback tabs for children without task rows", () => {
+    const data = createSubagentData()
+
+    bootstrapSubagentDataV2Display({
+      data,
+      messages: [],
+      children: [{ id: "child-1", title: "Explore" }],
+      permissions: [
+        { id: "perm-1", sessionID: "child-1", permission: "read", patterns: ["src/**/*.ts"], metadata: {}, always: [] },
+      ],
+      questions: [],
+    })
+
+    expect(snapshotSubagentData(data).tabs).toEqual([
+      expect.objectContaining({ sessionID: "child-1", label: "Explore", description: "Pending permission" }),
+    ])
   })
 
   test("captures child activity and blocker metadata in the footer detail state", () => {

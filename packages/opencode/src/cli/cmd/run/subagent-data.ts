@@ -52,6 +52,14 @@ export type BootstrapSubagentInput = {
   questions: QuestionRequest[]
 }
 
+export type BootstrapSubagentV2DisplayInput = {
+  data: SubagentData
+  messages: readonly TranscriptV2Display.DisplayTranscriptMessage[]
+  children: Array<{ id: string; title?: string }>
+  permissions: PermissionRequest[]
+  questions: QuestionRequest[]
+}
+
 function createDetail(sessionID: string): DetailState {
   return {
     sessionID,
@@ -293,6 +301,14 @@ function metadata(part: ToolPart, key: string) {
   return ("metadata" in part.state ? part.state.metadata?.[key] : undefined) ?? part.metadata?.[key]
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined
+  }
+
+  return value as Record<string, unknown>
+}
+
 function taskTab(part: ToolPart, sessionID: string): FooterSubagentTab {
   const label = Locale.titlecase(text(part.state.input.subagent_type) ?? "general")
   const description = text(part.state.input.description) ?? stateTitle(part) ?? inputLabel(part.state.input) ?? ""
@@ -313,6 +329,94 @@ function taskTab(part: ToolPart, sessionID: string): FooterSubagentTab {
 
 function taskSessionID(part: ToolPart) {
   return text(metadata(part, "sessionId")) ?? text(metadata(part, "sessionID"))
+}
+
+function canonicalSessionID(value: unknown) {
+  const sessionID = text(value)
+  if (!sessionID || /^(?:msg|prt)_/.test(sessionID)) {
+    return undefined
+  }
+
+  return sessionID
+}
+
+function strictTaskMetadata(content: TranscriptV2Display.DisplayAssistantTool) {
+  if (content.type !== "tool" || content.name !== "task" || content.state.status === "pending") {
+    return undefined
+  }
+
+  const structured = record(content.state.structured)
+  const task = record(structured?.task)
+  if (!task) {
+    return undefined
+  }
+
+  const keys = Object.keys(task)
+  if (!keys.every((key) => key === "sessionID" || key === "toolCalls")) {
+    return undefined
+  }
+
+  const sessionID = canonicalSessionID(task.sessionID)
+  if (!sessionID) {
+    return undefined
+  }
+
+  if ("toolCalls" in task) {
+    if (typeof task.toolCalls !== "number" || !Number.isFinite(task.toolCalls) || task.toolCalls < 0) {
+      return undefined
+    }
+
+    return { sessionID, toolCalls: task.toolCalls }
+  }
+
+  return { sessionID }
+}
+
+function displayTaskTab(
+  content: TranscriptV2Display.DisplayAssistantTool,
+  task: { sessionID: string; toolCalls?: number },
+): FooterSubagentTab {
+  const input = record(content.state.status === "pending" ? undefined : content.state.input) ?? {}
+  const label = Locale.titlecase(text(input.subagent_type) ?? "general")
+  const description = text(input.description) ?? text(content.title) ?? inputLabel(input) ?? ""
+  const status = content.state.status === "error" ? "error" : content.state.status === "completed" ? "completed" : "running"
+
+  return {
+    sessionID: task.sessionID,
+    partID: content.id,
+    callID: content.callID,
+    label,
+    description,
+    status,
+    title: text(content.title),
+    toolCalls: task.toolCalls,
+    lastUpdatedAt: content.time.completed ?? content.time.ran ?? content.time.created,
+  }
+}
+
+function syncTaskTabV2Display(
+  data: SubagentData,
+  content: TranscriptV2Display.DisplayAssistantTool,
+  children?: Set<string>,
+) {
+  const task = strictTaskMetadata(content)
+  if (!task) {
+    return false
+  }
+
+  if (children && children.size > 0 && !children.has(task.sessionID)) {
+    return false
+  }
+
+  const next = displayTaskTab(content, task)
+  if (sameSubagentTab(data.tabs.get(task.sessionID), next)) {
+    ensureDetail(data, task.sessionID)
+    return false
+  }
+
+  data.tabs.set(task.sessionID, next)
+  ensureDetail(data, task.sessionID)
+  return true
 }
 
 function syncTaskTab(data: SubagentData, part: ToolPart, children?: Set<string>) {
@@ -680,6 +784,63 @@ export function bootstrapSubagentData(input: BootstrapSubagentInput) {
       }
 
       changed = syncTaskTab(input.data, part, children) || changed
+    }
+  }
+
+  for (const item of input.permissions) {
+    if (!children.has(item.sessionID)) {
+      continue
+    }
+
+    changed = ensureBlockerTab(input.data, item.sessionID, child.get(item.sessionID)?.title, "permission") || changed
+  }
+
+  for (const item of input.questions) {
+    if (!children.has(item.sessionID)) {
+      continue
+    }
+
+    changed = ensureBlockerTab(input.data, item.sessionID, child.get(item.sessionID)?.title, "question") || changed
+  }
+
+  for (const sessionID of input.data.tabs.keys()) {
+    const detail = ensureDetail(input.data, sessionID)
+    const before = queueSnapshot(detail.data)
+
+    bootstrapSessionData({
+      data: detail.data,
+      messages: [],
+      permissions: input.permissions
+        .filter((item) => item.sessionID === sessionID)
+        .sort((a, b) => a.id.localeCompare(b.id)),
+      questions: input.questions
+        .filter((item) => item.sessionID === sessionID)
+        .sort((a, b) => a.id.localeCompare(b.id)),
+    })
+    compactDetail(detail)
+
+    changed = queueChanged(detail.data, before) || changed
+  }
+
+  return changed
+}
+
+export function bootstrapSubagentDataV2Display(input: BootstrapSubagentV2DisplayInput) {
+  const child = new Map(input.children.map((item) => [item.id, item]))
+  const children = new Set(child.keys())
+  let changed = false
+
+  for (const message of input.messages) {
+    if (message.type !== "assistant") {
+      continue
+    }
+
+    for (const content of message.content) {
+      if (content.type !== "tool") {
+        continue
+      }
+
+      changed = syncTaskTabV2Display(input.data, content, children) || changed
     }
   }
 
