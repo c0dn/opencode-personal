@@ -5,6 +5,7 @@ import { SessionMessage } from "@opencode-ai/core/session/message"
 import { AgentAttachment } from "@opencode-ai/core/session/prompt"
 import type { ModelMessage } from "ai"
 import { DateTime } from "effect"
+import { MessageV2Compaction } from "../../src/session/message-v2-compaction"
 import { MessageV2Provider } from "../../src/session/message-v2-provider"
 
 const model = {
@@ -200,16 +201,14 @@ describe("session.message-v2-provider.preparePromptProviderMessages", () => {
 })
 
 describe("session.message-v2-provider.prepareCompactionProviderMessages", () => {
-  test("converts only readiness-returned pre-anchor slice", async () => {
+  test("converts supplied selected candidates in canonical order without anchor slicing", async () => {
     const first = user("first", 1)
     const finished = assistant("finished", 2, { finish: "stop" })
-    const anchor = compaction("anchor", 3)
-    const after = user("after", 4)
+    const next = user("next", 3)
     const converter = captureConverter()
 
     const result = await MessageV2Provider.prepareCompactionProviderMessages({
-      messages: [after, anchor, finished, first],
-      compactionID: anchor.id,
+      messages: [next, finished, first],
       convert: converter.convert,
     })
 
@@ -217,41 +216,57 @@ describe("session.message-v2-provider.prepareCompactionProviderMessages", () => 
     if (result.type !== "ready") return
     expect(result.modelMessages).toBe(converted)
     expect(converter.calls).toHaveLength(1)
-    expect(ids(converter.calls[0])).toStrictEqual([first.id, finished.id])
+    expect(ids(converter.calls[0])).toStrictEqual([first.id, finished.id, next.id])
+  })
+
+  test("converts candidates selected by the compaction selector composition", async () => {
+    const first = user("first", 1)
+    const firstAssistant = assistant("first_assistant", 2, { finish: "stop" })
+    const completed = compaction("completed", 3, { summary: "summary", include: first.id })
+    const second = user("second", 4)
+    const secondAssistant = assistant("second_assistant", 5, { finish: "stop" })
+    const third = user("third", 6)
+    const thirdAssistant = assistant("third_assistant", 7, { finish: "stop" })
+    const selected = await MessageV2Compaction.select({
+      messages: [thirdAssistant, third, secondAssistant, second, completed, firstAssistant, first],
+      anchor: { id: id("future"), time: DateTime.makeUnsafe(8) },
+      tailTurns: 1,
+      preserveRecentTokens: 2,
+      estimate: (messages) => messages.length,
+    })
+
+    expect(selected.type).toBe("selected")
+    if (selected.type !== "selected") return
+
+    const converter = captureConverter()
+    const result = await MessageV2Provider.prepareCompactionProviderMessages({
+      messages: selected.messages,
+      convert: converter.convert,
+    })
+
+    expect(result.type).toBe("ready")
+    if (result.type !== "ready") return
+    expect(result.modelMessages).toBe(converted)
+    expect(converter.calls).toHaveLength(1)
+    expect(ids(converter.calls[0])).toStrictEqual([first.id, firstAssistant.id, second.id, secondAssistant.id])
   })
 
   test("does not convert blocked compaction histories", async () => {
     const first = user("first", 1)
-    const completedBySummary = compaction("summary", 2, { summary: "done" })
-    const anchorWithoutUser = compaction("without_user", 2)
+    const finished = assistant("finished", 2, { finish: "stop" })
     const runningAssistant = assistant("running", 2)
-    const anchorAfterRunning = compaction("after_running", 3)
     const pendingAssistant = assistant("pending_tool", 2, { finish: "tool-calls", content: [runningTool()] })
-    const anchorAfterPendingTool = compaction("after_pending_tool", 3)
     const cases = [
       {
-        messages: [first],
-        compactionID: id("missing"),
-        reason: "compaction-missing",
+        messages: [finished],
+        reason: "no-user",
       },
       {
-        messages: [completedBySummary, first],
-        compactionID: completedBySummary.id,
-        reason: "compaction-completed",
-      },
-      {
-        messages: [anchorWithoutUser],
-        compactionID: anchorWithoutUser.id,
-        reason: "no-user-before-compaction",
-      },
-      {
-        messages: [anchorAfterRunning, runningAssistant, first],
-        compactionID: anchorAfterRunning.id,
+        messages: [runningAssistant, first],
         reason: "assistant-not-terminal",
       },
       {
-        messages: [anchorAfterPendingTool, pendingAssistant, first],
-        compactionID: anchorAfterPendingTool.id,
+        messages: [pendingAssistant, first],
         reason: "tool-not-terminal",
       },
     ] as const
@@ -260,7 +275,6 @@ describe("session.message-v2-provider.prepareCompactionProviderMessages", () => 
       const converter = captureConverter()
       const result = await MessageV2Provider.prepareCompactionProviderMessages({
         messages: item.messages,
-        compactionID: item.compactionID,
         convert: converter.convert,
       })
 
@@ -278,6 +292,7 @@ test("implementation is a pure gate-before-convert leaf", async () => {
     "@opencode-ai/core/v1/session",
     "@opencode-ai/llm",
     "./message-v2",
+    "./message-v2-compaction",
     "./prompt",
     "./compaction",
   ]

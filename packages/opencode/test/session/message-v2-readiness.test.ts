@@ -218,104 +218,62 @@ describe("session.message-v2-readiness.promptProviderReadiness", () => {
 })
 
 describe("session.message-v2-readiness.compactionProviderReadiness", () => {
-  test("is ready with context before the pending compaction anchor", () => {
+  test("is ready with sorted selected candidate history", () => {
     const first = user("first", 1)
     const finished = assistant("finished", 2, { finish: "stop" })
-    const anchor = compaction("anchor", 3)
-    const after = user("after", 4)
+    const next = user("next", 3)
 
-    const readiness = MessageV2Readiness.compactionProviderReadiness({
-      messages: [after, anchor, finished, first],
-      compactionID: anchor.id,
+    const readiness = MessageV2Readiness.compactionProviderReadiness([next, finished, first])
+
+    expect(readiness.type).toBe("ready")
+    if (readiness.type !== "ready") return
+    expect(readiness.messages).toStrictEqual([first, finished, next])
+  })
+
+  test("blocks empty or no-user selected candidates", () => {
+    const assistantOnly = assistant("assistant_only", 1, { finish: "stop" })
+
+    expect(MessageV2Readiness.compactionProviderReadiness([])).toStrictEqual({ type: "blocked", reason: "no-user" })
+    expect(MessageV2Readiness.compactionProviderReadiness([assistantOnly])).toStrictEqual({
+      type: "blocked",
+      reason: "no-user",
     })
+  })
+
+  test("blocks non-terminal selected assistant", () => {
+    const first = user("first", 1)
+    const running = assistant("running", 2)
+
+    expect(MessageV2Readiness.compactionProviderReadiness([running, first])).toStrictEqual({
+      type: "blocked",
+      reason: "assistant-not-terminal",
+    })
+  })
+
+  test("blocks unsettled tools in selected candidates", () => {
+    const first = user("first", 1)
+    const pending = assistant("pending", 2, { finish: "tool-calls", content: [pendingTool()] })
+    const running = assistant("running", 3, { finish: "tool-calls", content: [runningTool()] })
+
+    expect(MessageV2Readiness.compactionProviderReadiness([pending, first])).toStrictEqual({
+      type: "blocked",
+      reason: "tool-not-terminal",
+    })
+    expect(MessageV2Readiness.compactionProviderReadiness([running, first])).toStrictEqual({
+      type: "blocked",
+      reason: "tool-not-terminal",
+    })
+  })
+
+  test("is ready with terminal tools in selected candidates", () => {
+    const first = user("first", 1)
+    const finished = assistant("finished", 2, { finish: "tool-calls", content: [completedTool(), erroredTool()] })
+
+    const readiness = MessageV2Readiness.compactionProviderReadiness([finished, first])
 
     expect(readiness.type).toBe("ready")
     if (readiness.type !== "ready") return
     expect(readiness.messages).toStrictEqual([first, finished])
-  })
-
-  test("blocks missing compaction anchor", () => {
-    expect(
-      MessageV2Readiness.compactionProviderReadiness({ messages: [user("first", 1)], compactionID: id("missing") }),
-    ).toStrictEqual({ type: "blocked", reason: "compaction-missing" })
-  })
-
-  test("blocks non-compaction message matching compaction ID", () => {
-    const first = user("first", 1)
-
-    expect(
-      MessageV2Readiness.compactionProviderReadiness({ messages: [first], compactionID: first.id }),
-    ).toStrictEqual({ type: "blocked", reason: "compaction-missing" })
-  })
-
-  test("blocks completed compaction anchor by summary or include", () => {
-    const first = user("first", 1)
-    const completedBySummary = compaction("summary", 2, { summary: "done" })
-    const completedByInclude = compaction("include", 3, { include: first.id })
-
-    expect(
-      MessageV2Readiness.compactionProviderReadiness({
-        messages: [completedBySummary, first],
-        compactionID: completedBySummary.id,
-      }),
-    ).toStrictEqual({ type: "blocked", reason: "compaction-completed" })
-    expect(
-      MessageV2Readiness.compactionProviderReadiness({
-        messages: [completedByInclude, first],
-        compactionID: completedByInclude.id,
-      }),
-    ).toStrictEqual({ type: "blocked", reason: "compaction-completed" })
-  })
-
-  test("blocks empty or no-user input before anchor", () => {
-    const anchorOnly = compaction("anchor_only", 1)
-    const assistantOnly = assistant("assistant_only", 1, { finish: "stop" })
-    const anchor = compaction("anchor", 2)
-    const userAfterAnchor = user("after_anchor", 3)
-
-    expect(
-      MessageV2Readiness.compactionProviderReadiness({ messages: [anchorOnly], compactionID: anchorOnly.id }),
-    ).toStrictEqual({ type: "blocked", reason: "no-user-before-compaction" })
-    expect(
-      MessageV2Readiness.compactionProviderReadiness({ messages: [anchor, assistantOnly], compactionID: anchor.id }),
-    ).toStrictEqual({ type: "blocked", reason: "no-user-before-compaction" })
-    expect(
-      MessageV2Readiness.compactionProviderReadiness({
-        messages: [userAfterAnchor, anchor, assistantOnly],
-        compactionID: anchor.id,
-      }),
-    ).toStrictEqual({ type: "blocked", reason: "no-user-before-compaction" })
-  })
-
-  test("blocks non-terminal assistant before anchor", () => {
-    const first = user("first", 1)
-    const running = assistant("running", 2)
-    const anchor = compaction("anchor", 3)
-
-    expect(
-      MessageV2Readiness.compactionProviderReadiness({ messages: [anchor, running, first], compactionID: anchor.id }),
-    ).toStrictEqual({ type: "blocked", reason: "assistant-not-terminal" })
-  })
-
-  test("blocks unsettled tools before anchor", () => {
-    const first = user("first", 1)
-    const pending = assistant("pending", 2, { finish: "tool-calls", content: [pendingTool()] })
-    const running = assistant("running", 3, { finish: "tool-calls", content: [runningTool()] })
-    const anchorAfterPending = compaction("anchor_after_pending", 4)
-    const anchorAfterRunning = compaction("anchor_after_running", 5)
-
-    expect(
-      MessageV2Readiness.compactionProviderReadiness({
-        messages: [anchorAfterPending, pending, first],
-        compactionID: anchorAfterPending.id,
-      }),
-    ).toStrictEqual({ type: "blocked", reason: "tool-not-terminal" })
-    expect(
-      MessageV2Readiness.compactionProviderReadiness({
-        messages: [anchorAfterRunning, running, first],
-        compactionID: anchorAfterRunning.id,
-      }),
-    ).toStrictEqual({ type: "blocked", reason: "tool-not-terminal" })
   })
 })
 
@@ -330,6 +288,7 @@ test("implementation is pure and has no runtime provider dependency", async () =
   expect(source).not.toContain("@opencode-ai/core/session/session")
   expect(source).not.toContain("@opencode-ai/core/v1/session")
   expect(source).not.toContain("provider")
+  expect(source).not.toContain("./message-v2-compaction")
   expect(source).not.toContain("@opencode-ai/llm")
   expect(source).not.toContain("llm.stream")
 })

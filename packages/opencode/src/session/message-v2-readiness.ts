@@ -16,19 +16,16 @@ export type PromptReadiness =
       reason: "no-user" | "pending-task" | "assistant-not-terminal" | "tool-not-terminal"
     }
 
+export type CompactionCandidateMessage = SessionMessage.User | SessionMessage.Assistant
+
 export type CompactionReadiness =
   | {
       type: "ready"
-      messages: SessionMessage.Message[]
+      messages: CompactionCandidateMessage[]
     }
   | {
       type: "blocked"
-      reason:
-        | "compaction-missing"
-        | "compaction-completed"
-        | "no-user-before-compaction"
-        | "assistant-not-terminal"
-        | "tool-not-terminal"
+      reason: "no-user" | "assistant-not-terminal" | "tool-not-terminal"
     }
 
 export function promptProviderReadiness(messages: readonly SessionMessage.Message[]): PromptReadiness {
@@ -45,27 +42,16 @@ export function promptProviderReadiness(messages: readonly SessionMessage.Messag
   return { type: "settled", reason: "assistant-finished" }
 }
 
-export function compactionProviderReadiness(input: {
-  messages: readonly SessionMessage.Message[]
-  compactionID: SessionMessage.ID
-}): CompactionReadiness {
-  const ordered = MessageV2Context.chronological(input.messages)
-  const anchorIndex = ordered.findIndex((message) => message.id === input.compactionID)
+export function compactionProviderReadiness(
+  messages: readonly CompactionCandidateMessage[],
+): CompactionReadiness {
+  const ordered = candidateMessages(MessageV2Context.chronological(messages))
 
-  if (anchorIndex === -1) return { type: "blocked", reason: "compaction-missing" }
+  if (!ordered.some((message) => message.type === "user")) return { type: "blocked", reason: "no-user" }
+  if (hasUnsettledTools(ordered)) return { type: "blocked", reason: "tool-not-terminal" }
+  if (hasNonTerminalAssistant(ordered)) return { type: "blocked", reason: "assistant-not-terminal" }
 
-  const anchor = ordered[anchorIndex]
-  if (anchor.type !== "compaction") return { type: "blocked", reason: "compaction-missing" }
-  if (!isPendingCompaction(anchor)) return { type: "blocked", reason: "compaction-completed" }
-
-  const beforeAnchor = ordered.slice(0, anchorIndex)
-  if (!beforeAnchor.some((message) => message.type === "user")) {
-    return { type: "blocked", reason: "no-user-before-compaction" }
-  }
-  if (hasUnsettledTools(beforeAnchor)) return { type: "blocked", reason: "tool-not-terminal" }
-  if (hasNonTerminalAssistant(beforeAnchor)) return { type: "blocked", reason: "assistant-not-terminal" }
-
-  return { type: "ready", messages: beforeAnchor }
+  return { type: "ready", messages: ordered }
 }
 
 function isLatestUserAfterLatestAssistant(
@@ -103,8 +89,10 @@ function isTerminalTool(content: SessionMessage.AssistantTool) {
   return content.state.status === "completed" || content.state.status === "error"
 }
 
-function isPendingCompaction(message: SessionMessage.Compaction) {
-  return message.summary === "" && message.include === undefined
+function candidateMessages(messages: readonly SessionMessage.Message[]): CompactionCandidateMessage[] {
+  return messages.filter((message): message is CompactionCandidateMessage => {
+    return message.type === "user" || message.type === "assistant"
+  })
 }
 
 export * as MessageV2Readiness from "./message-v2-readiness"

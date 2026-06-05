@@ -1,7 +1,7 @@
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import type { ModelMessage } from "ai"
 import { MessageV2Model } from "./message-v2-model"
-import type { CompactionReadiness, PromptReadiness } from "./message-v2-readiness"
+import type { CompactionCandidateMessage, CompactionReadiness, PromptReadiness } from "./message-v2-readiness"
 import { MessageV2Readiness } from "./message-v2-readiness"
 
 export type Converter = (messages: SessionMessage.Message[]) => Promise<ModelMessage[]>
@@ -30,14 +30,10 @@ export async function preparePromptProviderMessages(input: {
 }
 
 export async function prepareCompactionProviderMessages(input: {
-  messages: readonly SessionMessage.Message[]
-  compactionID: SessionMessage.ID
+  messages: readonly CompactionCandidateMessage[]
   convert?: Converter
 }): Promise<CompactionProviderMessages> {
-  const readiness = MessageV2Readiness.compactionProviderReadiness({
-    messages: input.messages,
-    compactionID: input.compactionID,
-  })
+  const readiness = MessageV2Readiness.compactionProviderReadiness(input.messages)
 
   if (readiness.type !== "ready") return readiness
 
