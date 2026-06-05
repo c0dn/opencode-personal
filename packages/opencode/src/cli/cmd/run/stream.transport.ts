@@ -138,6 +138,10 @@ function sid(event: Event): string | undefined {
   if (
     event.type === "session.next.shell.started" ||
     event.type === "session.next.shell.ended" ||
+    event.type === "session.next.tool.called" ||
+    event.type === "session.next.tool.metadata.updated" ||
+    event.type === "session.next.tool.success" ||
+    event.type === "session.next.tool.failed" ||
     event.type === "permission.asked" ||
     event.type === "permission.replied" ||
     event.type === "question.asked" ||
@@ -971,7 +975,14 @@ function createLayer(input: StreamInput) {
 
           trackBlocker(event)
 
-          const prev = event.type === "message.part.updated" ? listSubagentTabs(state.subagent) : undefined
+          const prev =
+            event.type === "message.part.updated" ||
+            event.type === "session.next.tool.called" ||
+            event.type === "session.next.tool.metadata.updated" ||
+            event.type === "session.next.tool.success" ||
+            event.type === "session.next.tool.failed"
+              ? listSubagentTabs(state.subagent)
+              : undefined
           const next = reduceSessionData({
             data: state.data,
             event,

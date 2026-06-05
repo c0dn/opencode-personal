@@ -104,6 +104,64 @@ function reduce(data: ReturnType<typeof createSubagentData>, event: unknown) {
   })
 }
 
+function v2Called(input: { id?: string; sessionID?: string; callID?: string; tool?: string; timestamp?: number; body?: Record<string, unknown> } = {}) {
+  return {
+    id: input.id ?? "evt-called-1",
+    type: "session.next.tool.called",
+    properties: {
+      timestamp: input.timestamp ?? 10,
+      sessionID: input.sessionID ?? "parent-1",
+      callID: input.callID ?? "call-task-1",
+      tool: input.tool ?? "task",
+      input: input.body ?? { description: "Scan reducer paths", subagent_type: "explore" },
+      provider: { executed: true },
+    },
+  } satisfies Event
+}
+
+function v2Metadata(input: { sessionID?: string; callID?: string; timestamp?: number; task?: unknown } = {}) {
+  return {
+    id: "evt-metadata-1",
+    type: "session.next.tool.metadata.updated",
+    properties: {
+      timestamp: input.timestamp ?? 11,
+      sessionID: input.sessionID ?? "parent-1",
+      callID: input.callID ?? "call-task-1",
+      task: input.task ?? { sessionID: "child-1", toolCalls: 4 },
+    },
+  } as Event
+}
+
+function v2Success(input: { sessionID?: string; callID?: string; timestamp?: number; title?: string; structured?: Record<string, unknown> } = {}) {
+  return {
+    id: "evt-success-1",
+    type: "session.next.tool.success",
+    properties: {
+      timestamp: input.timestamp ?? 12,
+      sessionID: input.sessionID ?? "parent-1",
+      callID: input.callID ?? "call-task-1",
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      structured: input.structured ?? {},
+      content: [],
+      provider: { executed: true },
+    },
+  } satisfies Event
+}
+
+function v2Failed(input: { sessionID?: string; callID?: string; timestamp?: number } = {}) {
+  return {
+    id: "evt-failed-1",
+    type: "session.next.tool.failed",
+    properties: {
+      timestamp: input.timestamp ?? 12,
+      sessionID: input.sessionID ?? "parent-1",
+      callID: input.callID ?? "call-task-1",
+      error: { type: "unknown", message: "failed" },
+      provider: { executed: true },
+    },
+  } satisfies Event
+}
+
 function taskMessage(sessionID: string, status: "running" | "completed" = "completed"): SessionMessage {
   if (status === "running") {
     return {
@@ -521,6 +579,126 @@ describe("run subagent data", () => {
       }),
     ])
     expect(snapshot.questions).toEqual([])
+  })
+
+  test("creates live v2 task tabs only after called and exact metadata", () => {
+    for (const events of [[v2Called()], [v2Metadata()], [v2Metadata(), v2Failed()]]) {
+      const data = createSubagentData()
+      for (const event of events) {
+        reduce(data, event)
+      }
+      expect(snapshotSubagentData(data).tabs).toEqual([])
+    }
+
+    const calledThenMetadata = createSubagentData()
+    reduce(calledThenMetadata, v2Called({ id: "evt-called-canonical", timestamp: 10 }))
+    reduce(calledThenMetadata, v2Metadata({ timestamp: 99 }))
+    expect(snapshotSubagentData(calledThenMetadata).tabs).toEqual([
+      expect.objectContaining({
+        sessionID: "child-1",
+        partID: "evt-called-canonical",
+        callID: "call-task-1",
+        label: "Explore",
+        description: "Scan reducer paths",
+        status: "running",
+        toolCalls: 4,
+        lastUpdatedAt: 10,
+      }),
+    ])
+
+    const metadataThenCalled = createSubagentData()
+    reduce(metadataThenCalled, v2Metadata())
+    reduce(metadataThenCalled, v2Called({ timestamp: 20 }))
+    expect(snapshotSubagentData(metadataThenCalled).tabs).toEqual([
+      expect.objectContaining({ sessionID: "child-1", partID: "evt-called-1", status: "running", lastUpdatedAt: 20 }),
+    ])
+  })
+
+  test("updates live v2 task tabs from terminal events without metadata timestamp override", () => {
+    const completed = createSubagentData()
+    reduce(completed, v2Called({ timestamp: 10 }))
+    reduce(completed, v2Success({ timestamp: 30, title: "Done" }))
+    reduce(completed, v2Metadata({ timestamp: 20 }))
+    expect(snapshotSubagentData(completed).tabs).toEqual([
+      expect.objectContaining({ status: "completed", title: "Done", lastUpdatedAt: 30 }),
+    ])
+
+    const failed = createSubagentData()
+    reduce(failed, v2Called({ timestamp: 10 }))
+    reduce(failed, v2Metadata({ timestamp: 20 }))
+    reduce(failed, v2Failed({ timestamp: 40 }))
+    expect(snapshotSubagentData(failed).tabs).toEqual([
+      expect.objectContaining({ status: "error", lastUpdatedAt: 40 }),
+    ])
+  })
+
+  test("ignores non-task and invalid live v2 task metadata", () => {
+    const nonTask = createSubagentData()
+    reduce(nonTask, v2Called({ tool: "bash" }))
+    reduce(nonTask, v2Metadata())
+    expect(snapshotSubagentData(nonTask).tabs).toEqual([])
+
+    for (const task of [
+      { sessionID: "msg_legacy" },
+      { sessionID: "prt_legacy" },
+      { sessionID: "child-1", toolCalls: -1 },
+      { sessionID: "child-1", toolCalls: Number.NaN },
+      { sessionID: "child-1", toolCalls: Number.POSITIVE_INFINITY },
+      { sessionId: "child-1" },
+      { sessionID: "child-1", toolcalls: 1 },
+      { sessionID: "child-1", calls: 1 },
+      { sessionID: "child-1", model: "gpt" },
+    ]) {
+      const data = createSubagentData()
+      reduce(data, v2Called())
+      reduce(data, v2Metadata({ task }))
+      expect(snapshotSubagentData(data).tabs).toEqual([])
+    }
+  })
+
+  test("does not resurrect cleared completed live v2 task tabs", () => {
+    const data = createSubagentData()
+    reduce(data, v2Called())
+    reduce(data, v2Metadata())
+    reduce(data, v2Success({ timestamp: 30, structured: { task: { sessionID: "child-1", toolCalls: 4 } } }))
+    expect(clearFinishedSubagents(data)).toBe(true)
+    reduce(data, v2Metadata({ timestamp: 40 }))
+    expect(snapshotSubagentData(data).tabs).toEqual([])
+  })
+
+  test("legacy parent task part updates no longer create tabs", () => {
+    const data = createSubagentData()
+    reduce(data, {
+      type: "message.part.updated",
+      properties: {
+        part: taskMessage("child-1", "running").parts[0],
+      },
+    })
+    expect(snapshotSubagentData(data).tabs).toEqual([])
+  })
+
+  test("child part updates still update details for a known v2-created tab", () => {
+    const data = createSubagentData()
+    reduce(data, v2Called())
+    reduce(data, v2Metadata())
+    reduce(data, {
+      type: "message.updated",
+      properties: { sessionID: "child-1", info: { id: "msg-child-1", role: "assistant" } },
+    })
+    reduce(data, {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "txt-child-1",
+          messageID: "msg-child-1",
+          sessionID: "child-1",
+          type: "text",
+          text: "hello child",
+        },
+      },
+    })
+
+    expect(visible(snapshotSubagentData(data).details["child-1"]?.commits ?? [])).toEqual(["hello child"])
   })
 
   test("replays bootstrapped child session messages into inspector commits", () => {

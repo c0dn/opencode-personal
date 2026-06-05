@@ -428,6 +428,34 @@ function toolUpdated(part: SessionToolPart): SdkEvent {
   }
 }
 
+function v2ToolCalled(input: { id?: string; callID?: string; tool?: string; timestamp?: number; body?: Record<string, unknown> } = {}): SdkEvent {
+  return {
+    id: input.id ?? "evt-v2-task-called",
+    type: "session.next.tool.called",
+    properties: {
+      timestamp: input.timestamp ?? 10,
+      sessionID: "session-1",
+      callID: input.callID ?? "call-task-1",
+      tool: input.tool ?? "task",
+      input: input.body ?? { description: "Explore run.ts", subagent_type: "explore" },
+      provider: { executed: true },
+    },
+  } satisfies SdkEvent
+}
+
+function v2ToolMetadata(input: { callID?: string; timestamp?: number; childSessionID?: string; toolCalls?: number } = {}): SdkEvent {
+  return {
+    id: "evt-v2-task-metadata",
+    type: "session.next.tool.metadata.updated",
+    properties: {
+      timestamp: input.timestamp ?? 11,
+      sessionID: "session-1",
+      callID: input.callID ?? "call-task-1",
+      task: { sessionID: input.childSessionID ?? "child-1", ...(input.toolCalls !== undefined ? { toolCalls: input.toolCalls } : {}) },
+    },
+  } satisfies SdkEvent
+}
+
 function textDelta(messageID: string, partID: string, delta: string, sessionID = "session-1"): SdkEvent {
   return {
     id: `evt-${partID}-delta`,
@@ -772,6 +800,86 @@ describe("run stream transport", () => {
       expect(legacyMessages).not.toHaveBeenCalled()
     } finally {
       src.close()
+      await transport.close()
+    }
+  })
+
+  test("global v2 called and metadata events create a live footer subagent tab", async () => {
+    const global = globalFeed()
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        globalStream: global.stream,
+        v2Messages: async () => okV2Messages([]),
+        children: async () => ok([]),
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      global.push(globalEvent(v2ToolCalled({ id: "evt-v2-called-canonical" })))
+      global.push(globalEvent(v2ToolMetadata({ toolCalls: 2 })))
+
+      const state = await waitFor(() => {
+        const item = ui.events.findLast((event) => event.type === "stream.subagent")
+        return item?.type === "stream.subagent" && item.state.tabs.some((tab) => tab.sessionID === "child-1")
+          ? item.state
+          : undefined
+      })
+
+      expect(state.tabs).toEqual([
+        expect.objectContaining({
+          sessionID: "child-1",
+          partID: "evt-v2-called-canonical",
+          callID: "call-task-1",
+          status: "running",
+          toolCalls: 2,
+        }),
+      ])
+    } finally {
+      global.close()
+      await transport.close()
+    }
+  })
+
+  test("legacy parent task part updates no longer create live footer subagent tabs", async () => {
+    const global = globalFeed()
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({ globalStream: global.stream, v2Messages: async () => okV2Messages([]) }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      global.push(
+        globalEvent(
+          toolUpdated(
+            runningTool({
+              sessionID: "session-1",
+              messageID: "msg-1",
+              id: "task-1",
+              callID: "call-1",
+              tool: "task",
+              body: { description: "Explore run.ts", subagent_type: "explore" },
+              metadata: { sessionId: "child-1" },
+            }),
+          ),
+        ),
+      )
+      await Bun.sleep(50)
+      expect(
+        ui.events
+          .filter((event) => event.type === "stream.subagent")
+          .flatMap((event) => (event.type === "stream.subagent" ? event.state.tabs : [])),
+      ).toEqual([])
+    } finally {
+      global.close()
       await transport.close()
     }
   })
@@ -1431,13 +1539,9 @@ describe("run stream transport", () => {
     const task = createSessionTransport({
       sdk: sdk({
         globalStream: global.stream,
-        messages: async ({ sessionID }) => {
-          if (sessionID !== "session-1") {
-            return ok([])
-          }
-
+        v2Messages: async () => {
           await gate.promise
-          return ok([])
+          return okV2Messages([])
         },
         children: async () => ok([]),
       }),
@@ -1466,26 +1570,8 @@ describe("run stream transport", () => {
       )
       global.push(globalEvent(textUpdated(textPart("txt-child-1", "msg-child-1", "", "child-1"))))
       global.push(globalEvent(textDelta("msg-child-1", "txt-child-1", "Hello", "child-1")))
-      global.push(
-        globalEvent(
-          toolUpdated(
-            runningTool({
-              sessionID: "session-1",
-              messageID: "msg-1",
-              id: "task-1",
-              callID: "call-1",
-              tool: "task",
-              body: {
-                description: "Explore run.ts",
-                subagent_type: "explore",
-              },
-              metadata: {
-                sessionId: "child-1",
-              },
-            }),
-          ),
-        ),
-      )
+      global.push(globalEvent(v2ToolCalled({ id: "evt-v2-called-buffered" })))
+      global.push(globalEvent(v2ToolMetadata()))
       gate.resolve()
       transport = await task
 
@@ -1540,27 +1626,8 @@ describe("run stream transport", () => {
     })
 
     try {
-      global.push(globalEvent(assistant("msg-1")))
-      global.push(
-        globalEvent(
-          toolUpdated(
-            runningTool({
-              sessionID: "session-1",
-              messageID: "msg-1",
-              id: "task-1",
-              callID: "call-1",
-              tool: "task",
-              body: {
-                description: "Explore run.ts",
-                subagent_type: "explore",
-              },
-              metadata: {
-                sessionId: "child-1",
-              },
-            }),
-          ),
-        ),
-      )
+      global.push(globalEvent(v2ToolCalled({ id: "evt-v2-called-stream" })))
+      global.push(globalEvent(v2ToolMetadata()))
 
       await waitFor(() => {
         const item = ui.events.findLast((event) => event.type === "stream.subagent")
@@ -1953,6 +2020,46 @@ describe("run stream transport", () => {
           return ok(undefined)
         },
         status: async () => ok(statusMap(busy)),
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      await Promise.race([
+        transport.runPromptTurn({
+          agent: undefined,
+          model: undefined,
+          variant: undefined,
+          prompt: { text: "hello", parts: [] },
+          files: [],
+          includeFiles: false,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("turn timed out")), 1_000)),
+      ])
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
+
+  test("resolves prompt turns after v2 tool activity and idle", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        stream: src.stream,
+        promptAsync: async () => {
+          queueMicrotask(() => {
+            src.push(v2ToolCalled())
+            src.push(v2ToolMetadata())
+            src.push(idle())
+          })
+          return ok(undefined)
+        },
+        status: async () => ok(statusMap(false)),
       }),
       sessionID: "session-1",
       thinking: true,

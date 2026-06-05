@@ -39,9 +39,23 @@ type DetailState = {
   frames: Frame[]
 }
 
+type LiveTaskCall = {
+  parentSessionID: string
+  eventID?: string
+  callID: string
+  tool?: string
+  input?: Record<string, unknown>
+  task?: { sessionID: string; toolCalls?: number }
+  status?: "running" | "completed" | "error"
+  timestamp?: number
+  title?: string
+}
+
 export type SubagentData = {
   tabs: Map<string, FooterSubagentTab>
   details: Map<string, DetailState>
+  liveTask: Map<string, LiveTaskCall>
+  clearedLiveTask: Set<string>
 }
 
 export type BootstrapSubagentInput = {
@@ -340,13 +354,8 @@ function canonicalSessionID(value: unknown) {
   return sessionID
 }
 
-function strictTaskMetadata(content: TranscriptV2Display.DisplayAssistantTool) {
-  if (content.type !== "tool" || content.name !== "task" || content.state.status === "pending") {
-    return undefined
-  }
-
-  const structured = record(content.state.structured)
-  const task = record(structured?.task)
+function strictTaskMetadataRecord(value: unknown) {
+  const task = record(value)
   if (!task) {
     return undefined
   }
@@ -370,6 +379,15 @@ function strictTaskMetadata(content: TranscriptV2Display.DisplayAssistantTool) {
   }
 
   return { sessionID }
+}
+
+function strictTaskMetadata(content: TranscriptV2Display.DisplayAssistantTool) {
+  if (content.type !== "tool" || content.name !== "task" || content.state.status === "pending") {
+    return undefined
+  }
+
+  const structured = record(content.state.structured)
+  return strictTaskMetadataRecord(structured?.task)
 }
 
 function displayTaskTab(
@@ -442,6 +460,105 @@ function syncTaskTab(data: SubagentData, part: ToolPart, children?: Set<string>)
   data.tabs.set(sessionID, next)
   ensureDetail(data, sessionID)
   return true
+}
+
+function liveTaskKey(parentSessionID: string, callID: string) {
+  return `${parentSessionID}:${callID}`
+}
+
+function liveStatus(event: Extract<Event, { type: "session.next.tool.success" | "session.next.tool.failed" }>) {
+  return event.type === "session.next.tool.success" ? "completed" : "error"
+}
+
+function syncLiveTaskTab(data: SubagentData, call: LiveTaskCall) {
+  if (!call.eventID || call.tool !== "task" || !call.input || !call.task) {
+    return false
+  }
+
+  const status = call.status ?? "running"
+  const next = {
+    sessionID: call.task.sessionID,
+    partID: call.eventID,
+    callID: call.callID,
+    label: Locale.titlecase(text(call.input.subagent_type) ?? "general"),
+    description: text(call.input.description) ?? text(call.title) ?? inputLabel(call.input) ?? "",
+    status,
+    title: text(call.title),
+    toolCalls: call.task.toolCalls,
+    lastUpdatedAt: call.timestamp ?? Date.now(),
+  } satisfies FooterSubagentTab
+
+  if (sameSubagentTab(data.tabs.get(call.task.sessionID), next)) {
+    ensureDetail(data, call.task.sessionID)
+    return false
+  }
+
+  data.tabs.set(call.task.sessionID, next)
+  ensureDetail(data, call.task.sessionID)
+  return true
+}
+
+function reduceLiveTaskEvent(data: SubagentData, event: Event) {
+  if (
+    event.type !== "session.next.tool.called" &&
+    event.type !== "session.next.tool.metadata.updated" &&
+    event.type !== "session.next.tool.success" &&
+    event.type !== "session.next.tool.failed"
+  ) {
+    return false
+  }
+
+  const key = liveTaskKey(event.properties.sessionID, event.properties.callID)
+  if (data.clearedLiveTask.has(key)) {
+    return false
+  }
+
+  if (event.type === "session.next.tool.called") {
+    const current = data.liveTask.get(key)
+    const next = {
+      ...current,
+      parentSessionID: event.properties.sessionID,
+      eventID: event.id,
+      callID: event.properties.callID,
+      tool: event.properties.tool,
+      input: event.properties.input,
+      status: current?.status ?? "running",
+      timestamp: current?.status === "completed" || current?.status === "error" ? current.timestamp : event.properties.timestamp,
+    } satisfies LiveTaskCall
+    data.liveTask.set(key, next)
+    return syncLiveTaskTab(data, next)
+  }
+
+  if (event.type === "session.next.tool.metadata.updated") {
+    const task = strictTaskMetadataRecord(event.properties.task)
+    if (!task) {
+      return false
+    }
+
+    const current = data.liveTask.get(key)
+    const next = {
+      ...current,
+      parentSessionID: event.properties.sessionID,
+      callID: event.properties.callID,
+      task,
+    } satisfies LiveTaskCall
+    data.liveTask.set(key, next)
+    return syncLiveTaskTab(data, next)
+  }
+
+  const task = event.type === "session.next.tool.success" ? strictTaskMetadataRecord(record(event.properties.structured)?.task) : undefined
+  const current = data.liveTask.get(key)
+  const next = {
+    ...current,
+    parentSessionID: event.properties.sessionID,
+    callID: event.properties.callID,
+    ...(task ? { task } : {}),
+    status: liveStatus(event),
+    timestamp: event.properties.timestamp,
+    ...(event.type === "session.next.tool.success" ? { title: text(event.properties.title) ?? current?.title } : {}),
+  } satisfies LiveTaskCall
+  data.liveTask.set(key, next)
+  return syncLiveTaskTab(data, next)
 }
 
 function frameKey(commit: StreamCommit) {
@@ -720,6 +837,8 @@ export function createSubagentData(): SubagentData {
   return {
     tabs: new Map(),
     details: new Map(),
+    liveTask: new Map(),
+    clearedLiveTask: new Set(),
   }
 }
 
@@ -972,6 +1091,14 @@ export function clearFinishedSubagents(data: SubagentData) {
 
     data.tabs.delete(sessionID)
     data.details.delete(sessionID)
+    for (const [key, call] of data.liveTask) {
+      if (call.task?.sessionID !== sessionID && call.callID !== tab.callID) {
+        continue
+      }
+
+      data.liveTask.delete(key)
+      data.clearedLiveTask.add(key)
+    }
     changed = true
   }
 
@@ -987,14 +1114,23 @@ export function reduceSubagentData(input: {
 }) {
   const event = input.event
 
+  if (reduceLiveTaskEvent(input.data, event)) {
+    return true
+  }
+
+  if (
+    event.type === "session.next.tool.called" ||
+    event.type === "session.next.tool.metadata.updated" ||
+    event.type === "session.next.tool.success" ||
+    event.type === "session.next.tool.failed"
+  ) {
+    return false
+  }
+
   if (event.type === "message.part.updated") {
     const part = event.properties.part
     if (part.sessionID === input.sessionID) {
-      if (part.type !== "tool") {
-        return false
-      }
-
-      return syncTaskTab(input.data, part)
+      return false
     }
   }
 
