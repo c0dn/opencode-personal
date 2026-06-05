@@ -6,7 +6,6 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstanceState } from "@/effect/instance-state"
 
 import { Session } from "@/session/session"
-import { MessageV2 } from "@/session/message-v2"
 import type { SessionID } from "@/session/schema"
 import { Database } from "@opencode-ai/core/database/database"
 import { eq } from "drizzle-orm"
@@ -14,11 +13,38 @@ import { Config } from "@/config/config"
 import * as Log from "@opencode-ai/core/util/log"
 import { SessionShareTable } from "@opencode-ai/core/share/sql"
 import { EventV2 } from "@opencode-ai/core/event"
+import { SessionEvent } from "@opencode-ai/core/session/event"
 import { TranscriptV2PublicExport } from "@/session/transcript-v2-public-export"
 import { TranscriptV2PublicShare } from "./transcript-v2-public-share"
 
 const log = Log.create({ service: "share-next" })
 const disabled = process.env["OPENCODE_DISABLE_SHARE"] === "true" || process.env["OPENCODE_DISABLE_SHARE"] === "1"
+const sessionNextShareSyncDefinitions = [
+  SessionEvent.Prompted,
+  SessionEvent.AgentSwitched,
+  SessionEvent.ModelSwitched,
+  SessionEvent.Synthetic,
+  SessionEvent.Shell.Started,
+  SessionEvent.Shell.Ended,
+  SessionEvent.Step.Started,
+  SessionEvent.Step.Ended,
+  SessionEvent.Step.Failed,
+  SessionEvent.Text.Started,
+  SessionEvent.Text.Ended,
+  SessionEvent.Reasoning.Started,
+  SessionEvent.Reasoning.Ended,
+  SessionEvent.Tool.Input.Started,
+  SessionEvent.Tool.Input.Ended,
+  SessionEvent.Tool.Called,
+  SessionEvent.Tool.MetadataUpdated,
+  SessionEvent.Tool.Success,
+  SessionEvent.Tool.Failed,
+  SessionEvent.Retried,
+  SessionEvent.Compaction.Started,
+  SessionEvent.Compaction.Ended,
+] as const
+type SessionNextShareSyncDefinition = (typeof sessionNextShareSyncDefinitions)[number]
+type SessionNextShareSyncData = EventV2.Data<SessionNextShareSyncDefinition>
 
 export type Api = {
   create: string
@@ -131,14 +157,20 @@ export const layer = Layer.effect(
           def: D,
           fn: (data: EventV2.Data<D>) => Effect.Effect<void, unknown>,
         ) =>
-          events.listen((event) => {
-            if (event.type !== def.type || event.location?.directory !== _ctx.directory) return Effect.void
-            return fn(event.data as EventV2.Data<D>).pipe(
-              Effect.catchCause((cause) =>
-                Effect.sync(() => log.error("share subscriber failed", { type: def.type, cause })),
-              ),
-            )
+          Effect.gen(function* () {
+            const unsubscribe = yield* events.listen((event) => {
+              if (event.type !== def.type || event.location?.directory !== _ctx.directory) return Effect.void
+              return fn(event.data as EventV2.Data<D>).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.sync(() => log.error("share subscriber failed", { type: def.type, cause })),
+                ),
+              )
+            })
+            yield* Effect.addFinalizer(() => unsubscribe)
           })
+
+        const watchSessionNext = (def: SessionNextShareSyncDefinition) =>
+          watch(def, (data: SessionNextShareSyncData) => sync(data.sessionID))
 
         yield* watch(Session.Event.Updated, (data) =>
           Effect.gen(function* () {
@@ -146,13 +178,7 @@ export const layer = Layer.effect(
             yield* sync(info.id)
           }),
         )
-        yield* watch(MessageV2.Event.Updated, (data) =>
-          Effect.gen(function* () {
-            const info = data.info
-            yield* sync(info.sessionID)
-          }),
-        )
-        yield* watch(MessageV2.Event.PartUpdated, (data) => sync(data.part.sessionID))
+        yield* Effect.forEach(sessionNextShareSyncDefinitions, watchSessionNext, { discard: true })
         yield* watch(Session.Event.Diff, (data) => sync(data.sessionID))
         yield* watch(Session.Event.Deleted, (data) => remove(data.sessionID))
 
