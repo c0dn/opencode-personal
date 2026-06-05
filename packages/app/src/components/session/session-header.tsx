@@ -4,8 +4,9 @@ import { DropdownMenu } from "@opencode-ai/ui/dropdown-menu"
 import { Icon } from "@opencode-ai/ui/icon"
 import { IconButton } from "@opencode-ai/ui/icon-button"
 import { Keybind } from "@opencode-ai/ui/keybind"
+import { Select } from "@opencode-ai/ui/select"
 import { Spinner } from "@opencode-ai/ui/spinner"
-import { showToast } from "@opencode-ai/ui/toast"
+import { showToast } from "@/utils/toast"
 import { Tooltip, TooltipKeybind } from "@opencode-ai/ui/tooltip"
 import { getFilename } from "@opencode-ai/core/util/path"
 import { createEffect, createMemo, createSignal, For, onMount, Show } from "solid-js"
@@ -14,6 +15,7 @@ import { Portal } from "solid-js/web"
 import { useCommand } from "@/context/command"
 import { useLanguage } from "@/context/language"
 import { useLayout } from "@/context/layout"
+import { useLocal } from "@/context/local"
 import { usePlatform } from "@/context/platform"
 import { useServer } from "@/context/server"
 import { useSettings } from "@/context/settings"
@@ -21,12 +23,12 @@ import { useSync } from "@/context/sync"
 import { useTerminal } from "@/context/terminal"
 import { focusTerminalById } from "@/pages/session/helpers"
 import { useSessionLayout } from "@/pages/session/session-layout"
-import { messageAgentColor } from "@/utils/agent"
+import { agentColor, messageAgentColor } from "@/utils/agent"
 import { decode64 } from "@/utils/base64"
 import { Persist, persisted } from "@/utils/persist"
 import { StatusPopover, StatusPopoverV2 } from "../status-popover"
-import { IconButtonV2 } from "@opencode-ai/ui/v2/components/icon-button-v2.jsx"
-import { Icon as IconV2 } from "@opencode-ai/ui/v2/components/icon.jsx"
+import { IconButtonV2 } from "@opencode-ai/ui/v2/icon-button-v2"
+import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
 
 const OPEN_APPS = [
   "vscode",
@@ -135,6 +137,7 @@ export function SessionHeader() {
   const layout = useLayout()
   const command = useCommand()
   const server = useServer()
+  const local = useLocal()
   const platform = usePlatform()
   const language = useLanguage()
   const settings = useSettings()
@@ -156,6 +159,7 @@ export function SessionHeader() {
   const hotkey = createMemo(() => command.keybind("file.open"))
   const os = createMemo(() => detectOS(platform))
   const isDesktopV2 = createMemo(() => platform.platform === "desktop" && settings.general.newLayoutDesigns())
+  const useV2HeaderActions = createMemo(() => settings.general.newLayoutDesigns())
   const search = createMemo(() => (isDesktopV2() ? settings.general.showSearch() : true))
   const tree = createMemo(() => (isDesktopV2() ? settings.general.showFileTree() : true))
   const term = createMemo(() => (isDesktopV2() ? settings.general.showTerminal() : true))
@@ -233,7 +237,25 @@ export function SessionHeader() {
   const tint = createMemo(() =>
     messageAgentColor(params.id ? sync.data.message[params.id] : undefined, sync.data.agent),
   )
+  const activeAgent = createMemo(() => {
+    const agent = local.agent.current()
+    if (!agent) return
+    return {
+      name: agent.name,
+      color: agentColor(agent.name, agent.color),
+    }
+  })
   const v2ActionsState = createMemo<SessionHeaderV2ActionsState>(() => ({
+    agentName: activeAgent()?.name,
+    agentColor: activeAgent()?.color,
+    agentOptions: local.agent.list().map((agent) => agent.name),
+    agentLabel: language.t("session.header.agent.label"),
+    agentActiveLabel: activeAgent()?.name
+      ? language.t("session.header.agent.active", { agent: activeAgent()!.name })
+      : undefined,
+    agentCycleLabel: language.t("command.agent.cycle"),
+    agentCycleKeybind: command.keybind("agent.cycle"),
+    onAgentSelect: (value) => local.agent.set(value),
     statusVisible: status(),
     statusLabel: language.t("status.popover.trigger"),
     reviewLabel: language.t("command.review.toggle"),
@@ -322,7 +344,7 @@ export function SessionHeader() {
         {(mount) => (
           <Portal mount={mount()}>
             <Show
-              when={isDesktopV2}
+              when={useV2HeaderActions()}
               fallback={
                 <div class="flex items-center gap-2">
                   <Show when={projectDirectory()}>
@@ -445,21 +467,23 @@ export function SessionHeader() {
                       </Tooltip>
                     </Show>
                     <Show when={term()}>
-                      <TooltipKeybind
-                        title={language.t("command.terminal.toggle")}
-                        keybind={command.keybind("terminal.toggle")}
-                      >
-                        <Button
-                          variant="ghost"
-                          class="group/terminal-toggle titlebar-icon w-8 h-6 p-0 box-border shrink-0"
-                          onClick={toggleTerminal}
-                          aria-label={language.t("command.terminal.toggle")}
-                          aria-expanded={view().terminal.opened()}
-                          aria-controls="terminal-panel"
+                      <div class="hidden md:flex items-center">
+                        <TooltipKeybind
+                          title={language.t("command.terminal.toggle")}
+                          keybind={command.keybind("terminal.toggle")}
                         >
-                          <Icon size="small" name={view().terminal.opened() ? "terminal-active" : "terminal"} />
-                        </Button>
-                      </TooltipKeybind>
+                          <Button
+                            variant="ghost"
+                            class="group/terminal-toggle titlebar-icon w-8 h-6 p-0 box-border shrink-0"
+                            onClick={toggleTerminal}
+                            aria-label={language.t("command.terminal.toggle")}
+                            aria-expanded={view().terminal.opened()}
+                            aria-controls="terminal-panel"
+                          >
+                            <Icon size="small" name={view().terminal.opened() ? "terminal-active" : "terminal"} />
+                          </Button>
+                        </TooltipKeybind>
+                      </div>
                     </Show>
 
                     <div class="hidden md:flex items-center gap-1 shrink-0">
@@ -520,6 +544,14 @@ export function SessionHeader() {
 }
 
 type SessionHeaderV2ActionsState = {
+  agentName?: string
+  agentColor?: string
+  agentOptions: string[]
+  agentLabel: string
+  agentActiveLabel?: string
+  agentCycleLabel: string
+  agentCycleKeybind: string
+  onAgentSelect: (value: string | undefined) => void
   statusVisible: boolean
   statusLabel: string
   reviewLabel: string
@@ -530,18 +562,51 @@ type SessionHeaderV2ActionsState = {
 
 function SessionHeaderV2Actions(props: { state: SessionHeaderV2ActionsState }) {
   return (
-    <div class="flex items-center gap-0">
+    <div class="flex items-center gap-2">
+      <Show when={props.state.agentName}>
+        {(agentName) => (
+          <div data-component="session-agent-control" class="relative">
+            <span
+              class="pointer-events-none absolute left-2 top-1/2 z-10 size-2 -translate-y-1/2 rounded-full"
+              style={{ "background-color": props.state.agentColor ?? "var(--icon-muted)" }}
+              aria-hidden="true"
+            />
+            <TooltipKeybind
+              placement="bottom"
+              title={props.state.agentCycleLabel}
+              keybind={props.state.agentCycleKeybind}
+            >
+              <Select
+                size="normal"
+                options={props.state.agentOptions}
+                current={agentName()}
+                onSelect={props.state.onAgentSelect}
+                class="capitalize max-w-[160px] text-text-base"
+                valueClass="truncate text-13-regular text-text-base"
+                triggerStyle={{ height: "28px", "padding-left": "22px" }}
+                triggerProps={{ "aria-label": props.state.agentActiveLabel ?? props.state.agentLabel }}
+                variant="ghost"
+              />
+            </TooltipKeybind>
+          </div>
+        )}
+      </Show>
+      {/* Status popover + review/side-panel toggle are desktop-only. On mobile the
+          floating bottom bar handles the Session<->Changes toggle, so these top
+          controls would be redundant; keep them mounted at >=md unchanged. */}
       <Show when={props.state.statusVisible}>
-        <Tooltip placement="bottom" value={props.state.statusLabel}>
-          <StatusPopoverV2 />
-        </Tooltip>
+        <div class="hidden md:flex items-center">
+          <Tooltip placement="bottom" value={props.state.statusLabel}>
+            <StatusPopoverV2 />
+          </Tooltip>
+        </div>
       </Show>
       <TooltipKeybind title={props.state.reviewLabel} keybind={props.state.reviewKeybind}>
         <IconButtonV2
           type="button"
           variant="ghost-muted"
           size="large"
-          class="!w-9 shrink-0"
+          class="!w-9 shrink-0 !hidden md:!inline-flex"
           state={props.state.reviewOpened ? "pressed" : undefined}
           onClick={props.state.onReviewToggle}
           aria-label={props.state.reviewLabel}

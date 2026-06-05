@@ -7,9 +7,7 @@ import {
   reduceSessionData,
   type SessionData,
 } from "./session-data"
-import { bootstrapSessionDataV2Display, replaySessionV2Messages } from "./session-replay"
 import type { FooterSubagentState, FooterSubagentTab, StreamCommit } from "./types"
-import type { TranscriptV2Display } from "@/session/transcript-v2-display"
 
 export const SUBAGENT_BOOTSTRAP_LIMIT = 200
 export const SUBAGENT_CALL_BOOTSTRAP_LIMIT = 80
@@ -39,36 +37,14 @@ type DetailState = {
   frames: Frame[]
 }
 
-type LiveTaskCall = {
-  parentSessionID: string
-  eventID?: string
-  callID: string
-  tool?: string
-  input?: Record<string, unknown>
-  task?: { sessionID: string; toolCalls?: number }
-  status?: "running" | "completed" | "error"
-  timestamp?: number
-  title?: string
-}
-
 export type SubagentData = {
   tabs: Map<string, FooterSubagentTab>
   details: Map<string, DetailState>
-  liveTask: Map<string, LiveTaskCall>
-  clearedLiveTask: Set<string>
 }
 
 export type BootstrapSubagentInput = {
   data: SubagentData
   messages: SessionMessage[]
-  children: Array<{ id: string; title?: string }>
-  permissions: PermissionRequest[]
-  questions: QuestionRequest[]
-}
-
-export type BootstrapSubagentV2DisplayInput = {
-  data: SubagentData
-  messages: readonly TranscriptV2Display.DisplayTranscriptMessage[]
   children: Array<{ id: string; title?: string }>
   permissions: PermissionRequest[]
   questions: QuestionRequest[]
@@ -315,14 +291,6 @@ function metadata(part: ToolPart, key: string) {
   return ("metadata" in part.state ? part.state.metadata?.[key] : undefined) ?? part.metadata?.[key]
 }
 
-function record(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined
-  }
-
-  return value as Record<string, unknown>
-}
-
 function taskTab(part: ToolPart, sessionID: string): FooterSubagentTab {
   const label = Locale.titlecase(text(part.state.input.subagent_type) ?? "general")
   const description = text(part.state.input.description) ?? stateTitle(part) ?? inputLabel(part.state.input) ?? ""
@@ -343,98 +311,6 @@ function taskTab(part: ToolPart, sessionID: string): FooterSubagentTab {
 
 function taskSessionID(part: ToolPart) {
   return text(metadata(part, "sessionId")) ?? text(metadata(part, "sessionID"))
-}
-
-function canonicalSessionID(value: unknown) {
-  const sessionID = text(value)
-  if (!sessionID || /^(?:msg|prt)_/.test(sessionID)) {
-    return undefined
-  }
-
-  return sessionID
-}
-
-function strictTaskMetadataRecord(value: unknown) {
-  const task = record(value)
-  if (!task) {
-    return undefined
-  }
-
-  const keys = Object.keys(task)
-  if (!keys.every((key) => key === "sessionID" || key === "toolCalls")) {
-    return undefined
-  }
-
-  const sessionID = canonicalSessionID(task.sessionID)
-  if (!sessionID) {
-    return undefined
-  }
-
-  if ("toolCalls" in task) {
-    if (typeof task.toolCalls !== "number" || !Number.isFinite(task.toolCalls) || task.toolCalls < 0) {
-      return undefined
-    }
-
-    return { sessionID, toolCalls: task.toolCalls }
-  }
-
-  return { sessionID }
-}
-
-function strictTaskMetadata(content: TranscriptV2Display.DisplayAssistantTool) {
-  if (content.type !== "tool" || content.name !== "task" || content.state.status === "pending") {
-    return undefined
-  }
-
-  const structured = record(content.state.structured)
-  return strictTaskMetadataRecord(structured?.task)
-}
-
-function displayTaskTab(
-  content: TranscriptV2Display.DisplayAssistantTool,
-  task: { sessionID: string; toolCalls?: number },
-): FooterSubagentTab {
-  const input = record(content.state.status === "pending" ? undefined : content.state.input) ?? {}
-  const label = Locale.titlecase(text(input.subagent_type) ?? "general")
-  const description = text(input.description) ?? text(content.title) ?? inputLabel(input) ?? ""
-  const status = content.state.status === "error" ? "error" : content.state.status === "completed" ? "completed" : "running"
-
-  return {
-    sessionID: task.sessionID,
-    partID: content.id,
-    callID: content.callID,
-    label,
-    description,
-    status,
-    title: text(content.title),
-    toolCalls: task.toolCalls,
-    lastUpdatedAt: content.time.completed ?? content.time.ran ?? content.time.created,
-  }
-}
-
-function syncTaskTabV2Display(
-  data: SubagentData,
-  content: TranscriptV2Display.DisplayAssistantTool,
-  children?: Set<string>,
-) {
-  const task = strictTaskMetadata(content)
-  if (!task) {
-    return false
-  }
-
-  if (children && children.size > 0 && !children.has(task.sessionID)) {
-    return false
-  }
-
-  const next = displayTaskTab(content, task)
-  if (sameSubagentTab(data.tabs.get(task.sessionID), next)) {
-    ensureDetail(data, task.sessionID)
-    return false
-  }
-
-  data.tabs.set(task.sessionID, next)
-  ensureDetail(data, task.sessionID)
-  return true
 }
 
 function syncTaskTab(data: SubagentData, part: ToolPart, children?: Set<string>) {
@@ -460,105 +336,6 @@ function syncTaskTab(data: SubagentData, part: ToolPart, children?: Set<string>)
   data.tabs.set(sessionID, next)
   ensureDetail(data, sessionID)
   return true
-}
-
-function liveTaskKey(parentSessionID: string, callID: string) {
-  return `${parentSessionID}:${callID}`
-}
-
-function liveStatus(event: Extract<Event, { type: "session.next.tool.success" | "session.next.tool.failed" }>) {
-  return event.type === "session.next.tool.success" ? "completed" : "error"
-}
-
-function syncLiveTaskTab(data: SubagentData, call: LiveTaskCall) {
-  if (!call.eventID || call.tool !== "task" || !call.input || !call.task) {
-    return false
-  }
-
-  const status = call.status ?? "running"
-  const next = {
-    sessionID: call.task.sessionID,
-    partID: call.eventID,
-    callID: call.callID,
-    label: Locale.titlecase(text(call.input.subagent_type) ?? "general"),
-    description: text(call.input.description) ?? text(call.title) ?? inputLabel(call.input) ?? "",
-    status,
-    title: text(call.title),
-    toolCalls: call.task.toolCalls,
-    lastUpdatedAt: call.timestamp ?? Date.now(),
-  } satisfies FooterSubagentTab
-
-  if (sameSubagentTab(data.tabs.get(call.task.sessionID), next)) {
-    ensureDetail(data, call.task.sessionID)
-    return false
-  }
-
-  data.tabs.set(call.task.sessionID, next)
-  ensureDetail(data, call.task.sessionID)
-  return true
-}
-
-function reduceLiveTaskEvent(data: SubagentData, event: Event) {
-  if (
-    event.type !== "session.next.tool.called" &&
-    event.type !== "session.next.tool.metadata.updated" &&
-    event.type !== "session.next.tool.success" &&
-    event.type !== "session.next.tool.failed"
-  ) {
-    return false
-  }
-
-  const key = liveTaskKey(event.properties.sessionID, event.properties.callID)
-  if (data.clearedLiveTask.has(key)) {
-    return false
-  }
-
-  if (event.type === "session.next.tool.called") {
-    const current = data.liveTask.get(key)
-    const next = {
-      ...current,
-      parentSessionID: event.properties.sessionID,
-      eventID: event.id,
-      callID: event.properties.callID,
-      tool: event.properties.tool,
-      input: event.properties.input,
-      status: current?.status ?? "running",
-      timestamp: current?.status === "completed" || current?.status === "error" ? current.timestamp : event.properties.timestamp,
-    } satisfies LiveTaskCall
-    data.liveTask.set(key, next)
-    return syncLiveTaskTab(data, next)
-  }
-
-  if (event.type === "session.next.tool.metadata.updated") {
-    const task = strictTaskMetadataRecord(event.properties.task)
-    if (!task) {
-      return false
-    }
-
-    const current = data.liveTask.get(key)
-    const next = {
-      ...current,
-      parentSessionID: event.properties.sessionID,
-      callID: event.properties.callID,
-      task,
-    } satisfies LiveTaskCall
-    data.liveTask.set(key, next)
-    return syncLiveTaskTab(data, next)
-  }
-
-  const task = event.type === "session.next.tool.success" ? strictTaskMetadataRecord(record(event.properties.structured)?.task) : undefined
-  const current = data.liveTask.get(key)
-  const next = {
-    ...current,
-    parentSessionID: event.properties.sessionID,
-    callID: event.properties.callID,
-    ...(task ? { task } : {}),
-    status: liveStatus(event),
-    timestamp: event.properties.timestamp,
-    ...(event.type === "session.next.tool.success" ? { title: text(event.properties.title) ?? current?.title } : {}),
-  } satisfies LiveTaskCall
-  data.liveTask.set(key, next)
-  return syncLiveTaskTab(data, next)
 }
 
 function frameKey(commit: StreamCommit) {
@@ -837,8 +614,6 @@ export function createSubagentData(): SubagentData {
   return {
     tabs: new Map(),
     details: new Map(),
-    liveTask: new Map(),
-    clearedLiveTask: new Set(),
   }
 }
 
@@ -944,63 +719,6 @@ export function bootstrapSubagentData(input: BootstrapSubagentInput) {
   return changed
 }
 
-export function bootstrapSubagentDataV2Display(input: BootstrapSubagentV2DisplayInput) {
-  const child = new Map(input.children.map((item) => [item.id, item]))
-  const children = new Set(child.keys())
-  let changed = false
-
-  for (const message of input.messages) {
-    if (message.type !== "assistant") {
-      continue
-    }
-
-    for (const content of message.content) {
-      if (content.type !== "tool") {
-        continue
-      }
-
-      changed = syncTaskTabV2Display(input.data, content, children) || changed
-    }
-  }
-
-  for (const item of input.permissions) {
-    if (!children.has(item.sessionID)) {
-      continue
-    }
-
-    changed = ensureBlockerTab(input.data, item.sessionID, child.get(item.sessionID)?.title, "permission") || changed
-  }
-
-  for (const item of input.questions) {
-    if (!children.has(item.sessionID)) {
-      continue
-    }
-
-    changed = ensureBlockerTab(input.data, item.sessionID, child.get(item.sessionID)?.title, "question") || changed
-  }
-
-  for (const sessionID of input.data.tabs.keys()) {
-    const detail = ensureDetail(input.data, sessionID)
-    const before = queueSnapshot(detail.data)
-
-    bootstrapSessionData({
-      data: detail.data,
-      messages: [],
-      permissions: input.permissions
-        .filter((item) => item.sessionID === sessionID)
-        .sort((a, b) => a.id.localeCompare(b.id)),
-      questions: input.questions
-        .filter((item) => item.sessionID === sessionID)
-        .sort((a, b) => a.id.localeCompare(b.id)),
-    })
-    compactDetail(detail)
-
-    changed = queueChanged(detail.data, before) || changed
-  }
-
-  return changed
-}
-
 export function bootstrapSubagentCalls(input: {
   data: SubagentData
   sessionID: string
@@ -1031,56 +749,6 @@ export function bootstrapSubagentCalls(input: {
   return changed || beforeCallCount !== detail.data.call.size || queueChanged(detail.data, before)
 }
 
-export function bootstrapSubagentCallsV2Display(input: {
-  data: SubagentData
-  sessionID: string
-  messages: readonly TranscriptV2Display.DisplayTranscriptMessage[]
-  thinking: boolean
-  limits: Record<string, number>
-}) {
-  if (!knownSession(input.data, input.sessionID) || input.messages.length === 0) {
-    return false
-  }
-
-  const detail = ensureDetail(input.data, input.sessionID)
-  const before = queueSnapshot(detail.data)
-  const beforeCallCount = detail.data.call.size
-  bootstrapSessionDataV2Display({
-    data: detail.data,
-    messages: input.messages,
-    permissions: detail.data.permissions,
-    questions: detail.data.questions,
-  })
-  const replay = replaySessionV2Messages({
-    data: detail.data,
-    messages: input.messages,
-    thinking: input.thinking,
-    limits: input.limits,
-    sessionID: input.sessionID,
-  })
-  const changed = appendCommits(detail, replay.commits)
-  compactDetail(detail)
-
-  return changed || beforeCallCount !== detail.data.call.size || queueChanged(detail.data, before)
-}
-
-export function recordSubagentDetailError(input: { data: SubagentData; sessionID: string; message: string }) {
-  if (!knownSession(input.data, input.sessionID)) {
-    return false
-  }
-
-  const detail = ensureDetail(input.data, input.sessionID)
-  return appendCommits(detail, [
-    {
-      kind: "error",
-      text: input.message,
-      phase: "start",
-      source: "system",
-      messageID: `subagent.history.error:${input.sessionID}:${input.message}`,
-    },
-  ])
-}
-
 export function clearFinishedSubagents(data: SubagentData) {
   let changed = false
 
@@ -1091,14 +759,6 @@ export function clearFinishedSubagents(data: SubagentData) {
 
     data.tabs.delete(sessionID)
     data.details.delete(sessionID)
-    for (const [key, call] of data.liveTask) {
-      if (call.task?.sessionID !== sessionID && call.callID !== tab.callID) {
-        continue
-      }
-
-      data.liveTask.delete(key)
-      data.clearedLiveTask.add(key)
-    }
     changed = true
   }
 
@@ -1114,23 +774,14 @@ export function reduceSubagentData(input: {
 }) {
   const event = input.event
 
-  if (reduceLiveTaskEvent(input.data, event)) {
-    return true
-  }
-
-  if (
-    event.type === "session.next.tool.called" ||
-    event.type === "session.next.tool.metadata.updated" ||
-    event.type === "session.next.tool.success" ||
-    event.type === "session.next.tool.failed"
-  ) {
-    return false
-  }
-
   if (event.type === "message.part.updated") {
     const part = event.properties.part
     if (part.sessionID === input.sessionID) {
-      return false
+      if (part.type !== "tool") {
+        return false
+      }
+
+      return syncTaskTab(input.data, part)
     }
   }
 

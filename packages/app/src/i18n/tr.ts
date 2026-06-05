@@ -502,6 +502,7 @@ export const dict = {
   "notification.session.error.fallbackDescription": "Bir hata oluştu",
 
   "home.recentProjects": "Son projeler",
+  "home.openedProjects": "Açık projeler",
   "home.empty.title": "Son proje yok",
   "home.empty.description": "Yerel bir proje açarak başlayın",
 
@@ -559,6 +560,8 @@ export const dict = {
   "session.header.open.ariaLabel": "{{app}} ile aç",
   "session.header.open.menu": "Açma seçenekleri",
   "session.header.open.copyPath": "Yolu kopyala",
+  "session.header.agent.label": "Aracı",
+  "session.header.agent.active": "Etkin aracı: @{{agent}}",
 
   "status.popover.trigger": "Durum",
   "status.popover.ariaLabel": "Sunucu yapılandırmaları",
@@ -603,6 +606,8 @@ export const dict = {
   "common.archive": "Arşivle",
   "common.delete": "Sil",
   "common.close": "Kapat",
+  "common.moveLeft": "Move left",
+  "common.moveRight": "Move right",
   "common.edit": "Düzenle",
   "common.loadMore": "Daha fazla yükle",
   "common.key.esc": "ESC",

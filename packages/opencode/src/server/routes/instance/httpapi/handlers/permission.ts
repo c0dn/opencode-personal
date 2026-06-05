@@ -1,5 +1,5 @@
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Permission } from "@/permission"
-import { PermissionID } from "@/permission/schema"
 import { Effect } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
@@ -10,12 +10,16 @@ export const permissionHandlers = HttpApiBuilder.group(InstanceHttpApi, "permiss
     const svc = yield* Permission.Service
 
     const list = Effect.fn("PermissionHttpApi.list")(function* () {
-      return yield* svc.list()
+      const pending = yield* svc.list()
+      return pending.map((item) => ({
+        ...item,
+        metadata: Permission.normalizeWireMetadata(item.metadata),
+      }))
     })
 
     const reply = Effect.fn("PermissionHttpApi.reply")(function* (ctx: {
-      params: { requestID: PermissionID }
-      payload: Permission.ReplyBody
+      params: { requestID: PermissionV1.ID }
+      payload: PermissionV1.ReplyBody
     }) {
       yield* svc
         .reply({

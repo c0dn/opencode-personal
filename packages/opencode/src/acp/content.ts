@@ -1,21 +1,9 @@
 import type { ContentBlock, ContentChunk, ResourceLink, Role } from "@agentclientprotocol/sdk"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
-import type { TranscriptV2Display } from "../session/transcript-v2-display"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 
-export type PromptPart =
-  | {
-      type: "text"
-      text: string
-      synthetic?: boolean
-      ignored?: boolean
-    }
-  | {
-      type: "file"
-      url: string
-      mime: string
-      filename?: string
-    }
+export type PromptPart = SessionV1.TextPartInput | SessionV1.FilePartInput
 
 export type ReplayPart =
   | {
@@ -113,18 +101,6 @@ export function partsToContentChunks(parts: readonly ReplayPart[]): ContentChunk
   return parts.flatMap(partToContentChunks)
 }
 
-export function displayTranscriptToReplayParts(
-  messages: readonly TranscriptV2Display.DisplayTranscriptMessage[],
-): ReplayPart[] {
-  return messages.flatMap(displayMessageToReplayParts)
-}
-
-export function displayTranscriptToContentChunks(
-  messages: readonly TranscriptV2Display.DisplayTranscriptMessage[],
-): ContentChunk[] {
-  return partsToContentChunks(displayTranscriptToReplayParts(messages))
-}
-
 export function partToContentChunks(part: ReplayPart): ContentChunk[] {
   switch (part.type) {
     case "text":
@@ -165,7 +141,7 @@ function uriToFilePart(
   uri: string,
   mime: string,
   filename?: string,
-): Extract<PromptPart, { type: "file" }> | Extract<PromptPart, { type: "text" }> {
+): SessionV1.FilePartInput | SessionV1.TextPartInput {
   try {
     if (uri.startsWith("file://")) {
       return {
@@ -190,144 +166,6 @@ function uriToFilePart(
   } catch {
     return { type: "text", text: uri }
   }
-}
-
-function displayMessageToReplayParts(message: TranscriptV2Display.DisplayTranscriptMessage): ReplayPart[] {
-  switch (message.type) {
-    case "user":
-      return compactParts([
-        textReplayPart(message.text),
-        ...(message.files ?? []).map(displayFileToReplayPart),
-        ...(message.taskRequests ?? []).map(displayTaskRequestToReplayPart),
-      ])
-
-    case "assistant":
-      return compactParts([
-        ...message.content.flatMap(displayAssistantContentToReplayParts),
-      ])
-
-    case "shell":
-      return compactParts([textReplayPart(["Shell", `$ ${message.command}`, message.output].filter(Boolean).join("\n"))])
-
-    case "synthetic":
-      return compactParts([textReplayPart(message.text, { synthetic: true })])
-
-    case "compaction":
-      return compactParts([textReplayPart([`Compaction (${message.reason})`, message.summary].filter(Boolean).join("\n"))])
-
-    case "agent-switched":
-      return compactParts([textReplayPart(`Agent switched to ${message.agent}`)])
-
-    case "model-switched":
-      return compactParts([textReplayPart(`Model switched to ${message.model.providerID}/${message.model.id}`)])
-
-    default:
-      return assertNever(message, "display message")
-  }
-}
-
-function displayAssistantContentToReplayParts(content: TranscriptV2Display.DisplayAssistantContent): ReplayPart[] {
-  switch (content.type) {
-    case "text":
-      return compactParts([textReplayPart(content.text)])
-    case "reasoning":
-      return compactParts([reasoningReplayPart(content.text)])
-    case "patch":
-      return compactParts([textReplayPart(["Patch", ...content.files].join("\n"))])
-    case "tool":
-      return displayToolToReplayParts(content)
-    default:
-      return assertNever(content, "display assistant content")
-  }
-}
-
-function displayToolToReplayParts(tool: TranscriptV2Display.DisplayAssistantTool): ReplayPart[] {
-  const label = tool.title ?? tool.name
-  const header = `Tool ${label} ${tool.state.status}`
-  switch (tool.state.status) {
-    case "pending":
-      return compactParts([textReplayPart([header, stringifyDisplayValue(tool.state.input)].filter(Boolean).join("\n"))])
-    case "running":
-    case "completed":
-      return compactParts([
-        textReplayPart([header, stringifyDisplayValue(tool.state.input)].filter(Boolean).join("\n")),
-        ...tool.state.content.map(displayToolOutputToReplayPart),
-      ])
-    case "error":
-      return compactParts([
-        textReplayPart(
-          [header, stringifyDisplayValue(tool.state.input), displayToolError(tool.state.error)].filter(Boolean).join("\n"),
-        ),
-        ...tool.state.content.map(displayToolOutputToReplayPart),
-      ])
-    default:
-      return assertNever(tool.state, "display tool state")
-  }
-}
-
-function displayTaskRequestToReplayPart(request: TranscriptV2Display.DisplayTaskRequest): ReplayPart | undefined {
-  return textReplayPart(
-    [
-      `Task request for ${request.agent}`,
-      request.command ? `Command: ${request.command}` : undefined,
-      request.description,
-      request.prompt,
-    ]
-      .filter(Boolean)
-      .join("\n"),
-  )
-}
-
-function displayFileToReplayPart(file: NonNullable<TranscriptV2Display.DisplayUser["files"]>[number]): ReplayPart | undefined {
-  if (!file.uri || !file.mime) return undefined
-  return { type: "file", url: file.uri, mime: file.mime, filename: file.name }
-}
-
-function displayToolOutputToReplayPart(output: TranscriptV2Display.DisplayToolOutput): ReplayPart | undefined {
-  switch (output.type) {
-    case "text":
-      return textReplayPart(output.text)
-    case "file":
-      return { type: "file", url: output.uri, mime: output.mime, filename: output.name }
-    default:
-      return assertNever(output, "display tool output")
-  }
-}
-
-function assertNever(value: never, kind: string): never {
-  throw new Error(`Unsupported ACP ${kind}: ${variantType(value)}`)
-}
-
-function variantType(value: unknown) {
-  if (value && typeof value === "object" && "type" in value) return String((value as { type?: unknown }).type)
-  if (value && typeof value === "object" && "status" in value) return String((value as { status?: unknown }).status)
-  return typeof value
-}
-
-function textReplayPart(text: string, flags?: Pick<Extract<ReplayPart, { type: "text" }>, "synthetic" | "ignored">): ReplayPart | undefined {
-  if (!text) return undefined
-  return { type: "text", text, ...flags }
-}
-
-function reasoningReplayPart(text: string): ReplayPart | undefined {
-  if (!text) return undefined
-  return { type: "reasoning", text }
-}
-
-function compactParts(parts: readonly (ReplayPart | undefined)[]): ReplayPart[] {
-  return parts.filter((part): part is ReplayPart => Boolean(part))
-}
-
-function stringifyDisplayValue(value: unknown) {
-  if (typeof value === "string") return value
-  if (value === undefined || value === null) return ""
-  return JSON.stringify(value)
-}
-
-function displayToolError(error: { message?: string; type?: string }) {
-  if (error.message) return `Error: ${error.message}`
-  if (error.type) return `Error: ${error.type}`
-  return "Error"
 }
 
 function filePartToContentChunks(part: Extract<ReplayPart, { type: "file" }>): ContentChunk[] {

@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test"
-import { EventV2 } from "@opencode-ai/core/event"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionMessage } from "@opencode-ai/core/session/message"
@@ -14,14 +13,8 @@ const model = {
   variant: ModelV2.VariantID.make("default"),
 }
 
-const bedrockModel = { api: { npm: "@ai-sdk/amazon-bedrock", id: "anthropic.claude-sonnet-4" } }
-const openAIModel = { api: { npm: "@ai-sdk/openai", id: "gpt-4.1" } }
-const xaiModel = { api: { npm: "@ai-sdk/xai", id: "grok-4" } }
-const gemini2Model = { api: { npm: "@ai-sdk/google", id: "gemini-2.5-pro" } }
-const gemini3Model = { api: { npm: "@ai-sdk/google", id: "gemini-3-pro" } }
-
 function id(suffix: string) {
-  return EventV2.ID.make(`evt_${suffix}`)
+  return SessionMessage.ID.make(`msg_${suffix}`)
 }
 
 function user(suffix: string, time: number, input: Partial<SessionMessage.User>): SessionMessage.User {
@@ -56,9 +49,8 @@ function assistant(
 
 function completedTool(input?: Partial<SessionMessage.AssistantTool>): SessionMessage.AssistantTool {
   return new SessionMessage.AssistantTool({
-    id: id("tool"),
+    id: "call-1",
     type: "tool",
-    callID: "call-1",
     name: "bash",
     time: { created: DateTime.makeUnsafe(2), completed: DateTime.makeUnsafe(3) },
     state: new SessionMessage.ToolStateCompleted({
@@ -67,35 +59,6 @@ function completedTool(input?: Partial<SessionMessage.AssistantTool>): SessionMe
       structured: {},
       content: [new ToolOutput.TextContent({ type: "text", text: "ok" })],
     }),
-    ...input,
-  })
-}
-
-function completedToolWithContent(content: SessionMessage.ToolStateCompleted["content"], input: Record<string, unknown> = { path: "file" }) {
-  return completedTool({
-    state: new SessionMessage.ToolStateCompleted({
-      status: "completed",
-      input,
-      structured: {},
-      content,
-    }),
-  })
-}
-
-function textContent(text: string) {
-  return new ToolOutput.TextContent({ type: "text", text })
-}
-
-function fileContent(uri: string, mime: string, name: string) {
-  return new ToolOutput.FileContent({ type: "file", uri, mime, name })
-}
-
-function patch(input?: Partial<SessionMessage.AssistantPatch>): SessionMessage.AssistantPatch {
-  return new SessionMessage.AssistantPatch({
-    id: id("patch"),
-    type: "patch",
-    hash: "abc123",
-    files: ["README.md"],
     ...input,
   })
 }
@@ -120,52 +83,6 @@ describe("session.message-v2-model.toModelMessages", () => {
     ])
   })
 
-  test("ignores task-request-only user turns", async () => {
-    expect(
-      await MessageV2Model.toModelMessages([
-        user("task-request", 1, {
-          taskRequests: [
-            new SessionMessage.UserTaskRequest({
-              type: "task-request",
-              id: id("task-request-part"),
-              prompt: "do not send this to provider",
-              description: "review",
-              agent: "reviewer",
-            }),
-          ],
-        }),
-      ]),
-    ).toStrictEqual([])
-  })
-
-  test("ignores mixed user task requests while preserving text and files", async () => {
-    expect(
-      await MessageV2Model.toModelMessages([
-        user("mixed-task-request", 1, {
-          text: "hello",
-          files: [new FileAttachment({ uri: "data:text/plain;base64,aGk=", mime: "text/plain", name: "note.txt" })],
-          taskRequests: [
-            new SessionMessage.UserTaskRequest({
-              type: "task-request",
-              id: id("mixed-task-request-part"),
-              prompt: "do not send this to provider",
-              description: "review",
-              agent: "reviewer",
-            }),
-          ],
-        }),
-      ]),
-    ).toStrictEqual([
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "hello" },
-          { type: "file", mediaType: "text/plain", filename: "note.txt", data: "data:text/plain;base64,aGk=" },
-        ],
-      },
-    ])
-  })
-
   test("converts assistant text and reasoning", async () => {
     expect(
       await MessageV2Model.toModelMessages([
@@ -174,7 +91,6 @@ describe("session.message-v2-model.toModelMessages", () => {
           new SessionMessage.AssistantReasoning({
             id: id("reasoning"),
             type: "reasoning",
-            reasoningID: "reasoning-1",
             text: "thinking",
           }),
         ]),
@@ -190,21 +106,6 @@ describe("session.message-v2-model.toModelMessages", () => {
     ])
   })
 
-  test("ignores patch-only assistant turns instead of producing tool messages", async () => {
-    expect(await MessageV2Model.toModelMessages([assistant("assistant", 1, [patch()])])).toStrictEqual([])
-  })
-
-  test("ignores mixed assistant patch content while preserving text", async () => {
-    expect(
-      await MessageV2Model.toModelMessages([
-        assistant("assistant", 1, [
-          patch(),
-          new SessionMessage.AssistantText({ id: id("text"), type: "text", text: "answer" }),
-        ]),
-      ]),
-    ).toStrictEqual([{ role: "assistant", content: [{ type: "text", text: "answer" }] }])
-  })
-
   test("skips non-aborted errored assistant turns", async () => {
     expect(
       await MessageV2Model.toModelMessages([
@@ -212,7 +113,7 @@ describe("session.message-v2-model.toModelMessages", () => {
           "api-error",
           1,
           [new SessionMessage.AssistantText({ id: id("api-text"), type: "text", text: "do not replay" })],
-          { error: { type: "api", message: "failed", isRetryable: false } },
+          { error: { type: "unknown", message: "failed" } },
         ),
         assistant(
           "unknown-error",
@@ -224,49 +125,21 @@ describe("session.message-v2-model.toModelMessages", () => {
     ).toStrictEqual([])
   })
 
-  test("keeps aborted errored assistant turns with meaningful content", async () => {
+  test("skips errored assistant turns", async () => {
     expect(
       await MessageV2Model.toModelMessages([
         assistant(
           "aborted",
           1,
           [new SessionMessage.AssistantText({ id: id("aborted-text"), type: "text", text: "partial answer" })],
-          { error: { type: "aborted", message: "stopped" } },
+          { error: { type: "unknown", message: "stopped" } },
         ),
       ]),
-    ).toStrictEqual([{ role: "assistant", content: [{ type: "text", text: "partial answer" }] }])
+    ).toStrictEqual([])
   })
 
   test("converts completed tool text output to tool-call and tool-result messages", async () => {
     expect(await MessageV2Model.toModelMessages([assistant("assistant", 1, [completedTool()])])).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { cmd: "ls" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "text", value: "ok" },
-          },
-        ],
-      },
-    ])
-  })
-
-  test("ignores assistant tool display title when converting model context", async () => {
-    expect(await MessageV2Model.toModelMessages([assistant("assistant", 1, [completedTool({ title: "List files" })])])).toStrictEqual([
       {
         role: "assistant",
         content: [
@@ -306,7 +179,7 @@ describe("session.message-v2-model.toModelMessages", () => {
                 new ToolOutput.TextContent({ type: "text", text: "read image" }),
                 new ToolOutput.FileContent({
                   type: "file",
-                  uri: "data:image/png;base64,Zm9v",
+                  source: { type: "data", data: "Zm9v" },
                   mime: "image/png",
                   name: "image.png",
                 }),
@@ -348,365 +221,6 @@ describe("session.message-v2-model.toModelMessages", () => {
     ])
   })
 
-  test("stripMedia replaces user media files with placeholders while preserving text and non-media files", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [
-          user("user", 1, {
-            text: "hello",
-            files: [
-              new FileAttachment({ uri: "data:image/png;base64,Zm9v", mime: "image/png", name: "image.png" }),
-              new FileAttachment({ uri: "data:text/plain;base64,aGk=", mime: "text/plain", name: "note.txt" }),
-            ],
-          }),
-        ],
-        { stripMedia: true },
-      ),
-    ).toStrictEqual([
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "hello" },
-          { type: "text", text: "[Attached image/png: image.png]" },
-          { type: "file", mediaType: "text/plain", filename: "note.txt", data: "data:text/plain;base64,aGk=" },
-        ],
-      },
-    ])
-  })
-
-  test("stripMedia removes completed tool file media while preserving text output", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [
-          assistant("assistant", 1, [
-            completedTool({
-              state: new SessionMessage.ToolStateCompleted({
-                status: "completed",
-                input: { path: "image.png" },
-                structured: {},
-                content: [
-                  new ToolOutput.TextContent({ type: "text", text: "read image" }),
-                  new ToolOutput.FileContent({
-                    type: "file",
-                    uri: "data:image/png;base64,Zm9v",
-                    mime: "image/png",
-                    name: "image.png",
-                  }),
-                ],
-              }),
-            }),
-          ]),
-        ],
-        { stripMedia: true },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { path: "image.png" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "text", value: "read image" },
-          },
-        ],
-      },
-    ])
-  })
-
-  test("toolOutputMaxChars truncates long completed tool text with legacy suffix", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [
-          assistant("assistant", 1, [
-            completedTool({
-              state: new SessionMessage.ToolStateCompleted({
-                status: "completed",
-                input: { cmd: "long" },
-                structured: {},
-                content: [new ToolOutput.TextContent({ type: "text", text: "abcdefghijkl" })],
-              }),
-            }),
-          ]),
-        ],
-        { toolOutputMaxChars: 5 },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { cmd: "long" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: {
-              type: "text",
-              value: "abcde\n[Tool output truncated for compaction: omitted 7 chars]",
-            },
-          },
-        ],
-      },
-    ])
-  })
-
-  test("non-positive toolOutputMaxChars does not truncate completed tool text", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [
-          assistant("zero", 1, [
-            completedTool({
-              state: new SessionMessage.ToolStateCompleted({
-                status: "completed",
-                input: { cmd: "zero" },
-                structured: {},
-                content: [new ToolOutput.TextContent({ type: "text", text: "abcdefghijkl" })],
-              }),
-            }),
-          ]),
-        ],
-        { toolOutputMaxChars: 0 },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { cmd: "zero" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "text", value: "abcdefghijkl" },
-          },
-        ],
-      },
-    ])
-
-    expect(
-      await MessageV2Model.toModelMessages(
-        [
-          assistant("negative", 1, [
-            completedTool({
-              state: new SessionMessage.ToolStateCompleted({
-                status: "completed",
-                input: { cmd: "negative" },
-                structured: {},
-                content: [new ToolOutput.TextContent({ type: "text", text: "mnopqrstuvwxyz" })],
-              }),
-            }),
-          ]),
-        ],
-        { toolOutputMaxChars: -5 },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { cmd: "negative" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "text", value: "mnopqrstuvwxyz" },
-          },
-        ],
-      },
-    ])
-  })
-
-  test("does not truncate pruned tool placeholder with toolOutputMaxChars", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [assistant("assistant", 1, [completedTool({ time: { created: DateTime.makeUnsafe(2), pruned: DateTime.makeUnsafe(4) } })])],
-        { toolOutputMaxChars: 5 },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { cmd: "ls" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "text", value: "[Old tool result content cleared]" },
-          },
-        ],
-      },
-    ])
-  })
-
-  test("toolOutputMaxChars concatenates multiple text chunks before truncating and preserves data files by default", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [
-          assistant("assistant", 1, [
-            completedTool({
-              state: new SessionMessage.ToolStateCompleted({
-                status: "completed",
-                input: { path: "image.png" },
-                structured: {},
-                content: [
-                  new ToolOutput.TextContent({ type: "text", text: "abcdef" }),
-                  new ToolOutput.TextContent({ type: "text", text: "ghijkl" }),
-                  new ToolOutput.FileContent({
-                    type: "file",
-                    uri: "data:image/png;base64,Zm9v",
-                    mime: "image/png",
-                    name: "image.png",
-                  }),
-                ],
-              }),
-            }),
-          ]),
-        ],
-        { toolOutputMaxChars: 8 },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { path: "image.png" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: {
-              type: "content",
-              value: [
-                { type: "text", text: "abcdefgh\n[Tool output truncated for compaction: omitted 4 chars]" },
-                { type: "media", mediaType: "image/png", data: "Zm9v" },
-              ],
-            },
-          },
-        ],
-      },
-    ])
-  })
-
-  test("toolOutputMaxChars concatenates and truncates multiple text chunks while stripMedia removes data files", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [
-          assistant("assistant", 1, [
-            completedTool({
-              state: new SessionMessage.ToolStateCompleted({
-                status: "completed",
-                input: { path: "image.png" },
-                structured: {},
-                content: [
-                  new ToolOutput.TextContent({ type: "text", text: "abcdef" }),
-                  new ToolOutput.TextContent({ type: "text", text: "ghijkl" }),
-                  new ToolOutput.FileContent({
-                    type: "file",
-                    uri: "data:image/png;base64,Zm9v",
-                    mime: "image/png",
-                    name: "image.png",
-                  }),
-                ],
-              }),
-            }),
-          ]),
-        ],
-        { toolOutputMaxChars: 8, stripMedia: true },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { path: "image.png" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: {
-              type: "text",
-              value: "abcdefgh\n[Tool output truncated for compaction: omitted 4 chars]",
-            },
-          },
-        ],
-      },
-    ])
-  })
-
   test("skips non-data tool file content in model media output", async () => {
     expect(
       await MessageV2Model.toModelMessages([
@@ -720,7 +234,7 @@ describe("session.message-v2-model.toModelMessages", () => {
                 new ToolOutput.TextContent({ type: "text", text: "read image" }),
                 new ToolOutput.FileContent({
                   type: "file",
-                  uri: "file:///tmp/image.png",
+                  source: { type: "file", uri: "file:///tmp/image.png" },
                   mime: "image/png",
                   name: "image.png",
                 }),
@@ -751,266 +265,6 @@ describe("session.message-v2-model.toModelMessages", () => {
             toolName: "bash",
             output: { type: "content", value: [{ type: "text", text: "read image" }] },
           },
-        ],
-      },
-    ])
-  })
-
-  test("extracts unsupported Bedrock PDF after completed tool result while preserving exact message order", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [
-          assistant("assistant", 1, [
-            completedToolWithContent(
-              [textContent("read pdf"), fileContent("data:application/pdf;base64,JVBERi0=", "application/pdf", "doc.pdf")],
-              { path: "doc.pdf" },
-            ),
-          ]),
-        ],
-        { model: bedrockModel },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { path: "doc.pdf" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "text", value: "read pdf" },
-          },
-        ],
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "Attached media from tool result:" },
-          { type: "file", mediaType: "application/pdf", filename: "doc.pdf", data: "data:application/pdf;base64,JVBERi0=" },
-        ],
-      },
-    ])
-  })
-
-  test("extracts Bedrock PDF-only completed tool media and keeps an empty text tool result", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [assistant("assistant", 1, [completedToolWithContent([fileContent("data:application/pdf;base64,JVBERi0=", "application/pdf", "doc.pdf")])])],
-        { model: bedrockModel },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { path: "file" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "text", value: "" },
-          },
-        ],
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "Attached media from tool result:" },
-          { type: "file", mediaType: "application/pdf", filename: "doc.pdf", data: "data:application/pdf;base64,JVBERi0=" },
-        ],
-      },
-    ])
-  })
-
-  test("keeps Bedrock image media in completed tool result", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [assistant("assistant", 1, [completedToolWithContent([textContent("read image"), fileContent("data:image/png;base64,Zm9v", "image/png", "image.png")])])],
-        { model: bedrockModel },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "content", value: [{ type: "text", text: "read image" }, { type: "media", mediaType: "image/png", data: "Zm9v" }] },
-          },
-        ],
-      },
-    ])
-  })
-
-  test("keeps OpenAI PDF media in completed tool result", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [assistant("assistant", 1, [completedToolWithContent([textContent("read pdf"), fileContent("data:application/pdf;base64,JVBERi0=", "application/pdf", "doc.pdf")])])],
-        { model: openAIModel },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "content", value: [{ type: "text", text: "read pdf" }, { type: "media", mediaType: "application/pdf", data: "JVBERi0=" }] },
-          },
-        ],
-      },
-    ])
-  })
-
-  test("uses XAI image-only tool media policy", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [
-          assistant("assistant", 1, [
-            completedToolWithContent([
-              textContent("mixed media"),
-              fileContent("data:application/pdf;base64,JVBERi0=", "application/pdf", "doc.pdf"),
-              fileContent("data:image/png;base64,Zm9v", "image/png", "image.png"),
-            ]),
-          ]),
-        ],
-        { model: xaiModel },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "content", value: [{ type: "text", text: "mixed media" }, { type: "media", mediaType: "image/png", data: "Zm9v" }] },
-          },
-        ],
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "Attached media from tool result:" },
-          { type: "file", mediaType: "application/pdf", filename: "doc.pdf", data: "data:application/pdf;base64,JVBERi0=" },
-        ],
-      },
-    ])
-  })
-
-  test("extracts Google Gemini 2 tool media and keeps Gemini 3 tool media", async () => {
-    const messages = [assistant("assistant", 1, [completedToolWithContent([textContent("read image"), fileContent("data:image/png;base64,Zm9v", "image/png", "image.png")])])]
-
-    expect(await MessageV2Model.toModelMessages(messages, { model: gemini2Model })).toStrictEqual([
-      {
-        role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
-      },
-      {
-        role: "tool",
-        content: [{ type: "tool-result", toolCallId: "call-1", toolName: "bash", output: { type: "text", value: "read image" } }],
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "Attached media from tool result:" },
-          { type: "file", mediaType: "image/png", filename: "image.png", data: "data:image/png;base64,Zm9v" },
-        ],
-      },
-    ])
-
-    expect(await MessageV2Model.toModelMessages(messages, { model: gemini3Model })).toStrictEqual([
-      {
-        role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "content", value: [{ type: "text", text: "read image" }, { type: "media", mediaType: "image/png", data: "Zm9v" }] },
-          },
-        ],
-      },
-    ])
-  })
-
-  test("stripMedia with model removes completed tool media without injecting extracted media", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [assistant("assistant", 1, [completedToolWithContent([textContent("read pdf"), fileContent("data:application/pdf;base64,JVBERi0=", "application/pdf", "doc.pdf")])])],
-        { stripMedia: true, model: bedrockModel },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
-      },
-      {
-        role: "tool",
-        content: [{ type: "tool-result", toolCallId: "call-1", toolName: "bash", output: { type: "text", value: "read pdf" } }],
-      },
-    ])
-  })
-
-  test("extracts non-data unsupported media into synthetic user file message", async () => {
-    expect(
-      await MessageV2Model.toModelMessages(
-        [assistant("assistant", 1, [completedToolWithContent([textContent("read pdf"), fileContent("file:///tmp/doc.pdf", "application/pdf", "doc.pdf")])])],
-        { model: bedrockModel },
-      ),
-    ).toStrictEqual([
-      {
-        role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { path: "file" }, providerExecuted: undefined }],
-      },
-      {
-        role: "tool",
-        content: [{ type: "tool-result", toolCallId: "call-1", toolName: "bash", output: { type: "text", value: "read pdf" } }],
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: "Attached media from tool result:" },
-          { type: "file", mediaType: "application/pdf", filename: "doc.pdf", data: "file:///tmp/doc.pdf" },
         ],
       },
     ])
@@ -1053,17 +307,15 @@ describe("session.message-v2-model.toModelMessages", () => {
       await MessageV2Model.toModelMessages([
         assistant("assistant", 1, [
           new SessionMessage.AssistantTool({
-            id: id("pending"),
+            id: "call-pending",
             type: "tool",
-            callID: "call-pending",
             name: "bash",
             time: { created: DateTime.makeUnsafe(2) },
             state: new SessionMessage.ToolStatePending({ status: "pending", input: "{\"cmd\":\"ls\"}" }),
           }),
           new SessionMessage.AssistantTool({
-            id: id("running"),
+            id: "call-running",
             type: "tool",
-            callID: "call-running",
             name: "read",
             time: { created: DateTime.makeUnsafe(3), ran: DateTime.makeUnsafe(4) },
             state: new SessionMessage.ToolStateRunning({
@@ -1120,9 +372,8 @@ describe("session.message-v2-model.toModelMessages", () => {
       await MessageV2Model.toModelMessages([
         assistant("assistant", 1, [
           new SessionMessage.AssistantTool({
-            id: id("error"),
+            id: "call-error",
             type: "tool",
-            callID: "call-error",
             name: "bash",
             time: { created: DateTime.makeUnsafe(2), ran: DateTime.makeUnsafe(3), completed: DateTime.makeUnsafe(4) },
             state: new SessionMessage.ToolStateError({
@@ -1184,7 +435,6 @@ describe("session.message-v2-model.toModelMessages", () => {
           new SessionMessage.AssistantReasoning({
             id: id("reasoning"),
             type: "reasoning",
-            reasoningID: "reasoning-1",
             text: "thinking",
           }),
           completedTool({ provider: { executed: true, metadata: { openai: { signature: "deferred" } } } }),

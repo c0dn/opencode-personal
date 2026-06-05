@@ -526,6 +526,7 @@ export const dict = {
   "notification.session.error.fallbackDescription": "Сталася помилка",
 
   "home.recentProjects": "Нещодавні проєкти",
+  "home.openedProjects": "Відкриті проєкти",
   "home.empty.title": "Немає нещодавніх проєктів",
   "home.empty.description": "Почніть, відкривши локальний проєкт",
 
@@ -590,6 +591,8 @@ export const dict = {
   "session.header.open.ariaLabel": "Відкрити в {{app}}",
   "session.header.open.menu": "Параметри відкриття",
   "session.header.open.copyPath": "Копіювати шлях",
+  "session.header.agent.label": "Агент",
+  "session.header.agent.active": "Активний агент: @{{agent}}",
   "session.header.open.finder": "Finder",
   "session.header.open.fileExplorer": "Провідник файлів",
   "session.header.open.fileManager": "Файловий менеджер",
@@ -653,6 +656,8 @@ export const dict = {
   "common.archive": "Архівувати",
   "common.delete": "Видалити",
   "common.close": "Закрити",
+  "common.moveLeft": "Move left",
+  "common.moveRight": "Move right",
   "common.edit": "Редагувати",
   "common.loadMore": "Завантажити більше",
   "common.key.esc": "ESC",

@@ -7,17 +7,22 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionMessageUpdater } from "@opencode-ai/core/session/message-updater"
+import { ToolOutput } from "@opencode-ai/core/tool-output"
 import { SessionID } from "../../src/session/schema"
 
-const sessionID = SessionID.make("session")
+const sessionID = SessionID.make("ses_test")
 const model = {
   id: ModelV2.ID.make("model"),
   providerID: ProviderV2.ID.make("provider"),
   variant: ModelV2.VariantID.make("default"),
 }
 
-function eventID(suffix: string) {
-  return EventV2.ID.make(`evt_${suffix}`)
+function msgID(id: string) {
+  return SessionMessage.ID.make(`msg_${id}`)
+}
+
+function eventID(id: string) {
+  return EventV2.ID.make(id)
 }
 
 function applyEvents(events: SessionEvent.Event[]) {
@@ -28,318 +33,56 @@ function applyEvents(events: SessionEvent.Event[]) {
   return state
 }
 
-function canonicalStateStrings(state: SessionMessageUpdater.MemoryState) {
-  const strings: string[] = []
-  const visit = (value: unknown) => {
-    if (typeof value === "string") {
-      strings.push(value)
-      return
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item)
-      return
-    }
-    if (value && typeof value === "object") {
-      for (const item of Object.values(value)) visit(item)
-    }
-  }
-  visit(state)
-  return strings
-}
-
-function assistantMessage(input: {
-  id: string
-  created: number
-  completed?: number
-  content?: SessionMessage.Assistant["content"]
-}) {
-  return new SessionMessage.Assistant({
-    id: SessionMessage.ID.make(input.id),
-    type: "assistant",
-    agent: "build",
-    model,
-    time: {
-      created: DateTime.makeUnsafe(input.created),
-      completed: input.completed ? DateTime.makeUnsafe(input.completed) : undefined,
-    },
-    content: input.content ?? [],
-  })
-}
-
-test("v2 message entities use creating evt_* IDs", () => {
-  const promptedID = eventID("prompted")
-  const assistantID = eventID("assistant_started")
-  const shellID = eventID("shell_started")
-  const compactionID = eventID("compaction_started")
-
+test("step snapshots carry over to assistant messages", () => {
+  const assistantMessageID = msgID("snapshot_assistant")
   const state = applyEvents([
     {
-      id: promptedID,
-      type: "session.next.prompted",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(1),
-        prompt: { text: "hello", files: [], agents: [], references: [] },
-      },
-    },
-    {
-      id: assistantID,
+      id: eventID("evt_snapshot_step_started"),
       type: "session.next.step.started",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(2),
-        agent: "build",
-        model,
-      },
+      data: { sessionID, assistantMessageID, timestamp: DateTime.makeUnsafe(1), agent: "build", model, snapshot: "before" },
     },
     {
-      id: shellID,
-      type: "session.next.shell.started",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(3),
-        callID: "shell-call",
-        command: "pwd",
-      },
-    },
-    {
-      id: compactionID,
-      type: "session.next.compaction.started",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(4),
-        reason: "auto",
-      },
-    },
-  ] satisfies SessionEvent.Event[])
-
-  expect(state.messages.map((message) => message.id)).toEqual([promptedID, assistantID, shellID])
-  for (const message of state.messages) {
-    expect(message.id.startsWith("evt_")).toBe(true)
-  }
-
-  const completed = applyEvents([
-    ...state.pendingCompactions!.map(
-      (compaction) =>
-        ({
-          id: compaction.id,
-          type: "session.next.compaction.started",
-          data: {
-            sessionID,
-            timestamp: compaction.time.created,
-            reason: compaction.reason,
-          },
-        }) satisfies SessionEvent.Event,
-    ),
-    {
-      id: eventID("compaction_ended"),
-      type: "session.next.compaction.ended",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(5),
-        text: "final summary",
-        include: "keep",
-      },
-    },
-  ] satisfies SessionEvent.Event[])
-  expect(completed.messages).toHaveLength(1)
-  expect(completed.messages[0]).toMatchObject({
-    id: compactionID,
-    type: "compaction",
-    reason: "auto",
-    summary: "final summary",
-    include: "keep",
-    time: { created: DateTime.makeUnsafe(4) },
-  })
-
-  for (const value of canonicalStateStrings(completed)) {
-    expect(value.startsWith("msg_")).toBe(false)
-    expect(value.startsWith("prt_")).toBe(false)
-  }
-})
-
-test("assistant durable content uses event-derived stable IDs across independent replays", () => {
-  const assistantID = eventID("assistant_started")
-  const textID = eventID("text_started")
-  const reasoningID = eventID("reasoning_started")
-  const toolID = eventID("tool_input_started")
-
-  const events = [
-    {
-      id: assistantID,
-      type: "session.next.step.started",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(1),
-        agent: "build",
-        model,
-      },
-    },
-    {
-      id: textID,
-      type: "session.next.text.started",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(2) },
-    },
-    {
-      id: eventID("text_delta"),
-      type: "session.next.text.delta",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(3), delta: "hello " },
-    },
-    {
-      id: eventID("text_ended"),
-      type: "session.next.text.ended",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(4), text: "hello assistant" },
-    },
-    {
-      id: reasoningID,
-      type: "session.next.reasoning.started",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(5), reasoningID: "reasoning-external" },
-    },
-    {
-      id: eventID("reasoning_ended"),
-      type: "session.next.reasoning.ended",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(6),
-        reasoningID: "reasoning-external",
-        text: "because",
-      },
-    },
-    {
-      id: toolID,
-      type: "session.next.tool.input.started",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(7), callID: "call-external", name: "bash" },
-    },
-    {
-      id: eventID("tool_called"),
-      type: "session.next.tool.called",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(8),
-        callID: "call-external",
-        tool: "bash",
-        input: { command: "pwd" },
-        provider: { executed: true },
-      },
-    },
-    {
-      id: eventID("tool_success"),
-      type: "session.next.tool.success",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(9),
-        callID: "call-external",
-        structured: {},
-        content: [{ type: "text", text: "/tmp" }],
-        provider: { executed: true, metadata: { status: "done" } },
-      },
-    },
-  ] satisfies SessionEvent.Event[]
-
-  const first = applyEvents(events)
-  const replayed = applyEvents(events)
-
-  expect(replayed).toEqual(first)
-  expect(first.messages[0]?.type).toBe("assistant")
-  if (first.messages[0]?.type !== "assistant") return
-
-  expect(first.messages[0].id).toBe(assistantID)
-  expect(first.messages[0].content).toMatchObject([
-    { type: "text", id: textID, text: "hello assistant" },
-    { type: "reasoning", id: reasoningID, reasoningID: "reasoning-external", text: "because" },
-    {
-      type: "tool",
-      id: toolID,
-      callID: "call-external",
-      name: "bash",
-      time: { created: DateTime.makeUnsafe(7), ran: DateTime.makeUnsafe(8), completed: DateTime.makeUnsafe(9) },
-    },
-  ])
-
-  for (const value of canonicalStateStrings(first)) {
-    expect(value.startsWith("msg_")).toBe(false)
-    expect(value.startsWith("prt_")).toBe(false)
-  }
-})
-
-test("step ended carries finish, snapshot, and token usage onto current assistant", () => {
-  const assistantID = eventID("assistant_started")
-  const endedID = eventID("step_ended")
-  const tokens = {
-    input: 11,
-    output: 22,
-    reasoning: 3,
-    cache: { read: 4, write: 5 },
-  }
-
-  const state = applyEvents([
-    {
-      id: assistantID,
-      type: "session.next.step.started",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(1),
-        agent: "build",
-        model,
-        snapshot: "snapshot-start",
-      },
-    },
-    {
-      id: endedID,
+      id: eventID("evt_snapshot_step_ended"),
       type: "session.next.step.ended",
       data: {
         sessionID,
+        assistantMessageID,
         timestamp: DateTime.makeUnsafe(2),
         finish: "stop",
-        cost: 0.25,
-        tokens,
-        snapshot: "snapshot-end",
+        cost: 0,
+        tokens: { input: 1, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+        snapshot: "after",
       },
     },
   ] satisfies SessionEvent.Event[])
 
-  expect(state.messages).toHaveLength(1)
-  const assistant = state.messages[0]
-  expect(assistant?.type).toBe("assistant")
-  if (assistant?.type !== "assistant") return
-
-  expect(assistant.id).toBe(assistantID)
-  expect(assistant.finish).toBe("stop")
-  expect(assistant.cost).toBe(0.25)
-  expect(assistant.tokens).toEqual(tokens)
-  expect(assistant.snapshot).toEqual({ start: "snapshot-start", end: "snapshot-end" })
-  expect(assistant.time.completed).toEqual(DateTime.makeUnsafe(2))
+  expect(state.messages[0]?.type).toBe("assistant")
+  if (state.messages[0]?.type !== "assistant") return
+  expect(state.messages[0].snapshot).toEqual({ start: "before", end: "after" })
+  expect(state.messages[0].finish).toBe("stop")
 })
 
-test("targeted step and tool events update the assistant named by assistantMessageID", () => {
-  const firstAssistantID = eventID("first_assistant")
-  const secondAssistantID = eventID("second_assistant")
-  const firstToolID = eventID("first_tool")
-
+test("targeted step and tool events update only the assistant named by assistantMessageID", () => {
+  const firstAssistantID = msgID("first_assistant")
+  const secondAssistantID = msgID("second_assistant")
   const state = applyEvents([
     {
-      id: firstAssistantID,
+      id: eventID("evt_first_step_started"),
       type: "session.next.step.started",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(1), agent: "build", model },
+      data: { sessionID, assistantMessageID: firstAssistantID, timestamp: DateTime.makeUnsafe(1), agent: "build", model },
     },
     {
-      id: firstToolID,
+      id: eventID("evt_first_tool_started"),
       type: "session.next.tool.input.started",
-      data: {
-        sessionID,
-        assistantMessageID: firstAssistantID,
-        timestamp: DateTime.makeUnsafe(2),
-        callID: "call-first",
-        name: "bash",
-      },
+      data: { sessionID, assistantMessageID: firstAssistantID, timestamp: DateTime.makeUnsafe(2), callID: "call-first", name: "bash" },
     },
     {
-      id: secondAssistantID,
+      id: eventID("evt_second_step_started"),
       type: "session.next.step.started",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(3), agent: "build", model },
+      data: { sessionID, assistantMessageID: secondAssistantID, timestamp: DateTime.makeUnsafe(3), agent: "build", model },
     },
     {
-      id: eventID("first_tool_called"),
+      id: eventID("evt_first_tool_called"),
       type: "session.next.tool.called",
       data: {
         sessionID,
@@ -352,7 +95,7 @@ test("targeted step and tool events update the assistant named by assistantMessa
       },
     },
     {
-      id: eventID("first_tool_success"),
+      id: eventID("evt_first_tool_success"),
       type: "session.next.tool.success",
       data: {
         sessionID,
@@ -360,12 +103,12 @@ test("targeted step and tool events update the assistant named by assistantMessa
         timestamp: DateTime.makeUnsafe(5),
         callID: "call-first",
         structured: {},
-        content: [{ type: "text", text: "/tmp" }],
+        content: [ToolOutput.text({ type: "text", text: "/tmp" })],
         provider: { executed: true },
       },
     },
     {
-      id: eventID("first_step_ended"),
+      id: eventID("evt_first_step_ended"),
       type: "session.next.step.ended",
       data: {
         sessionID,
@@ -383,126 +126,49 @@ test("targeted step and tool events update the assistant named by assistantMessa
   expect(first?.type).toBe("assistant")
   expect(second?.type).toBe("assistant")
   if (first?.type !== "assistant" || second?.type !== "assistant") return
-
   expect(first.finish).toBe("stop")
-  expect(first.content[0]).toMatchObject({ type: "tool", callID: "call-first", state: { status: "completed" } })
+  expect(first.content[0]).toMatchObject({ type: "tool", id: "call-first", state: { status: "completed" } })
   expect(second.finish).toBeUndefined()
   expect(second.content).toEqual([])
 })
 
-test("untargeted events use the newest assistant only when it is incomplete", () => {
-  const stale = assistantMessage({ id: "evt_stale_incomplete", created: 1 })
-  const newerCompleted = assistantMessage({ id: "evt_newer_completed", created: 2, completed: 3 })
-  const state: SessionMessageUpdater.MemoryState = { messages: [stale, newerCompleted] }
-
-  Effect.runSync(
-    SessionMessageUpdater.update(SessionMessageUpdater.memory(state), {
-      id: eventID("untargeted_step_ended"),
-      type: "session.next.step.ended",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(4),
-        finish: "stop",
-        cost: 1,
-        tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } },
-      },
-    } satisfies SessionEvent.Event),
-  )
-
-  expect(state.messages[0]).toMatchObject({ id: "evt_stale_incomplete", type: "assistant" })
-  if (state.messages[0]?.type === "assistant") expect(state.messages[0].finish).toBeUndefined()
-})
-
-test("compaction delta is non-canonical and ended materializes summary and include", () => {
-  const compactionID = eventID("compaction_started")
-  const events = [
-    {
-      id: compactionID,
-      type: "session.next.compaction.started",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(1),
-        reason: "manual",
-      },
-    },
-    {
-      id: eventID("compaction_delta_1"),
-      type: "session.next.compaction.delta",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(2), text: "partial " },
-    },
-    {
-      id: eventID("compaction_delta_2"),
-      type: "session.next.compaction.delta",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(3), text: "summary" },
-    },
-    {
-      id: eventID("compaction_ended"),
-      type: "session.next.compaction.ended",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(4),
-        text: "final summary",
-        include: "keep this context",
-      },
-    },
-  ] satisfies SessionEvent.Event[]
-
-  const deltaState = applyEvents(events.slice(0, 3))
-  expect(deltaState.messages).toEqual([])
-
-  const state = applyEvents(events)
-
-  expect(state.messages).toHaveLength(1)
-  const compaction = state.messages[0]
-  expect(compaction?.type).toBe("compaction")
-  if (compaction?.type !== "compaction") return
-
-  expect(compaction.id).toBe(compactionID)
-  expect(compaction.reason).toBe("manual")
-  expect(compaction.summary).toBe("final summary")
-  expect(compaction.include).toBe("keep this context")
-  expect(compaction.time.created).toEqual(DateTime.makeUnsafe(1))
-
-  for (const value of canonicalStateStrings(state)) {
-    expect(value.startsWith("msg_")).toBe(false)
-    expect(value.startsWith("prt_")).toBe(false)
-  }
-})
-
 test("tool settlement keeps call metadata separate from result metadata", () => {
+  const assistantID = msgID("metadata_assistant")
   const state = applyEvents([
     {
-      id: eventID("metadata_assistant"),
+      id: eventID("evt_metadata_step_started"),
       type: "session.next.step.started",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(1), agent: "build", model },
+      data: { sessionID, assistantMessageID: assistantID, timestamp: DateTime.makeUnsafe(1), agent: "build", model },
     },
     {
-      id: eventID("metadata_tool"),
+      id: eventID("evt_metadata_tool_started"),
       type: "session.next.tool.input.started",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(2), callID: "call-metadata", name: "bash" },
+      data: { sessionID, assistantMessageID: assistantID, timestamp: DateTime.makeUnsafe(2), callID: "call-metadata", name: "bash" },
     },
     {
-      id: eventID("metadata_called"),
+      id: eventID("evt_metadata_tool_called"),
       type: "session.next.tool.called",
       data: {
         sessionID,
+        assistantMessageID: assistantID,
         timestamp: DateTime.makeUnsafe(3),
         callID: "call-metadata",
         tool: "bash",
         input: { command: "pwd" },
-        provider: { executed: false, metadata: { call: "metadata" } },
+        provider: { executed: false, metadata: { fake: { call: "metadata" } } },
       },
     },
     {
-      id: eventID("metadata_success"),
+      id: eventID("evt_metadata_tool_success"),
       type: "session.next.tool.success",
       data: {
         sessionID,
+        assistantMessageID: assistantID,
         timestamp: DateTime.makeUnsafe(4),
         callID: "call-metadata",
         structured: {},
-        content: [{ type: "text", text: "/tmp" }],
-        provider: { executed: true, resultMetadata: { result: "metadata" } },
+        content: [ToolOutput.text({ type: "text", text: "/tmp" })],
+        provider: { executed: true, metadata: { fake: { result: "metadata" } } },
       },
     },
   ] satisfies SessionEvent.Event[])
@@ -510,24 +176,23 @@ test("tool settlement keeps call metadata separate from result metadata", () => 
   const assistant = state.messages[0]
   expect(assistant?.type).toBe("assistant")
   if (assistant?.type !== "assistant") return
-  const tool = assistant.content[0]
-  expect(tool?.type).toBe("tool")
-  if (tool?.type !== "tool") return
-  expect(tool.provider).toEqual({
+  const item = assistant.content[0]
+  expect(item?.type).toBe("tool")
+  if (item?.type !== "tool") return
+  expect(item.provider).toEqual({
     executed: true,
-    metadata: { call: "metadata" },
-    resultMetadata: { result: "metadata" },
+    metadata: { fake: { call: "metadata" } },
+    resultMetadata: { fake: { result: "metadata" } },
   })
 })
 
 test("tool failed terminalizes pending tools without creating or overwriting terminal tools", () => {
   const completedTool = new SessionMessage.AssistantTool({
     type: "tool",
-    id: eventID("completed_tool"),
-    callID: "call-completed",
+    id: "call-completed",
     name: "bash",
     time: { created: DateTime.makeUnsafe(1), ran: DateTime.makeUnsafe(2), completed: DateTime.makeUnsafe(3) },
-    provider: { executed: true, metadata: { call: "metadata" }, resultMetadata: { result: "ok" } },
+    provider: { executed: true, metadata: { fake: { call: "metadata" } }, resultMetadata: { fake: { result: "ok" } } },
     state: new SessionMessage.ToolStateCompleted({
       status: "completed",
       input: { command: "pwd" },
@@ -535,56 +200,60 @@ test("tool failed terminalizes pending tools without creating or overwriting ter
       content: [],
     }),
   })
+  const assistantID = msgID("failure_assistant")
   const state: SessionMessageUpdater.MemoryState = {
-    messages: [assistantMessage({ id: "evt_failure_assistant", created: 1, content: [completedTool] })],
+    messages: [
+      new SessionMessage.Assistant({
+        id: assistantID,
+        type: "assistant",
+        agent: "build",
+        model,
+        time: { created: DateTime.makeUnsafe(1) },
+        content: [completedTool],
+      }),
+    ],
   }
 
   for (const event of [
     {
-      id: eventID("pending_tool"),
+      id: eventID("evt_pending_tool_started"),
       type: "session.next.tool.input.started",
-      data: {
-        sessionID,
-        assistantMessageID: "evt_failure_assistant",
-        timestamp: DateTime.makeUnsafe(4),
-        callID: "call-pending",
-        name: "bash",
-      },
+      data: { sessionID, assistantMessageID: assistantID, timestamp: DateTime.makeUnsafe(4), callID: "call-pending", name: "bash" },
     },
     {
-      id: eventID("pending_failed"),
+      id: eventID("evt_pending_tool_failed"),
       type: "session.next.tool.failed",
       data: {
         sessionID,
-        assistantMessageID: "evt_failure_assistant",
+        assistantMessageID: assistantID,
         timestamp: DateTime.makeUnsafe(5),
         callID: "call-pending",
         error: { type: "unknown", message: "pending failed" },
-        provider: { executed: false, resultMetadata: { interrupted: true } },
+        provider: { executed: false, metadata: { fake: { interrupted: true } } },
       },
     },
     {
-      id: eventID("completed_failed"),
+      id: eventID("evt_completed_tool_failed"),
       type: "session.next.tool.failed",
       data: {
         sessionID,
-        assistantMessageID: "evt_failure_assistant",
+        assistantMessageID: assistantID,
         timestamp: DateTime.makeUnsafe(6),
         callID: "call-completed",
         error: { type: "unknown", message: "late failure" },
-        provider: { executed: false, resultMetadata: { late: true } },
+        provider: { executed: false, metadata: { fake: { late: true } } },
       },
     },
     {
-      id: eventID("missing_failed"),
+      id: eventID("evt_missing_tool_failed"),
       type: "session.next.tool.failed",
       data: {
         sessionID,
-        assistantMessageID: "evt_failure_assistant",
+        assistantMessageID: assistantID,
         timestamp: DateTime.makeUnsafe(7),
         callID: "call-missing",
-        error: { type: "unknown", message: "missing" },
-        provider: { executed: false },
+        error: { type: "unknown", message: "missing failure" },
+        provider: { executed: false, metadata: { fake: { missing: true } } },
       },
     },
   ] satisfies SessionEvent.Event[]) {
@@ -597,162 +266,50 @@ test("tool failed terminalizes pending tools without creating or overwriting ter
   expect(assistant.content).toHaveLength(2)
   expect(assistant.content[0]).toMatchObject({
     type: "tool",
-    callID: "call-completed",
-    provider: { executed: true, metadata: { call: "metadata" }, resultMetadata: { result: "ok" } },
+    id: "call-completed",
+    provider: { executed: true, metadata: { fake: { call: "metadata" } }, resultMetadata: { fake: { result: "ok" } } },
     state: { status: "completed", structured: { ok: true } },
   })
   expect(assistant.content[1]).toMatchObject({
     type: "tool",
-    callID: "call-pending",
-    provider: { executed: false, resultMetadata: { interrupted: true } },
-    state: {
-      status: "error",
-      input: {},
-      structured: {},
-      content: [],
-      error: { type: "unknown", message: "pending failed" },
-    },
+    id: "call-pending",
+    provider: { executed: false, resultMetadata: { fake: { interrupted: true } } },
+    state: { status: "error", input: {}, structured: {}, content: [], error: { type: "unknown", message: "pending failed" } },
   })
 })
 
-test("task metadata event merges canonical task metadata without nesting or overwriting result fields", () => {
-  const assistantID = eventID("task_metadata_assistant")
+test("compaction events reduce to one summary message", () => {
+  const messageID = msgID("compaction")
   const state = applyEvents([
     {
-      id: assistantID,
-      type: "session.next.step.started",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(1), agent: "build", model },
+      id: eventID("evt_compaction_started"),
+      type: "session.next.compaction.started",
+      data: { sessionID, messageID, timestamp: DateTime.makeUnsafe(1), reason: "auto" },
     },
     {
-      id: eventID("task_metadata_tool"),
-      type: "session.next.tool.input.started",
-      data: { sessionID, assistantMessageID: assistantID, timestamp: DateTime.makeUnsafe(2), callID: "task-call", name: "task" },
+      id: eventID("evt_compaction_delta_a"),
+      type: "session.next.compaction.delta",
+      data: { sessionID, timestamp: DateTime.makeUnsafe(2), text: "hello " },
     },
     {
-      id: eventID("task_metadata_called"),
-      type: "session.next.tool.called",
-      data: {
-        sessionID,
-        assistantMessageID: assistantID,
-        timestamp: DateTime.makeUnsafe(3),
-        callID: "task-call",
-        tool: "task",
-        input: { prompt: "do work" },
-        provider: { executed: true },
-      },
+      id: eventID("evt_compaction_delta_b"),
+      type: "session.next.compaction.delta",
+      data: { sessionID, timestamp: DateTime.makeUnsafe(3), text: "summary" },
     },
     {
-      id: eventID("task_metadata_updated"),
-      type: "session.next.tool.metadata.updated",
-      data: {
-        sessionID,
-        assistantMessageID: assistantID,
-        timestamp: DateTime.makeUnsafe(4),
-        callID: "task-call",
-        task: { sessionID: SessionID.make("ses_child"), toolCalls: 2 },
-      },
-    },
-    {
-      id: eventID("task_metadata_success"),
-      type: "session.next.tool.success",
-      data: {
-        sessionID,
-        assistantMessageID: assistantID,
-        timestamp: DateTime.makeUnsafe(5),
-        callID: "task-call",
-        structured: { result: "kept" },
-        content: [{ type: "text", text: "done" }],
-        provider: { executed: true },
-      },
+      id: eventID("evt_compaction_ended"),
+      type: "session.next.compaction.ended",
+      data: { sessionID, timestamp: DateTime.makeUnsafe(4), text: "final summary", include: "recent context" },
     },
   ] satisfies SessionEvent.Event[])
 
-  const assistant = state.messages[0]
-  expect(assistant?.type).toBe("assistant")
-  if (assistant?.type !== "assistant") return
-  const tool = assistant.content[0]
-  expect(tool?.type).toBe("tool")
-  if (tool?.type !== "tool" || tool.state.status !== "completed") return
-  expect(tool.state.structured).toEqual({ result: "kept", task: { sessionID: SessionID.make("ses_child"), toolCalls: 2 } })
-  expect(tool.state.structured).not.toHaveProperty("task.task")
-})
-
-test("task metadata events without a safe target do not corrupt other tools", () => {
-  const state = applyEvents([
-    {
-      id: eventID("metadata_ambiguous_assistant"),
-      type: "session.next.step.started",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(1), agent: "build", model },
-    },
-    {
-      id: eventID("metadata_non_task"),
-      type: "session.next.tool.input.started",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(2), callID: "same-call", name: "bash" },
-    },
-    {
-      id: eventID("metadata_non_task_called"),
-      type: "session.next.tool.called",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(3),
-        callID: "same-call",
-        tool: "bash",
-        input: {},
-        provider: { executed: true },
-      },
-    },
-    {
-      id: eventID("metadata_task"),
-      type: "session.next.tool.input.started",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(4), callID: "same-call", name: "task" },
-    },
-    {
-      id: eventID("metadata_task_called"),
-      type: "session.next.tool.called",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(5),
-        callID: "same-call",
-        tool: "task",
-        input: {},
-        provider: { executed: true },
-      },
-    },
-    {
-      id: eventID("metadata_task_second"),
-      type: "session.next.tool.input.started",
-      data: { sessionID, timestamp: DateTime.makeUnsafe(6), callID: "same-call", name: "task" },
-    },
-    {
-      id: eventID("metadata_task_second_called"),
-      type: "session.next.tool.called",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(7),
-        callID: "same-call",
-        tool: "task",
-        input: {},
-        provider: { executed: true },
-      },
-    },
-    {
-      id: eventID("metadata_ambiguous_update"),
-      type: "session.next.tool.metadata.updated",
-      data: {
-        sessionID,
-        timestamp: DateTime.makeUnsafe(8),
-        callID: "same-call",
-        task: { sessionID: SessionID.make("ses_child") },
-      },
-    },
-  ] satisfies SessionEvent.Event[])
-
-  const assistant = state.messages[0]
-  expect(assistant?.type).toBe("assistant")
-  if (assistant?.type !== "assistant") return
-  expect(assistant.content).toHaveLength(3)
-  for (const tool of assistant.content) {
-    expect(tool.type).toBe("tool")
-    if (tool.type === "tool" && tool.state.status === "running") expect(tool.state.structured).toEqual({})
-  }
+  expect(state.messages).toHaveLength(1)
+  expect(state.messages[0]).toMatchObject({
+    id: messageID,
+    type: "compaction",
+    reason: "auto",
+    summary: "final summary",
+    include: "recent context",
+    time: { created: DateTime.makeUnsafe(1) },
+  })
 })

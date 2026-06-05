@@ -33,6 +33,7 @@ import {
 import { color, printHeader, printResults } from "./report"
 import { coverageResult, parseOptions, routeKey, routeKeys, selectedScenarios } from "./routing"
 import { runScenario } from "./runner"
+import { disposeApps } from "./backend"
 import { runtime } from "./runtime"
 import { type Scenario } from "./types"
 
@@ -40,6 +41,48 @@ void (await import("@opencode-ai/core/util/log")).init({ print: false })
 
 function cursor(input: Record<string, unknown>) {
   return Buffer.from(JSON.stringify(input)).toString("base64url")
+}
+
+function projectViewProjects(body: unknown) {
+  object(body)
+  array(body.projects)
+  return body.projects
+}
+
+function onlyProjectViewEntry(body: unknown) {
+  const projects = projectViewProjects(body)
+  check(projects.length === 1, "project view should contain one open project")
+  return projectViewEntry(projects[0])
+}
+
+function projectViewEntry(value: unknown) {
+  const entry = value
+  object(entry)
+  const project = entry.project
+  object(project)
+  return { entry, project }
+}
+
+function findProjectViewEntry(body: unknown, projectID: string) {
+  return projectViewProjects(body)
+    .map(projectViewEntry)
+    .find((item) => item.project.id === projectID)
+}
+
+function data(validate: (value: any) => void) {
+  return (body: any) => {
+    object(body)
+    validate(body.data)
+  }
+}
+
+function locationData(validate: (value: any) => void) {
+  return (body: any) => {
+    object(body)
+    object(body.location)
+    object(body.location.project)
+    validate(body.data)
+  }
 }
 
 const scenarios: Scenario[] = [
@@ -157,6 +200,371 @@ const scenarios: Scenario[] = [
     "status",
   ),
   http.protected
+    .post("/project/reload", "project.reload")
+    .inProject()
+    .mutating()
+    .json(200, (body) => {
+      check(body === true, "project reload should return true")
+    }),
+  http.protected.get("/ui/project-view", "ui.projectView.get").json(200, (body) => {
+    object(body)
+    array(body.projects)
+    check(body.projects.length === 0, "initial project view should have no open projects")
+    check(body.lastProject === undefined, "initial project view should not include lastProject")
+  }),
+  http.protected.get("/ui/settings", "ui.settings.get").json(200, (body) => {
+    object(body)
+    object(body.settings)
+    const settings = body.settings
+    object(settings.general)
+    check(settings.general.autoSave === true, "default settings should enable autosave")
+    check(settings.general.followup === "steer", "default settings should normalize followup to steer")
+    check(settings.general.newLayoutDesigns === true, "default settings should enable v2 layout designs")
+    object(body.settings.keybinds)
+    object(body.model)
+    const model = body.model
+    array(model.user)
+    array(model.recent)
+    object(model.variant)
+  }),
+  http.protected
+    .put("/ui/settings/app", "ui.settings.app.update")
+    .mutating()
+    .at((ctx) => ({
+      path: "/ui/settings/app",
+      headers: ctx.headers(),
+      body: {
+        general: {
+          autoSave: false,
+          releaseNotes: true,
+          followup: "steer",
+          showFileTree: true,
+          showNavigation: false,
+          showSearch: false,
+          showStatus: false,
+          showTerminal: false,
+          showReasoningSummaries: false,
+          shellToolPartsExpanded: false,
+          editToolPartsExpanded: false,
+          showSessionProgressBar: true,
+          showCustomAgents: false,
+          newLayoutDesigns: true,
+        },
+        updates: { startup: true },
+        appearance: { fontSize: 15, mono: "Mono", sans: "Sans", terminal: "Term" },
+        permissions: { autoApprove: true },
+        notifications: { agent: true, permissions: true, errors: true },
+        sounds: {
+          agentEnabled: true,
+          agent: "staplebops-01",
+          permissionsEnabled: true,
+          permissions: "staplebops-02",
+          errorsEnabled: true,
+          errors: "nope-03",
+        },
+      },
+    }))
+    .json(200, (body) => {
+      object(body)
+      object(body.settings)
+      const settings = body.settings
+      object(settings.general)
+      object(settings.appearance)
+      object(settings.permissions)
+      check(settings.general.autoSave === false, "app settings update should store autosave")
+      check(settings.general.showFileTree === true, "app settings update should store booleans")
+      check(settings.appearance.fontSize === 15, "app settings update should store font size")
+      check(settings.permissions.autoApprove === true, "app settings update should store permissions")
+    }),
+  http.protected
+    .put("/ui/settings/app", "ui.settings.app.update.preserve-v1-layout")
+    .mutating()
+    .seeded((ctx) =>
+      ctx.api({
+        method: "PUT",
+        path: "/ui/settings/app",
+        headers: ctx.headers(),
+        body: {
+          general: {
+            autoSave: true,
+            releaseNotes: true,
+            followup: "steer",
+            showFileTree: false,
+            showNavigation: false,
+            showSearch: false,
+            showStatus: false,
+            showTerminal: false,
+            showReasoningSummaries: false,
+            shellToolPartsExpanded: false,
+            editToolPartsExpanded: false,
+            showSessionProgressBar: true,
+            showCustomAgents: false,
+            newLayoutDesigns: false,
+          },
+          updates: { startup: true },
+          appearance: { fontSize: 14, mono: "", sans: "", terminal: "" },
+          permissions: { autoApprove: false },
+          notifications: { agent: true, permissions: true, errors: false },
+          sounds: {
+            agentEnabled: true,
+            agent: "staplebops-01",
+            permissionsEnabled: true,
+            permissions: "staplebops-02",
+            errorsEnabled: true,
+            errors: "nope-03",
+          },
+        },
+      }),
+    )
+    .at((ctx) => ({
+      path: "/ui/settings/app",
+      headers: ctx.headers(),
+      body: {
+        general: {
+          autoSave: false,
+          releaseNotes: true,
+          followup: "steer",
+          showFileTree: false,
+          showNavigation: false,
+          showSearch: false,
+          showStatus: false,
+          showTerminal: false,
+          showReasoningSummaries: false,
+          shellToolPartsExpanded: false,
+          editToolPartsExpanded: false,
+          showSessionProgressBar: true,
+          showCustomAgents: false,
+          newLayoutDesigns: false,
+        },
+        updates: { startup: true },
+        appearance: { fontSize: 14, mono: "", sans: "", terminal: "" },
+        permissions: { autoApprove: false },
+        notifications: { agent: true, permissions: true, errors: false },
+        sounds: {
+          agentEnabled: true,
+          agent: "staplebops-01",
+          permissionsEnabled: true,
+          permissions: "staplebops-02",
+          errorsEnabled: true,
+          errors: "nope-03",
+        },
+      },
+    }))
+    .json(200, (body) => {
+      object(body)
+      object(body.settings)
+      const settings = body.settings
+      object(settings.general)
+      check(settings.general.autoSave === false, "unrelated app settings update should store changed field")
+      check(settings.general.newLayoutDesigns === false, "unrelated app settings update should preserve v1 fallback")
+    }),
+  http.protected
+    .put("/ui/settings/keybinds", "ui.settings.keybinds.replace")
+    .mutating()
+    .at((ctx) => ({
+      path: "/ui/settings/keybinds",
+      headers: ctx.headers(),
+      body: { keybinds: { "session.new": "ctrl+n" } },
+    }))
+    .json(200, (body) => {
+      object(body)
+      object(body.settings)
+      const settings = body.settings
+      object(settings.keybinds)
+      check(settings.keybinds["session.new"] === "ctrl+n", "keybind update should store override")
+    }),
+  http.protected
+    .patch("/ui/settings/models/{providerID}/{modelID}", "ui.settings.models.update")
+    .mutating()
+    .at((ctx) => ({
+      path: route("/ui/settings/models/{providerID}/{modelID}", { providerID: "anthropic", modelID: "claude" }),
+      headers: ctx.headers(),
+      body: { visibility: "hide", favorite: true },
+    }))
+    .json(200, (body) => {
+      object(body)
+      object(body.model)
+      const model = body.model
+      array(model.user)
+      const item = model.user.find((entry: unknown) => {
+        object(entry)
+        return entry.providerID === "anthropic" && entry.modelID === "claude"
+      })
+      object(item)
+      check(item.visibility === "hide", "model preference should store visibility")
+      check(item.favorite === true, "model preference should store favorite")
+    }),
+  http.protected
+    .put("/ui/settings/models/recent", "ui.settings.models.recent.replace")
+    .mutating()
+    .at((ctx) => ({
+      path: "/ui/settings/models/recent",
+      headers: ctx.headers(),
+      body: {
+        models: [
+          { providerID: "anthropic", modelID: "claude" },
+          { providerID: "openai", modelID: "gpt-5" },
+          { providerID: "anthropic", modelID: "claude" },
+        ],
+      },
+    }))
+    .json(200, (body) => {
+      object(body)
+      object(body.model)
+      const model = body.model
+      array(model.recent)
+      check(model.recent.length === 2, "recent model update should dedupe duplicate models")
+      object(model.recent[0])
+      check(model.recent[0].providerID === "anthropic", "recent model update should store provider")
+      object(model.recent[1])
+      check(model.recent[1].providerID === "openai", "recent model update should preserve first occurrence order")
+    }),
+  http.protected
+    .patch("/ui/settings/models/{providerID}/{modelID}/variant", "ui.settings.models.variant.update")
+    .mutating()
+    .at((ctx) => ({
+      path: route("/ui/settings/models/{providerID}/{modelID}/variant", {
+        providerID: "anthropic",
+        modelID: "claude",
+      }),
+      headers: ctx.headers(),
+      body: { variant: "thinking" },
+    }))
+    .json(200, (body) => {
+      object(body)
+      object(body.model)
+      const model = body.model
+      object(model.variant)
+      const variant = model.variant
+      object(variant)
+      check(variant["anthropic/claude"] === "thinking", "model variant update should store variant")
+    }),
+  http.protected
+    .post("/ui/project-view/open-projects", "ui.projectView.openProjects.open")
+    .inProject({ git: false })
+    .mutating()
+    .seeded((ctx) => ctx.project())
+    .at((ctx) => ({
+      path: "/ui/project-view/open-projects",
+      headers: ctx.headers(),
+      body: { directory: ctx.directory },
+    }))
+    .json(
+      200,
+      (body, ctx) => {
+        const { entry, project } = onlyProjectViewEntry(body)
+        check(ctx.directory !== undefined, "open project scenario should have a directory")
+        check(project.id === ctx.state.id, "open project should resolve the directory to the current project")
+        check(
+          project.worktree === path.parse(ctx.directory).root,
+          "open project should resolve non-git directories to the global project worktree",
+        )
+        check(entry.position === 0, "opened project should be first")
+        check(entry.expanded === true, "opened project should default to expanded")
+      },
+      "status",
+    ),
+  http.protected
+    .put("/ui/project-view/open-projects", "ui.projectView.openProjects.replace")
+    .mutating()
+    .seeded((ctx) => ctx.project())
+    .at((ctx) => ({
+      path: "/ui/project-view/open-projects",
+      headers: ctx.headers(),
+      body: { projects: [{ projectID: ctx.state.id, expanded: false }] },
+    }))
+    .json(
+      200,
+      (body, ctx) => {
+        const { entry, project } = onlyProjectViewEntry(body)
+        check(project.id === ctx.state.id, "replace open projects should keep the requested project")
+        check(entry.position === 0, "replaced project should be first")
+        check(entry.expanded === false, "replace open projects should store expanded state")
+      },
+      "status",
+    ),
+  http.protected
+    .patch("/ui/project-view/open-projects/{projectID}", "ui.projectView.openProjects.update")
+    .mutating()
+    .seeded((ctx) =>
+      Effect.gen(function* () {
+        const project = yield* ctx.project()
+        const result = yield* ctx.api({
+          method: "POST",
+          path: "/ui/project-view/open-projects",
+          headers: ctx.headers(),
+          body: { projectID: project.id, expanded: true },
+        })
+        check(result.status === 200, "seed open project should succeed")
+        return project
+      }),
+    )
+    .at((ctx) => ({
+      path: route("/ui/project-view/open-projects/{projectID}", { projectID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: { expanded: false, position: 0 },
+    }))
+    .json(
+      200,
+      (body, ctx) => {
+        const current = findProjectViewEntry(body, ctx.state.id)
+        check(current !== undefined, "update open project should keep the requested project")
+        const { entry } = current
+        check(entry.position === 0, "update open project should keep position")
+        check(entry.expanded === false, "update open project should patch expanded state")
+      },
+      "status",
+    ),
+  http.protected
+    .delete("/ui/project-view/open-projects/{projectID}", "ui.projectView.openProjects.close")
+    .mutating()
+    .seeded((ctx) =>
+      Effect.gen(function* () {
+        const project = yield* ctx.project()
+        const result = yield* ctx.api({
+          method: "POST",
+          path: "/ui/project-view/open-projects",
+          headers: ctx.headers(),
+          body: { projectID: project.id },
+        })
+        check(result.status === 200, "seed open project should succeed")
+        return project
+      }),
+    )
+    .at((ctx) => ({
+      path: route("/ui/project-view/open-projects/{projectID}", { projectID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(
+      200,
+      (body, ctx) => {
+        check(
+          findProjectViewEntry(body, ctx.state.id) === undefined,
+          "close project should remove the requested project",
+        )
+      },
+      "status",
+    ),
+  http.protected
+    .patch("/ui/project-view/last-project", "ui.projectView.lastProject.set")
+    .mutating()
+    .seeded((ctx) => ctx.project())
+    .at((ctx) => ({
+      path: "/ui/project-view/last-project",
+      headers: ctx.headers(),
+      body: { projectID: ctx.state.id },
+    }))
+    .json(
+      200,
+      (body, ctx) => {
+        object(body)
+        const lastProject = body.lastProject
+        object(lastProject)
+        check(lastProject.id === ctx.state.id, "last project should be set to the requested project")
+      },
+      "status",
+    ),
+  http.protected
     .patch("/project/{projectID}", "project.update")
     .mutating()
     .seeded((ctx) => ctx.project())
@@ -199,6 +607,41 @@ const scenarios: Scenario[] = [
       },
       "status",
     ),
+  http.protected
+    .get("/project/{projectID}/directories", "project.directories")
+    .seeded((ctx) => ctx.project())
+    .at((ctx) => ({
+      path: route("/project/{projectID}/directories", { projectID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, array, "status"),
+  http.protected
+    .post("/experimental/project/{projectID}/copy", "experimental.projectCopy.create")
+    .seeded((ctx) => ctx.project())
+    .at((ctx) => ({
+      path: route("/experimental/project/{projectID}/copy", { projectID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: {},
+    }))
+    .status(400),
+  http.protected
+    .delete("/experimental/project/{projectID}/copy", "experimental.projectCopy.remove")
+    .seeded((ctx) => ctx.project())
+    .at((ctx) => ({
+      path: route("/experimental/project/{projectID}/copy", { projectID: ctx.state.id }),
+      headers: ctx.headers(),
+      body: {},
+    }))
+    .status(400),
+  http.protected
+    .post("/experimental/project/{projectID}/copy/refresh", "experimental.projectCopy.refresh")
+    .mutating()
+    .seeded((ctx) => ctx.project())
+    .at((ctx) => ({
+      path: route("/experimental/project/{projectID}/copy/refresh", { projectID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .status(204, undefined, "status"),
   http.protected.get("/provider", "provider.list").json(),
   http.protected.get("/provider/auth", "provider.auth").json(),
   http.protected
@@ -455,6 +898,14 @@ const scenarios: Scenario[] = [
     }))
     .status(400),
   http.protected
+    .post("/experimental/control-plane/move-session", "experimental.controlPlane.moveSession")
+    .global()
+    .at(() => ({
+      path: "/experimental/control-plane/move-session",
+      body: {},
+    }))
+    .status(400),
+  http.protected
     .get("/experimental/tool", "tool.list")
     .at((ctx) => ({
       path: `/experimental/tool?${new URLSearchParams({ provider: "opencode", model: "test" })}`,
@@ -573,12 +1024,99 @@ const scenarios: Scenario[] = [
         check(auth.test === undefined, "auth remove should delete provider from isolated auth file")
       }),
     ),
-  http.protected.get("/api/model", "v2.model.list").json(200, array),
-  http.protected.get("/api/provider", "v2.provider.list").json(200, array),
+  http.protected.get("/api/health", "v2.health.get").json(200, (body) => {
+    object(body)
+    check(body.healthy === true, "v2 server should report healthy")
+  }),
+  http.protected.get("/api/agent", "v2.agent.list").json(200, locationData(array)),
+  http.protected.get("/api/model", "v2.model.list").json(200, locationData(array)),
+  http.protected.get("/api/provider", "v2.provider.list").json(200, locationData(array)),
+  http.protected.get("/api/command", "v2.command.list").json(200, locationData(array)),
+  http.protected.get("/api/skill", "v2.skill.list").json(200, locationData(array)),
+  http.protected
+    .get("/api/event", "v2.event.subscribe")
+    .stream()
+    .status(
+      200,
+      (ctx, result) =>
+        Effect.sync(() => {
+          check(result.contentType.includes("text/event-stream"), "v2 event should be an SSE stream")
+          check(result.text.includes("server.connected"), "v2 event should emit initial connection event")
+          check(!!ctx.directory && result.text.includes(ctx.directory), "v2 event should include the resolved location")
+        }),
+      "status",
+    ),
+  http.protected
+    .get("/api/fs/read", "v2.fs.read")
+    .seeded((ctx) => ctx.file("hello.txt", "hello\n"))
+    .at((ctx) => ({ path: "/api/fs/read?path=hello.txt", headers: ctx.headers() }))
+    .json(200, locationData(object)),
+  http.protected.get("/api/fs/list", "v2.fs.list").json(200, locationData(array)),
   http.protected
     .get("/api/provider/{providerID}", "v2.provider.get")
     .at((ctx) => ({ path: route("/api/provider/{providerID}", { providerID: "missing" }), headers: ctx.headers() }))
     .json(404, object, "status"),
+  http.protected.get("/api/permission/request", "v2.permission.request.list").json(200, (body) => {
+    object(body)
+    object(body.location)
+    array(body.data)
+  }),
+  http.protected.get("/api/question/request", "v2.question.request.list").json(200, (body) => {
+    object(body)
+    object(body.location)
+    array(body.data)
+  }),
+  http.protected
+    .get("/api/session/{sessionID}/permission/request", "v2.session.permission.list")
+    .seeded((ctx) => ctx.session({ title: "Permission list owner" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/permission/request", { sessionID: ctx.state.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, data(array)),
+  http.protected
+    .post("/api/session/{sessionID}/permission/request/{requestID}/reply", "v2.session.permission.reply")
+    .seeded((ctx) => ctx.session({ title: "Permission owner" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/permission/request/{requestID}/reply", {
+        sessionID: ctx.state.id,
+        requestID: "per_httpapi_missing",
+      }),
+      headers: ctx.headers(),
+      body: { reply: "once" },
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .post("/api/session/{sessionID}/question/request/{requestID}/reply", "v2.session.question.reply")
+    .seeded((ctx) => ctx.session({ title: "Question reply owner" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/question/request/{requestID}/reply", {
+        sessionID: ctx.state.id,
+        requestID: "que_httpapi_missing",
+      }),
+      headers: ctx.headers(),
+      body: { answers: [] },
+    }))
+    .json(404, object, "status"),
+  http.protected
+    .post("/api/session/{sessionID}/question/request/{requestID}/reject", "v2.session.question.reject")
+    .seeded((ctx) => ctx.session({ title: "Question reject owner" }))
+    .at((ctx) => ({
+      path: route("/api/session/{sessionID}/question/request/{requestID}/reject", {
+        sessionID: ctx.state.id,
+        requestID: "que_httpapi_missing",
+      }),
+      headers: ctx.headers(),
+    }))
+    .json(404, object, "status"),
+  http.protected.get("/api/permission/saved", "v2.permission.saved.list").json(200, (body) => {
+    object(body)
+    array(body.data)
+  }),
+  http.protected
+    .delete("/api/permission/saved/{id}", "v2.permission.saved.remove")
+    .at((ctx) => ({ path: route("/api/permission/saved/{id}", { id: "psv_httpapi_missing" }), headers: ctx.headers() }))
+    .status(204, undefined, "status"),
   http.protected
     .get("/api/session", "v2.session.list")
     .at((ctx) => ({ path: "/api/session?roots=true", headers: ctx.headers() }))
@@ -586,7 +1124,7 @@ const scenarios: Scenario[] = [
       200,
       (body) => {
         object(body)
-        array(body.items)
+        array(body.data)
         object(body.cursor)
       },
       "none",
@@ -609,7 +1147,7 @@ const scenarios: Scenario[] = [
       200,
       (body) => {
         object(body)
-        array(body.items)
+        array(body.data)
         object(body.cursor)
       },
       "none",
@@ -619,13 +1157,10 @@ const scenarios: Scenario[] = [
     .at((ctx) => ({
       path: `/api/session?${new URLSearchParams({
         limit: "2",
-        directory: ctx.directory ?? "",
         cursor: cursor({
-          id: "ses_httpapi_missing",
-          time: 0,
           order: "desc",
-          direction: "next",
           directory: ctx.directory,
+          anchor: { id: "ses_httpapi_missing", time: 0, direction: "next" },
         }),
       })}`,
       headers: ctx.headers(),
@@ -634,7 +1169,7 @@ const scenarios: Scenario[] = [
       200,
       (body) => {
         object(body)
-        array(body.items)
+        array(body.data)
         object(body.cursor)
       },
       "none",
@@ -643,8 +1178,7 @@ const scenarios: Scenario[] = [
     .get("/api/session", "v2.session.list.cursor.invalid")
     .at((ctx) => ({
       path: `/api/session?${new URLSearchParams({
-        cursor: cursor({ id: "ses_httpapi_missing", time: 0, order: "desc", direction: "next" }),
-        search: "not-allowed-with-cursor",
+        cursor: "invalid",
       })}`,
       headers: ctx.headers(),
     }))
@@ -1330,7 +1864,7 @@ const llmScenarios = new Set([
 ])
 
 const main = Effect.gen(function* () {
-  yield* Effect.addFinalizer(() => cleanupExercisePaths)
+  yield* Effect.addFinalizer(() => Effect.promise(() => disposeApps()).pipe(Effect.andThen(cleanupExercisePaths)))
   const options = parseOptions(Bun.argv.slice(2))
   const modules = yield* Effect.promise(() => runtime())
   const effectRoutes = routeKeys(OpenApi.fromApi(modules.PublicApi))

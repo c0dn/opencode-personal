@@ -67,7 +67,7 @@ export function getProjectAvatarSource(id?: string, icon?: { color?: string; url
 export function projectForSession<T extends { id?: string; worktree: string; sandboxes?: string[] }>(
   session: Session,
   projects: T[],
-  byID: Map<string, T>,
+  byID: Map<string, T> = new Map(projects.flatMap((project) => (project.id ? [[project.id, project] as const] : []))),
 ) {
   const direct = byID.get(session.projectID)
   if (direct) return direct
@@ -76,6 +76,34 @@ export function projectForSession<T extends { id?: string; worktree: string; san
     (project) =>
       pathKey(project.worktree) === directory || project.sandboxes?.some((sandbox) => pathKey(sandbox) === directory),
   )
+}
+
+type RouteProject = { id?: string; worktree: string; sandboxes?: string[] }
+
+export function routeProjectRoot(input: {
+  directory: string
+  opened: RouteProject[]
+  projects: RouteProject[]
+  workspaceOrder: Record<string, string[]>
+  projectID?: string
+}) {
+  const directory = pathKey(input.directory)
+  const byDirectory = (project: RouteProject) =>
+    pathKey(project.worktree) === directory || project.sandboxes?.some((sandbox) => pathKey(sandbox) === directory)
+
+  const opened = input.opened.find(byDirectory)
+  if (opened) return opened.worktree
+
+  const ordered = Object.entries(input.workspaceOrder).find(
+    ([root, dirs]) => pathKey(root) === directory || dirs.some((item) => pathKey(item) === directory),
+  )
+  if (ordered) return ordered[0]
+
+  const metadata = input.projects.find(byDirectory)
+  if (metadata) return metadata.worktree
+
+  if (!input.projectID) return
+  return input.projects.find((project) => project.id === input.projectID)?.worktree
 }
 
 export const errorMessage = (err: unknown, fallback: string) => {

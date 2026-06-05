@@ -1,9 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import type { PermissionRequest } from "@opencode-ai/sdk/v2"
-import { bootstrapSessionDataV2Display, replaySession, replaySessionV2 } from "@/cli/cmd/run/session-replay"
-import { createSessionData } from "@/cli/cmd/run/session-data"
+import { replayLocalRows, replaySession } from "@/cli/cmd/run/session-replay"
 import type { SessionMessages } from "@/cli/cmd/run/session.shared"
-import type { TranscriptV2Display } from "@/session/transcript-v2-display"
 
 function userMessage(id: string, text: string): SessionMessages[number] {
   return {
@@ -160,265 +157,300 @@ describe("run session replay", () => {
     )
   })
 
-  test("replays v2 user and assistant text without legacy ids", () => {
-    const out = replaySessionV2({
-      messages: [
-        v2User("evt-user-1", "Hello"),
-        v2Assistant("evt-assistant-1", [{ type: "text", id: "evt-text-1", text: "Hi there" }]),
-      ],
-      permissions: [],
-      questions: [],
-      thinking: true,
-      limits: {},
-      sessionID: "session-1",
-    })
-
-    expect(out.commits).toEqual([
-      expect.objectContaining({ kind: "user", text: "Hello", messageID: "evt-user-1" }),
-      expect.objectContaining({ kind: "assistant", text: "Hi there", messageID: "evt-assistant-1", partID: "evt-text-1" }),
-    ])
-    expect(JSON.stringify(out.commits)).not.toContain("msg_")
-    expect(JSON.stringify(out.commits)).not.toContain("prt_")
-    expect(out.data.ids.has("evt-text-1")).toBe(true)
-    expect(out.data.sent.has("evt-text-1")).toBe(false)
-  })
-
-  test("honors thinking flag for v2 reasoning", () => {
-    const messages = [v2Assistant("evt-assistant-1", [{ type: "reasoning", id: "evt-reason-1", reasoningID: "r1", text: "work" }])]
+  test("merges failed local rows ahead of later persisted prompts", () => {
+    const persisted = {
+      kind: "user",
+      text: "successful",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-2",
+    } as const
+    const failed = {
+      kind: "user",
+      text: "failed",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
+    const error = {
+      kind: "error",
+      text: "network unavailable",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
 
     expect(
-      replaySessionV2({ messages, permissions: [], questions: [], thinking: true, limits: {}, sessionID: "session-1" }).commits,
-    ).toContainEqual(expect.objectContaining({ kind: "reasoning", text: "Thinking: work", partID: "evt-reason-1" }))
+      replayLocalRows([userMessage("msg-user-2", "successful")], [persisted], [{ commit: failed }, { commit: error }]),
+    ).toEqual([failed, error, persisted])
+  })
+
+  test("retains local errors but not duplicate local prompts once a prompt persists", () => {
+    const persisted = {
+      kind: "user",
+      text: "failed after persistence",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
+    const error = {
+      kind: "error",
+      text: "connection closed",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
+
     expect(
-      replaySessionV2({ messages, permissions: [], questions: [], thinking: false, limits: {}, sessionID: "session-1" }).commits,
-    ).toEqual([])
+      replayLocalRows(
+        [userMessage("msg-user-1", "failed after persistence")],
+        [persisted],
+        [{ commit: persisted }, { commit: error }],
+      ),
+    ).toEqual([persisted, error])
   })
 
-  test("seeds v2 running, completed, and error tool state", () => {
-    const out = replaySessionV2({
-      messages: [
-        v2Assistant("evt-assistant-1", [
-          v2Tool("evt-run", "running"),
-          v2Tool("evt-done", "completed"),
-          v2Tool("evt-error", "error"),
-        ]),
-      ],
-      permissions: [],
-      questions: [],
-      thinking: true,
-      limits: {},
-      sessionID: "session-1",
-    })
+  test("keeps a local turn failure below assistant output already visible for that turn", () => {
+    const first = {
+      kind: "user",
+      text: "start",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
+    const answer = {
+      kind: "assistant",
+      text: "partial answer",
+      phase: "progress",
+      source: "assistant",
+      messageID: "msg-assistant-1",
+    } as const
+    const error = {
+      kind: "error",
+      text: "stream failed",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
+    const second = {
+      kind: "user",
+      text: "retry",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-2",
+    } as const
 
-    expect(out.commits).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "tool", partID: "evt-run", phase: "start", toolState: "running" }),
-        expect.objectContaining({ kind: "tool", partID: "evt-done", toolState: "completed" }),
-        expect.objectContaining({ kind: "tool", partID: "evt-error", toolState: "error", toolError: "boom" }),
-      ]),
-    )
-    expect(out.patch).toEqual(expect.objectContaining({ phase: "running", status: "running bash" }))
-    expect(out.data.tools.has("evt-run")).toBe(true)
-    expect(out.data.ids.has("evt-done")).toBe(true)
-    expect(out.data.ids.has("evt-error")).toBe(true)
+    expect(
+      replayLocalRows(
+        [userMessage("msg-user-1", "start"), userMessage("msg-user-2", "retry")],
+        [first, answer, second],
+        [
+          {
+            commit: error,
+            after: { kind: "assistant", text: "partial answer", phase: "progress", messageID: "msg-assistant-1" },
+          },
+        ],
+      ),
+    ).toEqual([first, answer, error, second])
   })
 
-  test("enriches v2 replay permissions from matching tool calls", () => {
-    const permission: PermissionRequest = {
-      id: "perm-1",
-      sessionID: "session-1",
-      permission: "bash",
-      patterns: ["*"],
-      metadata: {},
-      always: [],
-      tool: { messageID: "evt-assistant-1", callID: "call-1" },
-    }
-    const out = replaySessionV2({
-      messages: [v2Assistant("evt-assistant-1", [v2Tool("evt-run", "running")])],
-      permissions: [permission],
-      questions: [],
-      thinking: true,
-      limits: {},
-      sessionID: "session-1",
-    })
+  test("keeps a local failure above assistant output received after the failure", () => {
+    const first = {
+      kind: "user",
+      text: "start",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
+    const error = {
+      kind: "error",
+      text: "request failed",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
+    const late = {
+      kind: "assistant",
+      text: "late answer",
+      phase: "progress",
+      source: "assistant",
+      messageID: "msg-assistant-1",
+    } as const
 
-    expect(out.data.permissions).toEqual([
-      expect.objectContaining({ id: "perm-1", metadata: { input: { command: "pwd" } } }),
+    expect(replayLocalRows([userMessage("msg-user-1", "start")], [first, late], [{ commit: error }])).toEqual([
+      first,
+      error,
+      late,
     ])
   })
 
-  test("bootstraps v2 display tool inputs without replay commits", () => {
-    const data = createSessionData()
-    bootstrapSessionDataV2Display({
-      data,
-      messages: [
-        v2Assistant("evt-assistant-1", [
-          v2Tool("evt-run", "running", "call-run"),
-          v2Tool("evt-done", "completed", "call-done"),
-          v2Tool("evt-error", "error", "call-error"),
-          v2PendingTool("evt-pending", "call-pending"),
-        ]),
-      ],
-      permissions: [
-        permission("perm-run", "call-run"),
-        permission("perm-done", "call-done"),
-        permission("perm-error", "call-error"),
-        permission("perm-pending", "call-pending"),
-        permission("perm-existing", "call-run", { input: { command: "existing" } }),
-      ],
-      questions: [],
-    })
+  test("inserts a local failure between persisted output chunks spanning that failure", () => {
+    const first = {
+      kind: "user",
+      text: "start",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
+    const complete = {
+      kind: "assistant",
+      text: "before after",
+      phase: "progress",
+      source: "assistant",
+      messageID: "msg-assistant-1",
+      partID: "part-1",
+    } as const
+    const error = {
+      kind: "error",
+      text: "stream failed",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
 
-    expect(data.call).toEqual(
-      new Map([
-        ["evt-assistant-1:call-run", { command: "pwd" }],
-        ["evt-assistant-1:call-done", { command: "pwd" }],
-        ["evt-assistant-1:call-error", { command: "pwd" }],
-      ]),
-    )
-    expect(data.permissions).toEqual([
-      expect.objectContaining({ id: "perm-done", metadata: { input: { command: "pwd" } } }),
-      expect.objectContaining({ id: "perm-error", metadata: { input: { command: "pwd" } } }),
-      expect.objectContaining({ id: "perm-existing", metadata: { input: { command: "existing" } } }),
-      expect.objectContaining({ id: "perm-pending", metadata: {} }),
-      expect.objectContaining({ id: "perm-run", metadata: { input: { command: "pwd" } } }),
-    ])
-    expect(data.ids.size).toBe(0)
-    expect(data.tools.size).toBe(0)
-  })
-
-  test("preserves v2 task requests as completed task tool commits", () => {
-    const out = replaySessionV2({
-      messages: [
-        {
-          ...v2User("evt-user-1", "Run this"),
-          taskRequests: [
-            {
-              type: "task-request",
-              id: "evt-task-1",
-              prompt: "Inspect replay",
-              description: "Inspect replay state",
-              agent: "explore",
+    expect(
+      replayLocalRows(
+        [userMessage("msg-user-1", "start")],
+        [first, complete],
+        [
+          {
+            commit: error,
+            after: {
+              kind: "assistant",
+              text: "before ",
+              phase: "progress",
+              messageID: "msg-assistant-1",
+              partID: "part-1",
+              visible: "before ",
             },
-          ],
-        },
-      ],
-      permissions: [],
-      questions: [],
-      thinking: true,
-      limits: {},
-      sessionID: "session-1",
-    })
-
-    expect(out.commits).toContainEqual(
-      expect.objectContaining({
-        kind: "tool",
-        text: "Inspect replay state",
-        messageID: "evt-user-1",
-        partID: "evt-task-1",
-        tool: "task",
-        toolState: "completed",
-      }),
-    )
-    expect(out.data.ids.has("evt-task-1")).toBe(true)
-    expect(out.data.msg.get("evt-task-1")).toBe("evt-user-1")
+          },
+        ],
+      ),
+    ).toEqual([first, { ...complete, text: "before " }, error, { ...complete, text: "after" }])
   })
 
-  test("preserves v2 patch, shell, compaction, and assistant error display", () => {
-    const out = replaySessionV2({
-      messages: [
-        v2Assistant("evt-assistant-1", [{ type: "patch", id: "evt-patch-1", hash: "abc123", files: ["src/a.ts"] }], {
-          error: { type: "unknown", message: "assistant failed" },
-          finish: "error",
-        }),
-        v2Shell("evt-shell-1", "call-shell-1", "pwd", "/tmp"),
-        v2Compaction("evt-compaction-1", "summary text"),
-      ],
-      permissions: [],
-      questions: [],
-      thinking: true,
-      limits: {},
-      sessionID: "session-1",
-    })
+  test("places an unpersisted failed prompt before live output from that turn", () => {
+    const prompt = {
+      kind: "user",
+      text: "start",
+      phase: "start",
+      source: "system",
+      messageID: "msg-1",
+    } as const
+    const answer = {
+      kind: "assistant",
+      text: "partial answer",
+      phase: "progress",
+      source: "assistant",
+      messageID: "msg-2",
+    } as const
+    const error = {
+      kind: "error",
+      text: "stream failed",
+      phase: "start",
+      source: "system",
+      messageID: "msg-1",
+    } as const
 
-    expect(out.commits).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "error", text: "assistant failed", messageID: "evt-assistant-1" }),
-        expect.objectContaining({ kind: "system", text: "Patch abc123\nsrc/a.ts", messageID: "evt-assistant-1" }),
-        expect.objectContaining({ kind: "tool", tool: "bash", text: "/tmp", partID: "evt-shell-1", toolState: "completed" }),
-        expect.objectContaining({ kind: "system", text: "summary text", messageID: "evt-compaction-1" }),
-      ]),
-    )
+    expect(
+      replayLocalRows(
+        [],
+        [answer],
+        [
+          { commit: prompt },
+          {
+            commit: error,
+            after: { kind: "assistant", text: "partial answer", phase: "progress", messageID: "msg-2" },
+          },
+        ],
+      ),
+    ).toEqual([prompt, answer, error])
+  })
+
+  test("anchors a failure after the visible start of a tool that later completes", () => {
+    const prompt = {
+      kind: "user",
+      text: "run ls",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
+    const running = {
+      kind: "tool",
+      text: "running bash",
+      phase: "start",
+      source: "tool",
+      messageID: "msg-assistant-1",
+      partID: "part-tool-1",
+      toolState: "running",
+    } as const
+    const completed = {
+      kind: "tool",
+      text: "file.txt",
+      phase: "final",
+      source: "tool",
+      messageID: "msg-assistant-1",
+      partID: "part-tool-1",
+      toolState: "completed",
+    } as const
+    const error = {
+      kind: "error",
+      text: "connection lost",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
+
+    expect(
+      replayLocalRows(
+        [userMessage("msg-user-1", "run ls")],
+        [prompt, running, completed],
+        [
+          {
+            commit: error,
+            after: {
+              kind: "tool",
+              text: "running bash",
+              phase: "start",
+              messageID: "msg-assistant-1",
+              partID: "part-tool-1",
+              toolState: "running",
+            },
+          },
+        ],
+      ),
+    ).toEqual([prompt, running, error, completed])
+  })
+
+  test("retains an unpersisted local diagnostic before later persisted prompts", () => {
+    const first = {
+      kind: "user",
+      text: "before",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-1",
+    } as const
+    const error = {
+      kind: "error",
+      text: "failed to start new session",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-2",
+    } as const
+    const second = {
+      kind: "user",
+      text: "after",
+      phase: "start",
+      source: "system",
+      messageID: "msg-user-3",
+    } as const
+
+    expect(
+      replayLocalRows(
+        [userMessage("msg-user-1", "before"), userMessage("msg-user-3", "after")],
+        [first, second],
+        [{ commit: error }],
+      ),
+    ).toEqual([first, error, second])
   })
 })
-
-function v2User(id: string, text: string): TranscriptV2Display.DisplayUser {
-  return { type: "user", id, text, files: [], agents: [], references: [], time: { created: 1 } }
-}
-
-function v2Assistant(
-  id: string,
-  content: TranscriptV2Display.DisplayAssistantContent[],
-  input?: Pick<TranscriptV2Display.DisplayAssistant, "error" | "finish">,
-): TranscriptV2Display.DisplayAssistant {
-  return {
-    type: "assistant",
-    id,
-    agent: "build",
-    model: { providerID: "openai" as never, id: "gpt-5" as never },
-    content,
-    ...input,
-    time: { created: 2, completed: 3 },
-  }
-}
-
-function v2Shell(id: string, callID: string, command: string, output: string): TranscriptV2Display.DisplayShell {
-  return { type: "shell", id, callID, command, output, time: { created: 3, completed: 4 } }
-}
-
-function v2Compaction(id: string, summary: string): TranscriptV2Display.DisplayCompaction {
-  return { type: "compaction", id, reason: "manual", summary, time: { created: 4, completed: 5 } }
-}
-
-function v2Tool(
-  id: string,
-  status: "running" | "completed" | "error",
-  callID = "call-1",
-): TranscriptV2Display.DisplayAssistantTool {
-  return {
-    type: "tool",
-    id,
-    callID,
-    name: "bash",
-    state:
-      status === "running"
-        ? { status, input: { command: "pwd" }, structured: {}, content: [] }
-        : status === "completed"
-          ? { status, input: { command: "pwd" }, structured: {}, content: [{ type: "text", text: "out" }] }
-          : { status, input: { command: "pwd" }, structured: {}, content: [], error: { type: "unknown", message: "boom" } },
-    time: { created: 2, ran: 2, completed: status === "running" ? undefined : 3 },
-  }
-}
-
-function v2PendingTool(id: string, callID: string): TranscriptV2Display.DisplayAssistantTool {
-  return {
-    type: "tool",
-    id,
-    callID,
-    name: "bash",
-    state: { status: "pending", input: '{"command":"pwd"}' },
-    time: { created: 2 },
-  }
-}
-
-function permission(id: string, callID: string, metadata: PermissionRequest["metadata"] = {}): PermissionRequest {
-  return {
-    id,
-    sessionID: "session-1",
-    permission: "bash",
-    patterns: ["*"],
-    metadata,
-    always: [],
-    tool: { messageID: "evt-assistant-1", callID },
-  }
-}

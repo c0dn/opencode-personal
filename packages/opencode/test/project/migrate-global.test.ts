@@ -4,6 +4,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { eq } from "drizzle-orm"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
+import { AbsolutePath } from "@opencode-ai/core/schema"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { SessionID } from "../../src/session/schema"
 import * as Log from "@opencode-ai/core/util/log"
@@ -48,7 +49,7 @@ function ensureGlobal() {
       .insert(ProjectTable)
       .values({
         id: ProjectV2.ID.global,
-        worktree: "/",
+        worktree: AbsolutePath.make("/"),
         time_created: Date.now(),
         time_updated: Date.now(),
         sandboxes: [],
@@ -62,27 +63,25 @@ function ensureGlobal() {
 describe("migrateFromGlobal", () => {
   it.live("migrates global sessions on first project creation", () =>
     Effect.gen(function* () {
-      // 1. Start with git init but no commits — creates "global" project row
+      // 1. Seed a legacy session created before this directory was discovered as a git project.
       const tmp = yield* tmpdirScoped()
+      const id = legacySessionID()
+      yield* ensureGlobal()
+      yield* seed({ id, dir: tmp, project: ProjectV2.ID.global })
+
+      // 2. Create a real git project. Empty git repos now resolve to local IDs, not global,
+      //    so use a root commit to preserve coverage for discovery of a durable project ID.
       yield* Effect.promise(() => $`git init`.cwd(tmp).quiet())
       yield* Effect.promise(() => $`git config user.name "Test"`.cwd(tmp).quiet())
       yield* Effect.promise(() => $`git config user.email "test@opencode.test"`.cwd(tmp).quiet())
       yield* Effect.promise(() => $`git config commit.gpgsign false`.cwd(tmp).quiet())
-      const projects = yield* Project.Service
-      const { project: pre } = yield* projects.fromDirectory(tmp)
-      expect(pre.id).toBe(ProjectV2.ID.global)
-
-      // 2. Seed a session under "global" with matching directory
-      const id = legacySessionID()
-      yield* seed({ id, dir: tmp, project: ProjectV2.ID.global })
-
-      // 3. Make a commit so the project gets a real ID
       yield* Effect.promise(() => $`git commit --allow-empty -m "root"`.cwd(tmp).quiet())
 
+      const projects = yield* Project.Service
       const { project: real } = yield* projects.fromDirectory(tmp)
       expect(real.id).not.toBe(ProjectV2.ID.global)
 
-      // 4. The session should have been migrated to the real project ID
+      // 3. The session should have been migrated to the real project ID.
       const row = yield* Database.Service.use(({ db }) =>
         db.select().from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie),
       )
@@ -108,8 +107,8 @@ describe("migrateFromGlobal", () => {
       const id = legacySessionID()
       yield* seed({ id, dir: tmp, project: ProjectV2.ID.global })
 
-      // 4. Call fromDirectory again — project row already exists,
-      //    so the current code skips migration entirely. This is the bug.
+      // 4. Re-discover the directory. Existing project rows should still reclaim
+      //    matching global sessions by directory.
       yield* projects.fromDirectory(tmp)
 
       const row = yield* Database.Service.use(({ db }) =>
@@ -117,6 +116,26 @@ describe("migrateFromGlobal", () => {
       )
       expect(row).toBeDefined()
       expect(row!.project_id).toBe(project.id)
+    }),
+  )
+
+  it.live("keeps global sessions when non-git directories resolve to global", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      const id = legacySessionID()
+      yield* ensureGlobal()
+      yield* seed({ id, dir: tmp, project: ProjectV2.ID.global })
+
+      const projects = yield* Project.Service
+      const { project } = yield* projects.fromDirectory(tmp)
+      expect(project.id).toBe(ProjectV2.ID.global)
+      expect(project.vcs).toBeUndefined()
+
+      const row = yield* Database.Service.use(({ db }) =>
+        db.select().from(SessionTable).where(eq(SessionTable.id, id)).get().pipe(Effect.orDie),
+      )
+      expect(row).toBeDefined()
+      expect(row!.project_id).toBe(ProjectV2.ID.global)
     }),
   )
 

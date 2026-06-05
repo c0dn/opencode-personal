@@ -17,6 +17,8 @@ import type { SessionComposerState } from "@/pages/session/composer/session-comp
 import { SessionTodoDock } from "@/pages/session/composer/session-todo-dock"
 import type { FollowupDraft } from "@/components/prompt-input/submit"
 import { createResizeObserver } from "@solid-primitives/resize-observer"
+import { createMediaQuery } from "@solid-primitives/media"
+import { NEW_SESSION_CONTENT_WIDTH } from "@/pages/session/new-session-layout"
 
 export function SessionComposerRegion(props: {
   state: SessionComposerState
@@ -54,6 +56,7 @@ export function SessionComposerRegion(props: {
   const route = useSessionKey()
   const sync = useSync()
   const view = layout.view(route.sessionKey)
+  const isDesktop = createMediaQuery("(min-width: 768px)")
 
   const handoffPrompt = createMemo(() => getSessionHandoff(route.sessionKey())?.prompt)
   const info = createMemo(() => (route.params.id ? sync.session.get(route.params.id) : undefined))
@@ -124,6 +127,7 @@ export function SessionComposerRegion(props: {
   const rolled = createMemo(() => (props.revert?.items.length ? props.revert : undefined))
   const lift = createMemo(() => (rolled() ? 18 : 36 * value()))
   const full = createMemo(() => Math.max(78, store.height))
+  const todoCollapsed = createMemo(() => view.todoCollapsed.get(!isDesktop()))
 
   const openParent = () => {
     const id = parentID()
@@ -150,8 +154,9 @@ export function SessionComposerRegion(props: {
     >
       <div
         classList={{
-          "w-full px-3 pointer-events-auto": true,
-          "max-w-[720px] px-0": props.placement === "inline",
+          "w-full pointer-events-auto": true,
+          "px-3": props.placement !== "inline",
+          [NEW_SESSION_CONTENT_WIDTH]: props.placement === "inline",
           "md:max-w-200 md:mx-auto 2xl:max-w-[1000px]": props.centered,
         }}
       >
@@ -215,8 +220,8 @@ export function SessionComposerRegion(props: {
                   <SessionTodoDock
                     sessionID={route.params.id}
                     todos={props.state.todos()}
-                    collapsed={view.todoCollapsed.get()}
-                    onToggle={() => view.todoCollapsed.set(!view.todoCollapsed.get())}
+                    collapsed={todoCollapsed()}
+                    onToggle={() => view.todoCollapsed.set(!todoCollapsed())}
                     collapseLabel={language.t("session.todo.collapse")}
                     expandLabel={language.t("session.todo.expand")}
                     dockProgress={value()}

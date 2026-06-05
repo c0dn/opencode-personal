@@ -1,3 +1,5 @@
+import semver from "semver"
+
 declare global {
   const OPENCODE_VERSION: string
   const OPENCODE_CHANNEL: string
@@ -6,3 +8,12 @@ declare global {
 export const InstallationVersion = typeof OPENCODE_VERSION === "string" ? OPENCODE_VERSION : "local"
 export const InstallationChannel = typeof OPENCODE_CHANNEL === "string" ? OPENCODE_CHANNEL : "local"
 export const InstallationLocal = InstallationChannel === "local"
+
+export function normalizeInstallationDependencyVersion(version: string) {
+  const parsed = semver.parse(version)
+  if (!parsed) return version
+  if (!/^c0dn\.\d+$/.test(parsed.prerelease.join("."))) return version
+  return `${parsed.major}.${parsed.minor}.${parsed.patch}`
+}
+
+export const InstallationDependencyVersion = normalizeInstallationDependencyVersion(InstallationVersion)

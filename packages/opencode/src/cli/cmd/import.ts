@@ -1,26 +1,20 @@
 import type { Session as SDKSession, Message, Part } from "@opencode-ai/sdk/v2"
-import { SessionLegacy } from "@opencode-ai/core/session/legacy"
-import { SessionMessage } from "@opencode-ai/core/session/message"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Session } from "@/session/session"
-import { CliError, effectCmd, fail } from "../effect-cmd"
+import { MessageV2 } from "../../session/message-v2"
+import { CliError, effectCmd } from "../effect-cmd"
 import { Database } from "@opencode-ai/core/database/database"
-import { SessionTable, MessageTable, PartTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
+import { SessionTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
 import { EOL } from "os"
 import path from "path"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
-import { DateTime, Effect, Option, Schema } from "effect"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Effect, Schema } from "effect"
 import type { InstanceContext } from "@/project/instance-context"
-import { type PublicTranscriptPayloadV2, TranscriptV2PublicPayload } from "@/session/transcript-v2-public-payload"
-import { Slug } from "@opencode-ai/core/util/slug"
-import { eq, inArray } from "drizzle-orm"
-import { SessionSchema } from "@opencode-ai/core/session/schema"
 
-const decodeMessageInfo = Schema.decodeUnknownSync(SessionLegacy.Info)
-const decodePart = Schema.decodeUnknownSync(SessionLegacy.Part)
-const encodeSessionMessage = Schema.encodeSync(SessionMessage.Message)
-const decodeImportJson = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)
+const decodeMessageInfo = Schema.decodeUnknownSync(SessionV1.Info)
+const decodePart = Schema.decodeUnknownSync(SessionV1.Part)
 
 /** Discriminated union returned by the ShareNext API (GET /api/shares/:id/data) */
 export type ShareData =
@@ -29,7 +23,6 @@ export type ShareData =
   | { type: "part"; data: Part }
   | { type: "session_diff"; data: unknown }
   | { type: "model"; data: unknown }
-  | { type: "public_transcript_v2"; payload: PublicTranscriptPayloadV2 }
 
 /** Extract share ID from a share URL like https://opncd.ai/share/abc123 */
 export function parseShareUrl(url: string): string | null {
@@ -103,9 +96,9 @@ export const ImportCommand = effectCmd({
   }),
 })
 
-export const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: InstanceContext) {
+const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: InstanceContext) {
   const share = yield* ShareNext.Service
-  const fs = yield* AppFileSystem.Service
+  const fs = yield* FSUtil.Service
   const { db } = yield* Database.Service
 
   let exportData: ExportData | undefined
@@ -148,16 +141,9 @@ export const runImport = Effect.fn("Cli.import.body")(function* (file: string, c
     }
 
     const shareData = yield* Effect.tryPromise({
-      try: () => response.json() as Promise<unknown>,
+      try: () => response.json() as Promise<ShareData[]>,
       catch: () => new CliError({ message: "Share data was not valid JSON" }),
     })
-    if (!Array.isArray(shareData)) return yield* fail("Share data was not a valid array")
-    const v2Item = shareData.find((item) => item.type === "public_transcript_v2")
-    if (v2Item) {
-      yield* importPublicTranscriptPayload(v2Item.payload, ctx, db)
-      return
-    }
-
     const transformed = transformShareData(shareData)
 
     if (!transformed) {
@@ -168,21 +154,14 @@ export const runImport = Effect.fn("Cli.import.body")(function* (file: string, c
 
     exportData = transformed
   } else {
-    const text = yield* fs.readFileStringSafe(file).pipe(Effect.catch((error) => fail(`Failed to read import file: ${String(error)}`)))
-    if (text === undefined) {
+    exportData = (yield* fs.readJson(file).pipe(Effect.orElseSucceed(() => undefined))) as
+      | NonNullable<typeof exportData>
+      | undefined
+    if (!exportData) {
       process.stdout.write(`File not found: ${file}`)
       process.stdout.write(EOL)
       return
     }
-    const decoded = decodeImportJson(text)
-    if (Option.isNone(decoded)) return yield* fail(`Import file is not valid JSON: ${file}`)
-    const localData = decoded.value
-    if (hasV2EnvelopeMarker(localData)) {
-      yield* importPublicTranscriptPayload(localData, ctx, db)
-      return
-    }
-    if (!isLegacyExportShape(localData)) return yield* fail("Unsupported import payload shape")
-    exportData = localData as NonNullable<typeof exportData>
   }
 
   if (!exportData) {
@@ -209,7 +188,7 @@ export const runImport = Effect.fn("Cli.import.body")(function* (file: string, c
     .pipe(Effect.orDie)
 
   for (const msg of exportData.messages) {
-    const msgInfo = decodeMessageInfo(msg.info) as SessionLegacy.Info
+    const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
     const { id, sessionID: _, ...msgData } = msgInfo
     yield* db
       .insert(MessageTable)
@@ -224,7 +203,7 @@ export const runImport = Effect.fn("Cli.import.body")(function* (file: string, c
       .pipe(Effect.orDie)
 
     for (const part of msg.parts) {
-      const partInfo = decodePart(part) as SessionLegacy.Part
+      const partInfo = decodePart(part) as SessionV1.Part
       const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
       yield* db
         .insert(PartTable)
@@ -243,107 +222,3 @@ export const runImport = Effect.fn("Cli.import.body")(function* (file: string, c
   process.stdout.write(`Imported session: ${exportData.info.id}`)
   process.stdout.write(EOL)
 })
-
-function importPublicTranscriptPayload(value: unknown, ctx: InstanceContext, db: Database.Interface["db"]) {
-  return Effect.gen(function* () {
-    const payload = yield* validatePublicTranscriptPayload(value)
-    const messages = yield* convertPublicTranscriptPayload(payload)
-    const { session, sessionRow, messageRows } = yield* constructV2ImportRows(payload, ctx, messages)
-
-    yield* db
-      .transaction(
-        (tx) =>
-          Effect.gen(function* () {
-            const existingSession = yield* tx.select({ id: SessionTable.id }).from(SessionTable).where(eq(SessionTable.id, session.id)).limit(1).get()
-            if (existingSession) return yield* fail(`Session already exists: ${session.id}`)
-            if (messageRows.length > 0) {
-              const existingMessages = yield* tx
-                .select({ id: SessionMessageTable.id })
-                .from(SessionMessageTable)
-                .where(inArray(SessionMessageTable.id, messageRows.map((row) => row.id)))
-                .all()
-              if (existingMessages.length > 0) {
-                return yield* fail(`Session message already exists: ${existingMessages[0]!.id}`)
-              }
-            }
-            yield* tx.insert(SessionTable).values(sessionRow).run()
-            if (messageRows.length > 0) yield* tx.insert(SessionMessageTable).values(messageRows).run()
-          }),
-        { behavior: "immediate" },
-      )
-      .pipe(Effect.catch((error) => (error instanceof CliError ? Effect.fail(error) : fail(`Failed to import v2 transcript: ${String(error)}`))))
-
-    process.stdout.write(`Imported session: ${payload.session.id}`)
-    process.stdout.write(EOL)
-  })
-}
-
-function hasV2EnvelopeMarker(value: unknown) {
-  return isRecord(value) && ("kind" in value || "version" in value)
-}
-
-function isLegacyExportShape(value: unknown) {
-  return isRecord(value) && isRecord(value.info) && Array.isArray(value.messages)
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value)
-}
-
-function validatePublicTranscriptPayload(value: unknown) {
-  return Effect.try({
-    try: () => {
-      TranscriptV2PublicPayload.assertPublicTranscriptPayloadV2(value)
-      return value as PublicTranscriptPayloadV2
-    },
-    catch: (error) => new CliError({ message: `Invalid v2 transcript import payload: ${error instanceof Error ? error.message : String(error)}` }),
-  })
-}
-
-function convertPublicTranscriptPayload(payload: PublicTranscriptPayloadV2) {
-  return Effect.try({
-    try: () => TranscriptV2PublicPayload.publicTranscriptPayloadV2ToCanonicalMessages(payload),
-    catch: (error) => new CliError({ message: `Invalid v2 transcript import payload: ${error instanceof Error ? error.message : String(error)}` }),
-  })
-}
-
-function constructV2ImportRows(payload: PublicTranscriptPayloadV2, ctx: InstanceContext, messages: SessionMessage.Message[]) {
-  return Effect.try({
-    try: () => {
-      const session = importedV2Session(payload, ctx)
-      return {
-        session,
-        sessionRow: Session.toRow(session),
-        messageRows: messages.map((message) => sessionMessageRow(session.id, message)),
-      }
-    },
-    catch: (error) => new CliError({ message: `Invalid v2 transcript import payload: ${error instanceof Error ? error.message : String(error)}` }),
-  })
-}
-
-function importedV2Session(payload: PublicTranscriptPayloadV2, ctx: InstanceContext): Session.Info {
-  return Schema.decodeUnknownSync(Session.Info)({
-    id: payload.session.id,
-    slug: Slug.create(),
-    projectID: ctx.project.id,
-    directory: ctx.directory,
-    path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
-    title: payload.session.title,
-    ...(payload.session.agent ? { agent: payload.session.agent } : {}),
-    ...(payload.session.model ? { model: payload.session.model } : {}),
-    version: payload.session.version,
-    time: payload.session.time,
-  }) as Session.Info
-}
-
-function sessionMessageRow(sessionID: Session.Info["id"], message: SessionMessage.Message): typeof SessionMessageTable.$inferInsert {
-  const encoded = encodeSessionMessage(message)
-  const { id, type, ...data } = encoded
-  return {
-    id: SessionMessage.ID.make(id),
-    session_id: SessionSchema.ID.make(sessionID),
-    type,
-    time_created: DateTime.toEpochMillis(message.time.created),
-    data,
-  }
-}

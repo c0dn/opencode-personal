@@ -2,7 +2,7 @@ import { ConfigProvider, Effect, Layer } from "effect"
 import { HttpRouter } from "effect/unstable/http"
 import { parse } from "./assertions"
 import { runtime, type Runtime } from "./runtime"
-import type { ActiveScenario, BackendApp, CallResult, CaptureMode, SeededContext } from "./types"
+import type { ActiveScenario, BackendApp, CallResult, CaptureMode, Method, RequestSpec, SeededContext } from "./types"
 
 type CallOptions = {
   auth?: {
@@ -40,7 +40,19 @@ export function callAuthProbe(scenario: ActiveScenario, credentials: "missing" |
   })
 }
 
-const appCache: Partial<Record<string, BackendApp>> = {}
+export function apiRequest(method: Method, spec: RequestSpec, mode: CaptureMode = "full") {
+  return Effect.promise(async () => capture(await app(await runtime(), {}).request(toRawRequest(method, spec)), mode))
+}
+
+type CachedApp = BackendApp & { readonly dispose: () => Promise<void> }
+
+const appCache: Partial<Record<string, CachedApp>> = {}
+
+export async function disposeApps() {
+  const apps = Object.values(appCache)
+  for (const key of Object.keys(appCache)) delete appCache[key]
+  await Promise.all(apps.flatMap((app) => (app === undefined ? [] : [app.dispose()])))
+}
 
 function app(modules: Runtime, options: CallOptions) {
   const username = options.auth?.username
@@ -48,7 +60,7 @@ function app(modules: Runtime, options: CallOptions) {
   const cacheKey = `${username ?? ""}:${password ?? ""}`
   if (appCache[cacheKey]) return appCache[cacheKey]
 
-  const handler = HttpRouter.toWebHandler(
+  const web = HttpRouter.toWebHandler(
     modules.HttpApiApp.routes.pipe(
       Layer.provide(
         ConfigProvider.layer(
@@ -57,10 +69,11 @@ function app(modules: Runtime, options: CallOptions) {
       ),
     ),
     { disableLogger: true, memoMap: modules.memoMap },
-  ).handler
+  )
   return (appCache[cacheKey] = {
+    dispose: web.dispose,
     request(input: string | URL | Request, init?: RequestInit) {
-      return handler(
+      return web.handler(
         input instanceof Request ? input : new Request(new URL(input, "http://localhost"), init),
         modules.HttpApiApp.context,
       )
@@ -70,8 +83,12 @@ function app(modules: Runtime, options: CallOptions) {
 
 function toRequest(scenario: ActiveScenario, ctx: SeededContext<unknown>) {
   const spec = scenario.request(ctx, ctx.state)
+  return toRawRequest(scenario.method, spec)
+}
+
+function toRawRequest(method: Method, spec: RequestSpec) {
   return new Request(new URL(spec.path, "http://localhost"), {
-    method: scenario.method,
+    method,
     headers: spec.body === undefined ? spec.headers : { "content-type": "application/json", ...spec.headers },
     body: spec.body === undefined ? undefined : JSON.stringify(spec.body),
   })

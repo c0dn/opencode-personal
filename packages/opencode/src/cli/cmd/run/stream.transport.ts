@@ -18,7 +18,6 @@
 import type { Event, GlobalEvent, OpencodeClient } from "@opencode-ai/sdk/v2"
 import { Context, Deferred, Effect, Exit, Layer, Scope, Stream } from "effect"
 import { makeRuntime } from "@/effect/run-service"
-import { TranscriptV2Display } from "@/session/transcript-v2-display"
 import {
   blockerStatus,
   bootstrapSessionData,
@@ -28,16 +27,15 @@ import {
   reduceSessionData,
   type SessionData,
 } from "./session-data"
-import { bootstrapSessionDataV2Display, replaySession, replaySessionV2 } from "./session-replay"
+import { replayActiveText, replayLocalRows, replaySession } from "./session-replay"
 import {
-  bootstrapSubagentCallsV2Display,
-  bootstrapSubagentDataV2Display,
+  bootstrapSubagentCalls,
+  bootstrapSubagentData,
   clearFinishedSubagents,
   createSubagentData,
   listSubagentPermissions,
   listSubagentQuestions,
   listSubagentTabs,
-  recordSubagentDetailError,
   reduceSubagentData,
   sameSubagentTab,
   snapshotSelectedSubagentData,
@@ -53,6 +51,8 @@ import type {
   FooterSubagentState,
   FooterSubagentTab,
   FooterView,
+  LocalReplayAnchor,
+  LocalReplayRow,
   RunFilePart,
   RunInput,
   RunPrompt,
@@ -83,6 +83,7 @@ type Wait = {
   tick: number
   armed: boolean
   live: boolean
+  onVisibleOutput?: (anchor: LocalReplayAnchor) => void
   done: Deferred.Deferred<void, unknown>
 }
 
@@ -93,13 +94,20 @@ export type SessionTurnInput = {
   prompt: RunPrompt
   files: RunFilePart[]
   includeFiles: boolean
+  onVisibleOutput?: (anchor: LocalReplayAnchor) => void
   signal?: AbortSignal
 }
 
 export type SessionTransport = {
   runPromptTurn(input: SessionTurnInput): Promise<void>
   selectSubagent(sessionID: string | undefined): void
+  replayOnResize(input: SessionResizeReplayInput): Promise<boolean>
   close(): Promise<void>
+}
+
+export type SessionResizeReplayInput = {
+  localRows: () => LocalReplayRow[]
+  reset: () => Promise<void>
 }
 
 type State = {
@@ -117,6 +125,7 @@ type State = {
 type TransportService = {
   readonly runPromptTurn: (input: SessionTurnInput) => Effect.Effect<void, unknown>
   readonly selectSubagent: (sessionID: string | undefined) => Effect.Effect<void>
+  readonly replayOnResize: (input: SessionResizeReplayInput) => Effect.Effect<boolean>
   readonly close: () => Effect.Effect<void>
 }
 
@@ -138,10 +147,6 @@ function sid(event: Event): string | undefined {
   if (
     event.type === "session.next.shell.started" ||
     event.type === "session.next.shell.ended" ||
-    event.type === "session.next.tool.called" ||
-    event.type === "session.next.tool.metadata.updated" ||
-    event.type === "session.next.tool.success" ||
-    event.type === "session.next.tool.failed" ||
     event.type === "permission.asked" ||
     event.type === "permission.replied" ||
     event.type === "question.asked" ||
@@ -262,22 +267,6 @@ export function formatUnknownError(error: unknown): string {
   }
 
   return "unknown error"
-}
-
-function requireV2ReplayData(response: Awaited<ReturnType<OpencodeClient["v2"]["session"]["messages"]>>) {
-  if ("error" in response && response.error) {
-    throw new Error(`failed to load v2 replay messages: ${formatUnknownError(response.error)}`)
-  }
-
-  if (!response.data) {
-    throw new Error("failed to load v2 replay messages: missing response data")
-  }
-
-  return response.data
-}
-
-function requireV2ReplayItems(response: Awaited<ReturnType<OpencodeClient["v2"]["session"]["messages"]>>) {
-  return requireV2ReplayData(response).items
 }
 
 function sameView(a: FooterView, b: FooterView) {
@@ -462,6 +451,9 @@ function createLayer(input: StreamInput) {
           blockers: new Map(),
         }
         let booting = true
+        let replaying = false
+        let replayDisabled = false
+        let replayPending: SessionResizeReplayInput | undefined
         const buffered: Event[] = []
         const replayedParts = new Set<string>()
         const recovering = new Set<string>()
@@ -605,161 +597,92 @@ function createLayer(input: StreamInput) {
           }
         })
 
-        const primaryReplayMessages = Effect.fn("RunStreamTransport.primaryReplayMessages")(function* () {
-          if (!input.replay) {
-            return undefined
-          }
-
-          const rows =
-            input.replayLimit === undefined
-              ? yield* primaryReplayAllMessages()
-              : yield* primaryReplayLatestMessages(input.replayLimit)
-          return TranscriptV2Display.toDisplayTranscriptV2FromWire(rows, { status: "ready" })
-        })
-
-        const primaryNoReplayBootstrapMessages = Effect.fn("RunStreamTransport.primaryNoReplayBootstrapMessages")(
-          function* () {
-            if (input.replay) {
-              return undefined
-            }
-
-            const response = yield* Effect.promise(() =>
-              input.sdk.v2.session.messages(
-                {
-                  sessionID: input.sessionID,
-                  limit: SUBAGENT_BOOTSTRAP_LIMIT,
-                  order: "desc",
-                },
-                { throwOnError: true },
-              ),
-            )
-            return TranscriptV2Display.toDisplayTranscriptV2FromWire(requireV2ReplayItems(response), { status: "ready" })
-          },
-        )
-
-        const primaryReplayLatestMessages = Effect.fn("RunStreamTransport.primaryReplayLatestMessages")(function* (
-          limit: number,
-        ) {
-          const response = yield* Effect.promise(() =>
-            input.sdk.v2.session.messages(
-              {
-                sessionID: input.sessionID,
-                limit,
-                order: "desc",
-              },
-              { throwOnError: true },
-            ),
-          )
-          return requireV2ReplayItems(response)
-        })
-
-        const primarySubagentLatestMessages = Effect.fn("RunStreamTransport.primarySubagentLatestMessages")(function* () {
-          const response = yield* Effect.promise(() =>
-            input.sdk.v2.session.messages(
-              {
-                sessionID: input.sessionID,
-                limit: SUBAGENT_BOOTSTRAP_LIMIT,
-                order: "desc",
-              },
-              { throwOnError: true },
-            ),
-          )
-          return TranscriptV2Display.toDisplayTranscriptV2FromWire(requireV2ReplayItems(response), { status: "ready" })
-        })
-
-        const primaryReplayAllMessages = Effect.fn("RunStreamTransport.primaryReplayAllMessages")(function* () {
-          const rows: unknown[] = []
-          let cursor: string | undefined
-          do {
-            const response = yield* Effect.promise(() =>
-              input.sdk.v2.session.messages(
-                cursor
-                  ? {
-                      sessionID: input.sessionID,
-                      limit: 200,
-                      order: "asc",
-                      cursor,
-                    }
-                  : {
-                      sessionID: input.sessionID,
-                      limit: 200,
-                      order: "asc",
-                    },
-                { throwOnError: true },
-              ),
-            )
-            const data = requireV2ReplayData(response)
-            rows.push(...data.items)
-            cursor = data.cursor.next
-          } while (cursor)
-
-          return rows
-        })
-
-        const childV2DisplayMessages = async (sessionID: string) => {
-          const response = await input.sdk.v2.session.messages(
-            {
+        const messages = (sessionID: string, limit?: number) =>
+          Effect.promise(() =>
+            input.sdk.session.messages({
               sessionID,
-              limit: SUBAGENT_CALL_BOOTSTRAP_LIMIT,
-              order: "desc",
-            },
-            { throwOnError: true, signal: abort.signal },
+              ...(typeof limit === "number" ? { limit } : {}),
+            }),
+          ).pipe(
+            Effect.map((item) => item.data ?? []),
+            Effect.orElseSucceed(() => []),
           )
-          return TranscriptV2Display.toDisplayTranscriptV2FromWire(requireV2ReplayItems(response), { status: "ready" })
-        }
 
-        const bootstrapSubagentHistory = (sessions: string[]) => {
-          let index = 0
-          const worker = async () => {
-            while (!closed && !abort.signal.aborted && !input.footer.isClosed) {
-              const sessionID = sessions[index]
-              index += 1
-              if (!sessionID) {
-                return
-              }
+        const replayMessages = () =>
+          Effect.promise(() =>
+            input.sdk.session.messages({
+              sessionID: input.sessionID,
+              ...(input.replayLimit === undefined
+                ? {}
+                : { limit: Math.max(input.replayLimit, SUBAGENT_BOOTSTRAP_LIMIT) }),
+            }),
+          ).pipe(Effect.flatMap((item) => (item.error ? Effect.fail(item.error) : Effect.succeed(item.data ?? []))))
 
-              try {
-                const messagesList = await childV2DisplayMessages(sessionID)
-                if (closed || abort.signal.aborted || input.footer.isClosed) {
-                  return
-                }
+        const replayRequests = () =>
+          Effect.all(
+            [
+              Effect.promise(() => input.sdk.permission.list()).pipe(
+                Effect.flatMap((item) => (item.error ? Effect.fail(item.error) : Effect.succeed(item.data ?? []))),
+              ),
+              Effect.promise(() => input.sdk.question.list()).pipe(
+                Effect.flatMap((item) => (item.error ? Effect.fail(item.error) : Effect.succeed(item.data ?? []))),
+              ),
+            ],
+            { concurrency: "unbounded" },
+          )
 
-                if (
-                  !bootstrapSubagentCallsV2Display({
-                    data: state.subagent,
-                    sessionID,
-                    messages: messagesList,
-                    thinking: input.thinking,
-                    limits: input.limits(),
-                  })
-                ) {
-                  continue
-                }
-
-                syncFooter([], undefined, currentSubagentState())
-              } catch (error) {
-                if (closed || abort.signal.aborted || input.footer.isClosed) {
-                  return
-                }
-
-                const detail = formatUnknownError(error)
-                const message = `Failed to load subagent history: ${detail}`
-                input.trace?.write("subagent.history.error", { sessionID, error: detail })
-                if (recordSubagentDetailError({ data: state.subagent, sessionID, message })) {
-                  syncFooter([], undefined, currentSubagentState())
-                }
-              }
+        const markReplayedParts = (data: SessionData) => {
+          replayedParts.clear()
+          for (const [partID] of data.text) {
+            if (data.part.has(partID)) {
+              replayedParts.add(partID)
             }
           }
-
-          void Promise.all(Array.from({ length: Math.min(4, sessions.length) }, worker))
         }
+
+        const bootstrapSubagentHistory = Effect.fn("RunStreamTransport.bootstrapSubagentHistory")(function* (
+          sessions: string[],
+        ) {
+          yield* Effect.forEach(
+            sessions,
+            (sessionID) =>
+              messages(sessionID, SUBAGENT_CALL_BOOTSTRAP_LIMIT).pipe(
+                Effect.tap((messagesList) =>
+                  Effect.sync(() => {
+                    if (
+                      !bootstrapSubagentCalls({
+                        data: state.subagent,
+                        sessionID,
+                        messages: messagesList,
+                        thinking: input.thinking,
+                        limits: input.limits(),
+                      })
+                    ) {
+                      return
+                    }
+
+                    syncFooter([], undefined, currentSubagentState())
+                  }),
+                ),
+              ),
+            {
+              concurrency: 4,
+              discard: true,
+            },
+          )
+        })
 
         const bootstrap = Effect.fn("RunStreamTransport.bootstrap")(function* () {
-          const [replayMessages, noReplayBootstrapMessages, children, permissions, questions] = yield* Effect.all(
+          const [messagesList, children, permissions, questions] = yield* Effect.all(
             [
-              primaryReplayMessages(),
-              primaryNoReplayBootstrapMessages(),
+              messages(
+                input.sessionID,
+                input.replay
+                  ? input.replayLimit === undefined
+                    ? undefined
+                    : Math.max(input.replayLimit, SUBAGENT_BOOTSTRAP_LIMIT)
+                  : SUBAGENT_BOOTSTRAP_LIMIT,
+              ),
               Effect.promise(() =>
                 input.sdk.session.children({
                   sessionID: input.sessionID,
@@ -781,58 +704,49 @@ function createLayer(input: StreamInput) {
               concurrency: "unbounded",
             },
           )
-          const subagentBootstrapMessages = replayMessages
-            ? input.replayLimit !== undefined && children.length > 0
-              ? yield* primarySubagentLatestMessages()
-              : replayMessages
-            : (noReplayBootstrapMessages ?? [])
 
           const sessionPermissions = permissions.filter((item) => item.sessionID === input.sessionID)
           const sessionQuestions = questions.filter((item) => item.sessionID === input.sessionID)
-          const history = replayMessages
-            ? replaySessionV2({
-                messages: replayMessages,
+          const history = input.replay
+            ? replaySession({
+                messages: messagesList,
                 permissions: sessionPermissions,
                 questions: sessionQuestions,
                 thinking: input.thinking,
                 limits: input.limits(),
-                sessionID: input.sessionID,
               })
             : undefined
-          const replay = history
+          const replay =
+            history && input.replayLimit !== undefined && messagesList.length > input.replayLimit
+              ? replaySession({
+                  messages: messagesList.slice(-input.replayLimit),
+                  permissions: sessionPermissions,
+                  questions: sessionQuestions,
+                  thinking: input.thinking,
+                  limits: input.limits(),
+                })
+              : history
 
-          replayedParts.clear()
           if (history) {
             state.data = history.data
           }
 
           if (!history) {
-            if (noReplayBootstrapMessages) {
-              bootstrapSessionDataV2Display({
-                data: state.data,
-                messages: noReplayBootstrapMessages,
-                permissions: sessionPermissions,
-                questions: sessionQuestions,
-              })
-            }
+            bootstrapSessionData({
+              data: state.data,
+              messages: messagesList,
+              permissions: sessionPermissions,
+              questions: sessionQuestions,
+            })
           }
 
-          if (replay) {
-            for (const partID of replay.data.ids) {
-              replayedParts.add(partID)
-            }
-            for (const [partID] of replay.data.text) {
-              if (!replay.data.part.has(partID)) {
-                continue
-              }
-
-              replayedParts.add(partID)
-            }
+          if (history) {
+            markReplayedParts(history.data)
           }
 
-          bootstrapSubagentDataV2Display({
+          bootstrapSubagentData({
             data: state.subagent,
-            messages: subagentBootstrapMessages,
+            messages: messagesList,
             children,
             permissions,
             questions,
@@ -877,7 +791,10 @@ function createLayer(input: StreamInput) {
             return
           }
 
-          bootstrapSubagentHistory(sessions)
+          yield* bootstrapSubagentHistory(sessions).pipe(
+            Effect.forkIn(scope, { startImmediately: true }),
+            Effect.asVoid,
+          )
         })
 
         const idle = Effect.fn("RunStreamTransport.idle")((fallback: boolean) =>
@@ -975,14 +892,7 @@ function createLayer(input: StreamInput) {
 
           trackBlocker(event)
 
-          const prev =
-            event.type === "message.part.updated" ||
-            event.type === "session.next.tool.called" ||
-            event.type === "session.next.tool.metadata.updated" ||
-            event.type === "session.next.tool.success" ||
-            event.type === "session.next.tool.failed"
-              ? listSubagentTabs(state.subagent)
-              : undefined
+          const prev = event.type === "message.part.updated" ? listSubagentTabs(state.subagent) : undefined
           const next = reduceSessionData({
             data: state.data,
             event,
@@ -991,6 +901,20 @@ function createLayer(input: StreamInput) {
             limits: input.limits(),
           })
           state.data = next.data
+          const visible = next.commits.at(-1)
+          if (visible) {
+            state.wait?.onVisibleOutput?.({
+              kind: visible.kind,
+              text: visible.text,
+              phase: visible.phase,
+              messageID: visible.messageID,
+              partID: visible.partID,
+              toolState: visible.toolState,
+              ...(visible.partID && state.data.visible.has(visible.partID)
+                ? { visible: state.data.visible.get(visible.partID) }
+                : {}),
+            })
+          }
 
           if (
             event.type === "message.part.updated" &&
@@ -1039,13 +963,161 @@ function createLayer(input: StreamInput) {
               yield* applyEvent(event)
             }
 
-            if (!changed) {
+            const arrived = buffered.splice(0)
+            if (!changed && arrived.length === 0) {
               buffered.push(...next)
               return
             }
 
-            pending = next
+            pending = [...next, ...arrived]
           }
+        })
+
+        const replayOnResize: (next: SessionResizeReplayInput) => Effect.Effect<boolean> = Effect.fn(
+          "RunStreamTransport.replayOnResize",
+        )(function* (next: SessionResizeReplayInput) {
+          if (!input.replay || replayDisabled || booting || closed || input.footer.isClosed) {
+            return false
+          }
+
+          if (replaying) {
+            replayPending = next
+            return false
+          }
+
+          const finish: () => Effect.Effect<void> = Effect.fnUntraced(function* () {
+            yield* drainBuffered()
+            const pending = replayPending
+            replayPending = undefined
+            if (!pending || replayDisabled || closed || input.footer.isClosed) {
+              replaying = false
+              return
+            }
+
+            replaying = false
+            yield* replayOnResize(pending).pipe(Effect.asVoid)
+          })
+
+          replayedParts.clear()
+          replaying = true
+          input.trace?.write("replay.resize.start", {
+            sessionID: input.sessionID,
+          })
+          const source = yield* Effect.all([replayMessages(), replayRequests()], { concurrency: "unbounded" }).pipe(
+            Effect.exit,
+          )
+          if (Exit.isFailure(source)) {
+            input.trace?.write("replay.resize.abort", {
+              sessionID: input.sessionID,
+              phase: "snapshot",
+            })
+            yield* finish()
+            return false
+          }
+
+          const [messagesList, [permissions, questions]] = source.value
+          const sessionPermissions = permissions.filter((item) => item.sessionID === input.sessionID)
+          const sessionQuestions = questions.filter((item) => item.sessionID === input.sessionID)
+          const snapshot = yield* Effect.try({
+            try: () => {
+              const history = replaySession({
+                messages: messagesList,
+                permissions: sessionPermissions,
+                questions: sessionQuestions,
+                thinking: input.thinking,
+                limits: input.limits(),
+              })
+              const activeCommits = replayActiveText(history.data, state.data)
+              return {
+                history,
+                activeCommits,
+                patch:
+                  history.data.part.size > 0 || history.data.tools.size > 0
+                    ? { ...history.patch, phase: "running" as const }
+                    : history.patch,
+                visible:
+                  input.replayLimit !== undefined && messagesList.length > input.replayLimit
+                    ? replaySession({
+                        messages: messagesList.slice(-input.replayLimit),
+                        permissions: sessionPermissions,
+                        questions: sessionQuestions,
+                        thinking: input.thinking,
+                        limits: input.limits(),
+                      })
+                    : history,
+              }
+            },
+            catch: (error) => error,
+          }).pipe(Effect.exit)
+          if (Exit.isFailure(snapshot)) {
+            input.trace?.write("replay.resize.abort", {
+              sessionID: input.sessionID,
+              phase: "snapshot",
+            })
+            yield* finish()
+            return false
+          }
+
+          const idle = yield* Effect.promise(() => input.footer.idle()).pipe(Effect.exit)
+          if (Exit.isFailure(idle) || closed || input.footer.isClosed) {
+            yield* finish()
+            return false
+          }
+
+          const reset = yield* Effect.promise(() => next.reset()).pipe(Effect.exit)
+          if (Exit.isFailure(reset)) {
+            replayDisabled = true
+            input.trace?.write("replay.resize.disable", {
+              sessionID: input.sessionID,
+              phase: "reset",
+            })
+            input.footer.append({
+              kind: "error",
+              text: "resize replay failed; disabled for this session",
+              phase: "start",
+              source: "system",
+            })
+            yield* finish()
+            return false
+          }
+
+          state.data = snapshot.value.history.data
+          for (const request of [...state.data.permissions, ...state.data.questions]) {
+            seedBlocker(request.id)
+          }
+
+          for (const commit of replayLocalRows(
+            messagesList,
+            [...snapshot.value.visible.commits, ...snapshot.value.activeCommits],
+            next.localRows(),
+          )) {
+            input.trace?.write("ui.commit", commit)
+            input.footer.append(commit)
+          }
+
+          syncFooter([], snapshot.value.patch, currentSubagentState())
+          const rebuilt = yield* Effect.promise(() => input.footer.idle()).pipe(Effect.exit)
+          if (Exit.isFailure(rebuilt)) {
+            replayDisabled = true
+            input.trace?.write("replay.resize.disable", {
+              sessionID: input.sessionID,
+              phase: "rebuild",
+            })
+            input.footer.append({
+              kind: "error",
+              text: "resize replay failed; disabled for this session",
+              phase: "start",
+              source: "system",
+            })
+            yield* finish()
+            return false
+          }
+
+          input.trace?.write("replay.resize.complete", {
+            sessionID: input.sessionID,
+          })
+          yield* finish()
+          return true
         })
 
         const watch = Effect.fn("RunStreamTransport.watch")(() =>
@@ -1072,7 +1144,7 @@ function createLayer(input: StreamInput) {
                 }
 
                 const sessionID = sid(event)
-                if (booting) {
+                if (booting || replaying) {
                   if (sessionID) {
                     input.trace?.write("recv.event", event)
                     buffered.push(event)
@@ -1134,6 +1206,7 @@ function createLayer(input: StreamInput) {
             tick: state.tick,
             armed: false,
             live: false,
+            onVisibleOutput: next.onVisibleOutput,
             done: yield* Deferred.make<void, unknown>(),
           }
           state.wait = item
@@ -1149,6 +1222,7 @@ function createLayer(input: StreamInput) {
 
           const req = {
             sessionID: input.sessionID,
+            messageID: next.prompt.messageID,
             agent: next.agent,
             model: next.model,
             variant: next.variant,
@@ -1210,6 +1284,7 @@ function createLayer(input: StreamInput) {
                         input.sdk.session.command(
                           {
                             sessionID: input.sessionID,
+                            messageID: next.prompt.messageID,
                             agent: next.agent,
                             model: next.model ? `${next.model.providerID}/${next.model.modelID}` : undefined,
                             variant: next.variant,
@@ -1360,6 +1435,7 @@ function createLayer(input: StreamInput) {
         return Service.of({
           runPromptTurn,
           selectSubagent,
+          replayOnResize,
           close,
         })
       }),
@@ -1383,6 +1459,7 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
   return {
     runPromptTurn: (next) => runtime.runPromise((svc) => svc.runPromptTurn(next)),
     selectSubagent: (sessionID) => runtime.runSync((svc) => svc.selectSubagent(sessionID)),
+    replayOnResize: (next) => runtime.runPromise((svc) => svc.replayOnResize(next)),
     close: () => runtime.runPromise((svc) => svc.close()),
   }
 }

@@ -493,6 +493,7 @@ export const dict = {
   "notification.session.error.fallbackDescription": "เกิดข้อผิดพลาด",
 
   "home.recentProjects": "โปรเจกต์ล่าสุด",
+  "home.openedProjects": "โปรเจกต์ที่เปิดอยู่",
   "home.empty.title": "ไม่มีโปรเจกต์ล่าสุด",
   "home.empty.description": "เริ่มต้นโดยเปิดโปรเจกต์ในเครื่อง",
 
@@ -549,6 +550,8 @@ export const dict = {
   "session.header.open.ariaLabel": "เปิดใน {{app}}",
   "session.header.open.menu": "ตัวเลือกการเปิด",
   "session.header.open.copyPath": "คัดลอกเส้นทาง",
+  "session.header.agent.label": "เอเจนต์",
+  "session.header.agent.active": "เอเจนต์ที่ใช้งาน: @{{agent}}",
 
   "status.popover.trigger": "สถานะ",
   "status.popover.ariaLabel": "การกำหนดค่าเซิร์ฟเวอร์",
@@ -591,6 +594,8 @@ export const dict = {
   "common.archive": "จัดเก็บ",
   "common.delete": "ลบ",
   "common.close": "ปิด",
+  "common.moveLeft": "Move left",
+  "common.moveRight": "Move right",
   "common.edit": "แก้ไข",
   "common.loadMore": "โหลดเพิ่มเติม",
   "common.key.esc": "ESC",

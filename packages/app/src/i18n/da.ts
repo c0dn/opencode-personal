@@ -494,6 +494,7 @@ export const dict = {
   "notification.session.error.fallbackDescription": "Der opstod en fejl",
 
   "home.recentProjects": "Seneste projekter",
+  "home.openedProjects": "Åbnede projekter",
   "home.empty.title": "Ingen seneste projekter",
   "home.empty.description": "Kom i gang ved at åbne et lokalt projekt",
 
@@ -549,6 +550,8 @@ export const dict = {
   "session.header.open.ariaLabel": "Åbn i {{app}}",
   "session.header.open.menu": "Åbningsmuligheder",
   "session.header.open.copyPath": "Kopier sti",
+  "session.header.agent.label": "Agent",
+  "session.header.agent.active": "Aktiv agent: @{{agent}}",
 
   "status.popover.trigger": "Status",
   "status.popover.ariaLabel": "Serverkonfigurationer",
@@ -593,6 +596,8 @@ export const dict = {
   "common.archive": "Arkivér",
   "common.delete": "Slet",
   "common.close": "Luk",
+  "common.moveLeft": "Move left",
+  "common.moveRight": "Move right",
   "common.edit": "Rediger",
   "common.loadMore": "Indlæs flere",
 

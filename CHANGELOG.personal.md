@@ -1,0 +1,117 @@
+# Personal Fork Changelog
+
+Changes specific to `c0dn/opencode-personal`, layered on top of upstream
+`anomalyco/opencode`. Upstream features are tracked by upstream; this file only
+records the personal patch stack and personal feature additions.
+
+Versioning note: automated upstream mirrors are published as
+`v<upstream-version>-c0dn.N`, and manual personal builds use
+`<upstream-version>-c0dn.N`. Releases are built manually via
+`personal-release.yml` and are Linux-only (`linux-x64`, `linux-arm64`).
+
+## Unreleased
+
+- No unreleased personal changes.
+
+## v1.16.0-c0dn.1 - 2026-06-05
+
+### Changed
+- Synced the personal fork onto upstream `anomalyco/opencode` v1.16.0 while
+  preserving the `c0dn/opencode-personal` installer/updater release channel,
+  Linux-only artifacts, and blocked package-manager upgrades.
+- Re-applied compatible upstream release-channel changes: curl upgrades now fall
+  back from `bash` to `sh`, and Linux builds carry libc metadata through
+  `OPENTUI_LIBC`.
+- Hardened sync/release automation so upstream mirrors are skipped only when the
+  expected Linux release assets exist, and personal releases are built from the
+  validated merge SHA.
+- Narrowed personal version normalization to strip only `-c0dn.N` suffixes for
+  dependency compatibility, without treating arbitrary upstream prereleases as
+  stable versions.
+
+## v1.15.13-c0dn.8 - 2026-06-05
+
+### Fixed
+- Web (v2 UI): restored titlebar session tabs by porting upstream tab handling
+  and fixing project/new-session tab behavior.
+
+## v1.15.13-c0dn.6 - 2026-06-04
+
+### Added
+- MCP: added Bifrost gateway configuration support, including default header
+  handling, CLI/server wiring, tests, and documentation for the managed gateway
+  setup.
+
+### Fixed
+- Session runtime: reverted the OpenAI websocket/session stream recovery and
+  attempt replay stack that caused regressions around queued follow-up prompts
+  and undo/redo flows.
+- TUI/session sync: ported safe upstream fixes for live hydration, diff-viewer
+  rendering, ACP session handling, read output, task-tool wording, and related
+  regression coverage.
+
+## v1.15.13-c0dn.5 - 2026-06-04
+
+### Added
+- TUI: `/tps` slash command (alias `/tokens-per-second`) that toggles a compact
+  tokens-per-second indicator in the prompt footer. State persists via the
+  `tps_display_visibility` KV key. Shows a live average while a response streams
+  and keeps the final average after completion. TPS is computed as
+  `(output + reasoning tokens) / generation seconds`, with a character-based `~`
+  estimate fallback before provider token counts are available.
+- Web (v2 UI): assistant message metrics popover. A help icon in the assistant
+  message metadata row opens a compact panel showing average TPS
+  (output + reasoning), latency, time to first token, generation time, token
+  breakdown, cost, provider, model, agent, and finish/interrupted state. Fully
+  client-side from existing sync data; no server/API/schema changes.
+- Web (v2 UI): shared `Popover` gained backwards-compatible
+  `onOpenAutoFocus`, `onCloseAutoFocus`, and `contentProps` so hover-open
+  surfaces do not steal focus from the composer and can stay open while the
+  pointer is over the content.
+
+### Fixed
+- Web: restored queued follow-up prompts by preserving `followup: "queue"` in
+  app and server UI settings. Busy-session submissions in queue mode now enqueue
+  instead of sending immediately.
+- Web (v2 UI): preserved desktop session tabs across direct session URL visits
+  and reloads by persisting titlebar session tabs per workspace while keeping
+  subagent/child sessions out of the tab strip.
+- Web (v2 UI): improved desktop session tab overflow, close, and keyboard
+  navigation behavior so active/root tabs stay visible and non-active tab closes
+  do not navigate away.
+- Web (v2 UI): defaulted the session todo dock to collapsed on mobile when the
+  user has not explicitly toggled it, while keeping desktop expanded by default.
+- Web (v2 UI): kept mobile-only v2 session chrome out of v1 UI, including the
+  floating project bar, mobile Session/Changes titlebar control, and mobile
+  changes view path.
+- Web (v2 UI): improved mobile project navigation with a less pill-like bottom
+  bar, project status indicators for permissions/running/errors/unread sessions,
+  and long-press/right-click project actions for Move left, Move right, and
+  Close.
+- Web (v2 UI): split project selection into Opened projects and Recent projects,
+  with Recent collapsed by default and clearer section markers across desktop
+  and mobile layouts.
+- Web (v2 UI): reworked the mobile Session/Changes control into a box-style
+  segmented control so long changed-file labels truncate cleanly instead of
+  clipping.
+
+## Baseline personal patches
+
+These are the standing customizations that define this fork's release channel.
+They are maintained across upstream syncs.
+
+### Release channel
+- CLI updater and installer pull from GitHub Releases of
+  `c0dn/opencode-personal`.
+- Package-manager upgrades (`npm`, `bun`, `pnpm`, `brew`, `scoop`, `choco`) are
+  blocked for personal builds; only GitHub-release/curl upgrades are supported.
+- Personal release builds are limited to `linux-x64` and `linux-arm64`.
+- `OPENCODE_BUILD_TARGETS` filters CLI build targets.
+
+### Automation
+- `sync-upstream.yml` merges the latest upstream release tag into this fork's
+  `dev`, runs typecheck/tests, pushes the validated merge, and mirrors it as
+  `v<upstream-version>-c0dn.1` from the validated SHA when the expected Linux
+  assets are not already published.
+- `personal-release.yml` publishes manual Linux CLI builds and can be called by
+  the upstream sync after a successful merge.

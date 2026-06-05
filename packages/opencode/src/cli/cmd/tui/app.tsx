@@ -558,6 +558,25 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     if (workspace?.type !== "worktree" || !workspace.directory) return
     return workspace
   })
+  async function reloadConfig() {
+    await sdk.client.project
+      .reload({ workspace: project.workspace.current() })
+      .then(() => {
+        toast.show({
+          title: "Config reloaded",
+          message: "Workspace config, agents, and MCPs were reloaded.",
+          variant: "success",
+        })
+      })
+      .catch(() => {
+        toast.show({
+          title: "Failed to reload config",
+          message: "Workspace config, agents, and MCPs could not be reloaded.",
+          variant: "error",
+        })
+      })
+    dialog.clear()
+  }
   const appCommands = createMemo(() =>
     [
       {
@@ -607,6 +626,14 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
             .catch(toast.error)
           dialog.clear()
         },
+      },
+      {
+        name: "project.reloadConfig",
+        title: "Reload Config",
+        desc: "Reload workspace config, agents, and MCPs.",
+        category: "Project",
+        slashName: "reload-config",
+        run: reloadConfig,
       },
       {
         name: "workspace.list",
@@ -715,6 +742,13 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
         hidden: local.model.variant.list().length === 0,
         slashName: "variants",
         run: () => {
+          if (local.model.variant.list().length === 0) {
+            return toast.show({
+              title: "No variants available",
+              message: "The current model does not support any variants.",
+              variant: "info",
+            })
+          }
           dialog.replace(() => <DialogVariant />)
         },
       },
@@ -958,11 +992,13 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     bindings: tuiConfig.keybinds.gather("app_exit", ["app.exit"]),
   }))
 
-  event.on(TuiEvent.CommandExecute.type, (evt) => {
+  event.on(TuiEvent.CommandExecute.type, (evt, { workspace }) => {
+    if (workspace !== project.workspace.current()) return
     keymap.dispatchCommand(evt.properties.command)
   })
 
-  event.on(TuiEvent.ToastShow.type, (evt) => {
+  event.on(TuiEvent.ToastShow.type, (evt, { workspace }) => {
+    if (workspace !== project.workspace.current()) return
     toast.show({
       title: evt.properties.title,
       message: evt.properties.message,
@@ -971,7 +1007,8 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     })
   })
 
-  event.on(TuiEvent.SessionSelect.type, (evt) => {
+  event.on(TuiEvent.SessionSelect.type, (evt, { workspace }) => {
+    if (workspace !== project.workspace.current()) return
     route.navigate({
       type: "session",
       sessionID: evt.properties.sessionID,
@@ -988,7 +1025,8 @@ function App(props: { onSnapshot?: () => Promise<string[]> }) {
     }
   })
 
-  event.on("session.error", (evt) => {
+  event.on("session.error", (evt, { workspace }) => {
+    if (workspace !== project.workspace.current()) return
     const error = evt.properties.error
     if (error && typeof error === "object" && error.name === "MessageAbortedError") return
     const message = errorMessage(error)

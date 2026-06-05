@@ -40,7 +40,7 @@ test.describe("smoke: session timeline", () => {
     })
     await configureSmokePage(page, fixture.directory)
 
-    await selectHomeProject(page, fixture.project.name)
+    await selectHomeProject(page, fixture.project.name, fixture.directory)
     await navigateToSession(page, fixture.directory, fixture.sourceID, fixture.expected.sourceTitle)
     await expectSessionReady(page)
     await navigateToSession(page, fixture.directory, fixture.targetID, fixture.expected.targetTitle)
@@ -409,13 +409,14 @@ function expectCompleteScroll(
   expect(expectedPartIDs.length).toBe(331)
 }
 
-async function selectHomeProject(page: Page, projectName: string) {
+async function selectHomeProject(page: Page, projectName: string, directory: string) {
   await page.goto("/")
   await page
     .locator('[data-component="home-project-row"]')
     .filter({ hasText: new RegExp(projectName, "i") })
     .click()
-  await expect(page).toHaveURL(/\/$/)
+  const project = base64Encode(directory)
+  await expect(page).toHaveURL((url) => url.pathname === "/" && url.searchParams.get("project") === project)
 }
 
 async function navigateToSession(page: Page, directory: string, sessionId: string, expectedTitle: string) {

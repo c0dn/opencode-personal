@@ -1,6 +1,6 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { beforeEach, describe, expect } from "bun:test"
-import { DateTime, Effect, Exit, Layer, Option } from "effect"
+import { Effect, Exit, Layer, Option } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 
 import { AccessToken, AccountID, OrgID, RefreshToken } from "../../src/account/schema"
@@ -9,18 +9,16 @@ import { AccountRepo } from "../../src/account/repo"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Config } from "@/config/config"
+import { Provider } from "@/provider/provider"
 import { Session } from "@/session/session"
 import type { SessionID } from "../../src/session/schema"
 import { ShareNext } from "@/share/share-next"
-import { AbsolutePath } from "@opencode-ai/core/schema"
-import { SessionEvent } from "@opencode-ai/core/session/event"
-import { Prompt } from "@opencode-ai/core/session/prompt"
 import { SessionShareTable } from "@opencode-ai/core/share/sql"
 import { Database } from "@opencode-ai/core/database/database"
 import { eq } from "drizzle-orm"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { resetDatabase } from "../fixture/db"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
 
 const env = Layer.mergeAll(
   Session.defaultLayer,
@@ -50,6 +48,7 @@ function live(client: HttpClient.HttpClient) {
     Layer.provide(Config.defaultLayer),
     Layer.provide(Database.defaultLayer),
     Layer.provide(http),
+    Layer.provide(Provider.defaultLayer),
     Layer.provide(Session.defaultLayer),
   )
 }
@@ -69,6 +68,7 @@ function wired(client: HttpClient.HttpClient) {
     Layer.provide(Account.layer.pipe(Layer.provide(AccountRepo.defaultLayer), Layer.provide(http))),
     Layer.provide(Config.defaultLayer),
     Layer.provide(http),
+    Layer.provide(Provider.defaultLayer),
   )
 }
 
@@ -244,7 +244,7 @@ describe("ShareNext", () => {
     ),
   )
 
-  it.live("ShareNext coalesces rapid canonical v2 session events into one public transcript sync", () =>
+  it.live("ShareNext coalesces rapid diff events into one delayed sync with latest data", () =>
     provideTmpdirInstance(
       () => {
         const seen: Array<{ url: string; body: string }> = []
@@ -275,17 +275,37 @@ describe("ShareNext", () => {
             .run()
             .pipe(Effect.orDie)
 
-          yield* events.publish(SessionEvent.Prompted, {
+          yield* events.publish(Session.Event.Diff, {
             sessionID: info.id,
-            timestamp: DateTime.makeUnsafe(1_000),
-            prompt: new Prompt({ text: "hello from v2" }),
+            diff: [
+              {
+                file: "a.ts",
+                patch:
+                  "Index: a.ts\n===================================================================\n--- a.ts\t\n+++ a.ts\t\n@@ -1,1 +1,1 @@\n-one\n\\ No newline at end of file\n+two\n\\ No newline at end of file\n",
+                additions: 1,
+                deletions: 1,
+                status: "modified",
+              },
+            ],
           })
-          yield* events.publish(SessionEvent.AgentSwitched, {
+          yield* events.publish(Session.Event.Diff, {
             sessionID: info.id,
-            timestamp: DateTime.makeUnsafe(1_001),
-            agent: "build",
+            diff: [
+              {
+                file: "b.ts",
+                patch:
+                  "Index: b.ts\n===================================================================\n--- b.ts\t\n+++ b.ts\t\n@@ -1,1 +1,1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n",
+                additions: 2,
+                deletions: 0,
+                status: "modified",
+              },
+            ],
           })
-          yield* Effect.sleep(1_250)
+          yield* pollWithTimeout(
+            Effect.sync(() => (seen.length === 1 ? true : undefined)),
+            "timed out waiting for share sync",
+            "5 seconds",
+          )
 
           expect(seen).toHaveLength(1)
           expect(seen[0].url).toBe("https://legacy-share.example.com/api/share/shr_abc/sync")
@@ -294,74 +314,28 @@ describe("ShareNext", () => {
             secret: string
             data: Array<{
               type: string
-              payload: {
-                kind: string
-                version: number
-                session: { id: string; title: string }
-                messages: unknown[]
-              }
+              data: Array<{
+                file: string
+                patch: string
+                additions: number
+                deletions: number
+                status?: string
+              }>
             }>
           }
           expect(body.secret).toBe("sec_123")
           expect(body.data).toHaveLength(1)
-          expect(body.data[0].type).toBe("public_transcript_v2")
-          expect(body.data[0].payload).toMatchObject({
-            kind: "opencode.transcript",
-            version: 2,
-            session: { id: info.id, title: "first" },
-          })
-          expect(body.data[0].payload.messages).toMatchObject([{ type: "user", text: "hello from v2" }])
-          for (const legacyType of ["session", "message", "part", "session_diff", "model"]) {
-            expect(body.data.map((item) => item.type)).not.toContain(legacyType)
-          }
-        }).pipe(Effect.provide(wired(client)))
-      },
-      { config: { enterprise: { url: "https://legacy-share.example.com" } } },
-    ),
-  )
-
-  it.live("ShareNext ignores canonical v2 session events from another directory", () =>
-    provideTmpdirInstance(
-      (dir) => {
-        const seen: Array<{ url: string; body: string }> = []
-        const client = HttpClient.make((req) => {
-          if (req.url.endsWith("/sync") && req.body._tag === "Uint8Array") {
-            seen.push({ url: req.url, body: new TextDecoder().decode(req.body.body) })
-          }
-          return Effect.succeed(json(req, { ok: true }))
-        })
-
-        return Effect.gen(function* () {
-          const events = yield* EventV2Bridge.Service
-          const share = yield* ShareNext.Service
-          const session = yield* Session.Service
-
-          const info = yield* session.create({ title: "first" })
-          yield* share.init()
-          const { db } = yield* Database.Service
-          yield* db
-            .insert(SessionShareTable)
-            .values({
-              session_id: info.id,
-              id: "shr_abc",
-              url: "https://legacy-share.example.com/share/abc",
-              secret: "sec_123",
-            })
-            .run()
-            .pipe(Effect.orDie)
-
-          yield* events.publish(
-            SessionEvent.Prompted,
+          expect(body.data[0].type).toBe("session_diff")
+          expect(body.data[0].data).toEqual([
             {
-              sessionID: info.id,
-              timestamp: DateTime.makeUnsafe(1_000),
-              prompt: new Prompt({ text: "hello from elsewhere" }),
+              file: "b.ts",
+              patch:
+                "Index: b.ts\n===================================================================\n--- b.ts\t\n+++ b.ts\t\n@@ -1,1 +1,1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n",
+              additions: 2,
+              deletions: 0,
+              status: "modified",
             },
-            { location: { directory: AbsolutePath.make(`${dir}-other`) } },
-          )
-          yield* Effect.sleep(1_250)
-
-          expect(seen).toHaveLength(0)
+          ])
         }).pipe(Effect.provide(wired(client)))
       },
       { config: { enterprise: { url: "https://legacy-share.example.com" } } },

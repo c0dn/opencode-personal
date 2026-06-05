@@ -1,76 +1,44 @@
-import { produce, type WritableDraft } from "immer"
-import { DateTime, Effect, Schema } from "effect"
-import { ToolOutput } from "../tool-output"
+import { castDraft, produce, type WritableDraft } from "immer"
+import { Effect } from "effect"
 import { SessionEvent } from "./event"
 import { SessionMessage } from "./message"
-import { TaskToolMetadata } from "./task-tool-metadata"
-
-const decodeToolContent = Schema.decodeUnknownSync(ToolOutput.Content)
 
 export type MemoryState = {
   messages: SessionMessage.Message[]
-  pendingCompactions?: PendingCompaction[]
-}
-
-export type PendingCompaction = {
-  id: SessionMessage.ID
-  metadata?: Record<string, unknown>
-  sessionID: SessionEvent.Compaction.Started["data"]["sessionID"]
-  reason: SessionMessage.Compaction["reason"]
-  time: SessionMessage.Compaction["time"]
 }
 
 export interface Adapter {
-  readonly getAssistant: (messageID: SessionMessage.ID) => Effect.Effect<SessionMessage.Assistant | undefined>
   readonly getCurrentAssistant: () => Effect.Effect<SessionMessage.Assistant | undefined>
+  readonly getAssistant: (messageID: SessionMessage.ID) => Effect.Effect<SessionMessage.Assistant | undefined>
   readonly getCurrentCompaction: () => Effect.Effect<SessionMessage.Compaction | undefined>
   readonly getCurrentShell: (callID: string) => Effect.Effect<SessionMessage.Shell | undefined>
   readonly updateAssistant: (assistant: SessionMessage.Assistant) => Effect.Effect<void>
   readonly updateCompaction: (compaction: SessionMessage.Compaction) => Effect.Effect<void>
   readonly updateShell: (shell: SessionMessage.Shell) => Effect.Effect<void>
   readonly appendMessage: (message: SessionMessage.Message) => Effect.Effect<void>
-  readonly appendCompaction: (message: SessionMessage.Compaction) => Effect.Effect<void>
-  readonly recordCompactionStarted: (compaction: PendingCompaction) => Effect.Effect<void>
-  readonly getPendingCompactionStarted: (
-    event: SessionEvent.Compaction.Ended,
-  ) => Effect.Effect<PendingCompaction | undefined>
-  readonly clearPendingCompactionStarted: (id: SessionMessage.ID) => Effect.Effect<void>
 }
 
 export function memory(state: MemoryState): Adapter {
   const assistantIndex = (messageID: SessionMessage.ID) =>
-    state.messages.findIndex((message) => message.type === "assistant" && message.id === messageID)
-  const activeAssistantIndex = () => {
-    const newestIndex = state.messages.reduce<number>((selected, message, index) => {
-      if (message.type !== "assistant") return selected
-      if (selected < 0) return index
-      const current = state.messages[selected]
-      if (current?.type !== "assistant") return index
-      const currentCreated = DateTime.toEpochMillis(current.time.created)
-      const messageCreated = DateTime.toEpochMillis(message.time.created)
-      if (messageCreated > currentCreated) return index
-      if (messageCreated === currentCreated && message.id > current.id) return index
-      return selected
-    }, -1)
-    const newest = state.messages[newestIndex]
-    return newest?.type === "assistant" && !newest.time.completed ? newestIndex : -1
-  }
+    state.messages.findLastIndex((message) => message.id === messageID)
+  // A newer turn supersedes stale incomplete rows; never resume an older assistant projection.
+  const latestAssistantIndex = () => state.messages.findLastIndex((message) => message.type === "assistant")
   const activeCompactionIndex = () => state.messages.findLastIndex((message) => message.type === "compaction")
   const activeShellIndex = (callID: string) =>
     state.messages.findLastIndex((message) => message.type === "shell" && message.callID === callID)
 
   return {
+    getCurrentAssistant() {
+      return Effect.sync(() => {
+        const index = latestAssistantIndex()
+        if (index < 0) return
+        const assistant = state.messages[index]
+        return assistant?.type === "assistant" && !assistant.time.completed ? assistant : undefined
+      })
+    },
     getAssistant(messageID) {
       return Effect.sync(() => {
         const index = assistantIndex(messageID)
-        if (index < 0) return
-        const assistant = state.messages[index]
-        return assistant?.type === "assistant" ? assistant : undefined
-      })
-    },
-    getCurrentAssistant() {
-      return Effect.sync(() => {
-        const index = activeAssistantIndex()
         if (index < 0) return
         const assistant = state.messages[index]
         return assistant?.type === "assistant" ? assistant : undefined
@@ -124,30 +92,6 @@ export function memory(state: MemoryState): Adapter {
         state.messages.push(message)
       })
     },
-    appendCompaction(message) {
-      return Effect.sync(() => {
-        if (state.messages.some((existing) => existing.id === message.id)) return
-        state.messages.push(message)
-      })
-    },
-    recordCompactionStarted(compaction) {
-      return Effect.sync(() => {
-        state.pendingCompactions = [
-          ...(state.pendingCompactions ?? []).filter((pending) => pending.sessionID !== compaction.sessionID),
-          compaction,
-        ]
-      })
-    },
-    getPendingCompactionStarted(event) {
-      return Effect.sync(() => {
-        return (state.pendingCompactions ?? []).findLast((compaction) => compaction.sessionID === event.data.sessionID)
-      })
-    },
-    clearPendingCompactionStarted(id) {
-      return Effect.sync(() => {
-        state.pendingCompactions = (state.pendingCompactions ?? []).filter((compaction) => compaction.id !== id)
-      })
-    },
   }
 }
 
@@ -159,74 +103,27 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
 
   const latestTool = (assistant: DraftAssistant | undefined, callID?: string) =>
     assistant?.content.findLast(
-      (item): item is DraftTool => item.type === "tool" && (callID === undefined || item.callID === callID),
+      (item): item is DraftTool => item.type === "tool" && (callID === undefined || item.id === callID),
     )
 
-  const taskMetadataTarget = (assistant: DraftAssistant, callID: string, allowTerminal: boolean) => {
-    const matches = assistant.content.filter(
-      (item): item is DraftTool =>
-        item.type === "tool" &&
-        item.callID === callID &&
-        item.name === "task" &&
-        item.state.status !== "pending" &&
-        (allowTerminal || item.state.status === "running"),
-    )
-    return matches.length === 1 ? matches[0] : undefined
-  }
-
-  const taskStructured = (toolName: string, structured: Record<string, unknown>, existing: Record<string, unknown>) => {
-    if (toolName !== "task") return structured
-    const incoming = TaskToolMetadata.mergeIntoStructured(structured, structured)
-    if ("task" in incoming) return incoming
-    return TaskToolMetadata.mergeIntoStructured(incoming, existing)
-  }
-
-  const latestText = (assistant: DraftAssistant | undefined) =>
-    assistant?.content.findLast((item): item is DraftText => item.type === "text")
+  const latestText = (assistant: DraftAssistant | undefined, textID: string) =>
+    assistant?.content.findLast((item): item is DraftText => item.type === "text" && item.id === textID)
 
   const latestReasoning = (assistant: DraftAssistant | undefined, reasoningID: string) =>
-    assistant?.content.findLast(
-      (item): item is DraftReasoning => item.type === "reasoning" && item.reasoningID === reasoningID,
-    )
+    assistant?.content.findLast((item): item is DraftReasoning => item.type === "reasoning" && item.id === reasoningID)
 
-  const targetAssistant = (assistantMessageID?: string) =>
-    assistantMessageID
-      ? adapter.getAssistant(SessionMessage.ID.make(assistantMessageID))
-      : adapter.getCurrentAssistant()
-
-  const settleProvider = (
-    current: DraftTool["provider"],
-    settlement: SessionEvent.Tool.Success["data"]["provider"] | SessionEvent.Tool.Failed["data"]["provider"],
-  ): NonNullable<DraftTool["provider"]> => {
-    const resultMetadata = settlement.resultMetadata ?? settlement.metadata ?? current?.resultMetadata
-    return {
-      executed: current?.executed === true || settlement.executed,
-      ...(current?.metadata ? { metadata: current.metadata } : {}),
-      ...(resultMetadata ? { resultMetadata } : {}),
-    }
-  }
-
-  const failedInput = (tool: DraftTool) => {
-    if (tool.state.status === "running") return tool.state.input
-    return {}
-  }
-
-  const failedStructured = (tool: DraftTool) => {
-    if (tool.state.status === "running") return tool.state.structured
-    return {}
-  }
-
-  const failedContent = (tool: DraftTool) => {
-    if (tool.state.status === "running") return tool.state.content.map((item) => decodeToolContent(item))
-    return []
-  }
+  const updateOwnedAssistant = (messageID: SessionMessage.ID, recipe: (draft: DraftAssistant) => void) =>
+    Effect.gen(function* () {
+      const assistant = yield* adapter.getAssistant(messageID)
+      if (assistant) yield* adapter.updateAssistant(produce(assistant, recipe))
+    })
 
   return Effect.gen(function* () {
     yield* SessionEvent.All.match(event, {
       "session.next.agent.switched": (event) => {
         return adapter.appendMessage(
           new SessionMessage.AgentSwitched({
-            id: event.id,
+            id: event.data.messageID,
             type: "agent-switched",
             metadata: event.metadata,
             agent: event.data.agent,
@@ -237,7 +134,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       "session.next.model.switched": (event) => {
         return adapter.appendMessage(
           new SessionMessage.ModelSwitched({
-            id: event.id,
+            id: event.data.messageID,
             type: "model-switched",
             metadata: event.metadata,
             model: event.data.model,
@@ -245,10 +142,11 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }),
         )
       },
+      "session.next.moved": () => Effect.void,
       "session.next.prompted": (event) => {
         return adapter.appendMessage(
           new SessionMessage.User({
-            id: event.id,
+            id: event.data.messageID,
             type: "user",
             metadata: event.metadata,
             text: event.data.prompt.text,
@@ -259,12 +157,14 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }),
         )
       },
+      "session.next.prompt.admitted": () => Effect.void,
+      "session.next.prompt.promoted": () => Effect.void,
       "session.next.synthetic": (event) => {
         return adapter.appendMessage(
           new SessionMessage.Synthetic({
             sessionID: event.data.sessionID,
             text: event.data.text,
-            id: event.id,
+            id: event.data.messageID,
             type: "synthetic",
             time: { created: event.data.timestamp },
           }),
@@ -273,7 +173,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       "session.next.shell.started": (event) => {
         return adapter.appendMessage(
           new SessionMessage.Shell({
-            id: event.id,
+            id: event.data.messageID,
             type: "shell",
             metadata: event.metadata,
             callID: event.data.callID,
@@ -308,7 +208,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }
           yield* adapter.appendMessage(
             new SessionMessage.Assistant({
-              id: event.id,
+              id: event.data.assistantMessageID,
               type: "assistant",
               agent: event.data.agent,
               model: event.data.model,
@@ -320,309 +220,198 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
         })
       },
       "session.next.step.ended": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                draft.time.completed = event.data.timestamp
-                draft.finish = event.data.finish
-                draft.cost = event.data.cost
-                draft.tokens = event.data.tokens
-                if (event.data.snapshot) draft.snapshot = { ...draft.snapshot, end: event.data.snapshot }
-              }),
-            )
-          }
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          draft.time.completed = event.data.timestamp
+          draft.finish = event.data.finish
+          draft.cost = event.data.cost
+          draft.tokens = event.data.tokens
+          if (event.data.snapshot) draft.snapshot = { ...draft.snapshot, end: event.data.snapshot }
         })
       },
       "session.next.step.failed": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                draft.time.completed = event.data.timestamp
-                draft.finish = "error"
-                draft.error = event.data.error
-              }),
-            )
-          }
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          draft.time.completed = event.data.timestamp
+          draft.finish = "error"
+          draft.error = event.data.error
         })
       },
       "session.next.text.started": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                draft.content.push(
-                  new SessionMessage.AssistantText({ type: "text", id: event.id, text: "" }) as DraftText,
-                )
-              }),
-            )
-          }
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          draft.content.push(
+            castDraft(new SessionMessage.AssistantText({ type: "text", id: event.data.textID, text: "" })),
+          )
         })
       },
       "session.next.text.delta": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                const match = latestText(draft)
-                if (match) match.text += event.data.delta
-              }),
-            )
-          }
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          const match = latestText(draft, event.data.textID)
+          if (match) match.text += event.data.delta
         })
       },
       "session.next.text.ended": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                const match = latestText(draft)
-                if (match) match.text = event.data.text
-              }),
-            )
-          }
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          const match = latestText(draft, event.data.textID)
+          if (match) match.text = event.data.text
         })
       },
       "session.next.tool.input.started": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                draft.content.push(
-                  new SessionMessage.AssistantTool({
-                    type: "tool",
-                    id: event.id,
-                    callID: event.data.callID,
-                    name: event.data.name,
-                    time: { created: event.data.timestamp },
-                    state: new SessionMessage.ToolStatePending({ status: "pending", input: "" }),
-                  }) as DraftTool,
-                )
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          draft.content.push(
+            castDraft(
+              new SessionMessage.AssistantTool({
+                type: "tool",
+                id: event.data.callID,
+                name: event.data.name,
+                time: { created: event.data.timestamp },
+                state: new SessionMessage.ToolStatePending({ status: "pending", input: "" }),
               }),
-            )
-          }
+            ),
+          )
         })
       },
-      "session.next.tool.input.delta": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                const match = latestTool(draft, event.data.callID)
-                // oxlint-disable-next-line no-base-to-string -- event.delta is a Schema.String (runtime string)
-                if (match && match.state.status === "pending") match.state.input += event.data.delta
-              }),
-            )
-          }
+      "session.next.tool.input.delta": () => Effect.void,
+      "session.next.tool.input.ended": (event) => {
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          const match = latestTool(draft, event.data.callID)
+          if (match && match.state.status === "pending") match.state.input = event.data.text
         })
       },
-      "session.next.tool.input.ended": () => Effect.void,
       "session.next.tool.called": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                const match = latestTool(draft, event.data.callID)
-                if (match && match.state.status === "pending") {
-                  match.provider = event.data.provider
-                  match.time.ran = event.data.timestamp
-                  match.state = new SessionMessage.ToolStateRunning({
-                    status: "running",
-                    input: event.data.input,
-                    structured: {},
-                    content: [],
-                  }) as DraftTool["state"]
-                }
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          const match = latestTool(draft, event.data.callID)
+          if (match) {
+            match.provider = event.data.provider
+            match.time.ran = event.data.timestamp
+            match.state = castDraft(
+              new SessionMessage.ToolStateRunning({
+                status: "running",
+                input: event.data.input,
+                structured: {},
+                content: [],
               }),
             )
           }
         })
       },
       "session.next.tool.progress": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                const match = latestTool(draft, event.data.callID)
-                if (match && match.state.status === "running") {
-                  match.state.structured = event.data.structured
-                  match.state.content = event.data.content.map((item) => decodeToolContent(item))
-                }
-              }),
-            )
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          const match = latestTool(draft, event.data.callID)
+          if (match && match.state.status === "running") {
+            match.state.structured = event.data.structured
+            match.state.content = [...event.data.content]
           }
         })
       },
-      "session.next.tool.metadata.updated": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
-          if (!currentAssistant) return
-          yield* adapter.updateAssistant(
-            produce(currentAssistant, (draft) => {
-              const match = taskMetadataTarget(draft, event.data.callID, event.data.assistantMessageID !== undefined)
-              if (!match) return
-              if (match.state.status === "pending") return
-              match.state.structured = TaskToolMetadata.mergeIntoStructured(match.state.structured, event.data.task)
-            }),
-          )
-        })
-      },
       "session.next.tool.success": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                const match = latestTool(draft, event.data.callID)
-                if (match && match.state.status === "running") {
-                  match.provider = settleProvider(match.provider, event.data.provider)
-                  if (event.data.title !== undefined) match.title = event.data.title
-                  match.time.completed = event.data.timestamp
-                  match.state = new SessionMessage.ToolStateCompleted({
-                    status: "completed",
-                    input: match.state.input,
-                    structured: taskStructured(match.name, event.data.structured, match.state.structured),
-                    content: event.data.content.map((item) => decodeToolContent(item)),
-                  }) as DraftTool["state"]
-                }
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          const match = latestTool(draft, event.data.callID)
+          if (match && match.state.status === "running") {
+            match.provider = {
+              executed: event.data.provider.executed || match.provider?.executed === true,
+              metadata: match.provider?.metadata,
+              resultMetadata: event.data.provider.metadata,
+            }
+            match.time.completed = event.data.timestamp
+            match.state = castDraft(
+              new SessionMessage.ToolStateCompleted({
+                status: "completed",
+                input: match.state.input,
+                structured: event.data.structured,
+                content: [...event.data.content],
+                result: event.data.result,
               }),
             )
           }
         })
       },
       "session.next.tool.failed": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* targetAssistant(event.data.assistantMessageID)
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                const match = latestTool(draft, event.data.callID)
-                if (match && (match.state.status === "pending" || match.state.status === "running")) {
-                  match.provider = settleProvider(match.provider, event.data.provider)
-                  match.time.completed = event.data.timestamp
-                  match.state = new SessionMessage.ToolStateError({
-                    status: "error",
-                    error: event.data.error,
-                    input: failedInput(match),
-                    structured: taskStructured(match.name, failedStructured(match), failedStructured(match)),
-                    content: failedContent(match),
-                  }) as DraftTool["state"]
-                }
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          const match = latestTool(draft, event.data.callID)
+          if (match && (match.state.status === "pending" || match.state.status === "running")) {
+            match.provider = {
+              executed: event.data.provider.executed || match.provider?.executed === true,
+              metadata: match.provider?.metadata,
+              resultMetadata: event.data.provider.metadata,
+            }
+            match.time.completed = event.data.timestamp
+            match.state = castDraft(
+              new SessionMessage.ToolStateError({
+                status: "error",
+                error: event.data.error,
+                input: typeof match.state.input === "string" ? {} : match.state.input,
+                structured: match.state.status === "running" ? match.state.structured : {},
+                content: match.state.status === "running" ? match.state.content : [],
+                result: event.data.result,
               }),
             )
           }
         })
       },
       "session.next.reasoning.started": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                draft.content.push(
-                  new SessionMessage.AssistantReasoning({
-                    type: "reasoning",
-                    id: event.id,
-                    reasoningID: event.data.reasoningID,
-                    text: "",
-                  }) as DraftReasoning,
-                )
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          draft.content.push(
+            castDraft(
+              new SessionMessage.AssistantReasoning({
+                type: "reasoning",
+                id: event.data.reasoningID,
+                text: "",
+                providerMetadata: event.data.providerMetadata,
               }),
-            )
-          }
+            ),
+          )
         })
       },
       "session.next.reasoning.delta": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                const match = latestReasoning(draft, event.data.reasoningID)
-                if (match) match.text += event.data.delta
-              }),
-            )
-          }
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          const match = latestReasoning(draft, event.data.reasoningID)
+          if (match) match.text += event.data.delta
         })
       },
       "session.next.reasoning.ended": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                const match = latestReasoning(draft, event.data.reasoningID)
-                if (match) match.text = event.data.text
-              }),
-            )
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          const match = latestReasoning(draft, event.data.reasoningID)
+          if (match) {
+            match.text = event.data.text
+            if (event.data.providerMetadata !== undefined) match.providerMetadata = event.data.providerMetadata
           }
         })
       },
-      "session.next.retried": (event) => {
-        return Effect.gen(function* () {
-          const currentAssistant = yield* adapter.getCurrentAssistant()
-          if (currentAssistant) {
-            yield* adapter.updateAssistant(
-              produce(currentAssistant, (draft) => {
-                if (
-                  draft.retries?.some(
-                    (retry) =>
-                      retry.attempt === event.data.attempt &&
-                      DateTime.toEpochMillis(retry.time.created) === DateTime.toEpochMillis(event.data.timestamp),
-                  )
-                )
-                  return
-                draft.retries = [
-                  ...(draft.retries ?? []),
-                  new SessionMessage.AssistantRetry({
-                    attempt: event.data.attempt,
-                    error: event.data.error,
-                    time: { created: event.data.timestamp },
-                  }),
-                ]
-              }),
-            )
-          }
-        })
-      },
+      "session.next.retried": () => Effect.void,
       "session.next.compaction.started": (event) => {
-        return adapter.recordCompactionStarted({
-          id: event.id,
-          metadata: event.metadata,
-          sessionID: event.data.sessionID,
-          reason: event.data.reason,
-          time: { created: event.data.timestamp },
-        })
+        return adapter.appendMessage(
+          new SessionMessage.Compaction({
+            id: event.data.messageID,
+            type: "compaction",
+            metadata: event.metadata,
+            reason: event.data.reason,
+            summary: "",
+            time: { created: event.data.timestamp },
+          }),
+        )
       },
-      "session.next.compaction.delta": () => {
-        return Effect.void
+      "session.next.compaction.delta": (event) => {
+        return Effect.gen(function* () {
+          const currentCompaction = yield* adapter.getCurrentCompaction()
+          if (currentCompaction) {
+            yield* adapter.updateCompaction(
+              produce(currentCompaction, (draft) => {
+                draft.summary += event.data.text
+              }),
+            )
+          }
+        })
       },
       "session.next.compaction.ended": (event) => {
         return Effect.gen(function* () {
-          const started = yield* adapter.getPendingCompactionStarted(event)
-          if (!started) return
-          yield* adapter.appendCompaction(
-            new SessionMessage.Compaction({
-              id: started.id,
-              type: "compaction",
-              metadata: started.metadata,
-              reason: started.reason,
-              summary: event.data.text,
-              include: event.data.include,
-              time: started.time,
-            }),
-          )
-          yield* adapter.clearPendingCompactionStarted(started.id)
+          const currentCompaction = yield* adapter.getCurrentCompaction()
+          if (currentCompaction) {
+            yield* adapter.updateCompaction(
+              produce(currentCompaction, (draft) => {
+                draft.summary = event.data.text
+                draft.include = event.data.include
+              }),
+            )
+          }
         })
       },
     })

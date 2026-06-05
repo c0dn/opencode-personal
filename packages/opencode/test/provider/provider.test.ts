@@ -3,7 +3,7 @@ import { mkdir, unlink } from "fs/promises"
 import path from "path"
 import { Effect, Layer } from "effect"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
-import { AppFileSystem } from "@opencode-ai/core/filesystem"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Global } from "@opencode-ai/core/global"
 import { disposeAllInstances, provideInstanceEffect, tmpdirScoped, TestInstance } from "../fixture/fixture"
@@ -19,8 +19,10 @@ import { Filesystem } from "@/util/filesystem"
 import { InstanceLayer } from "@/project/instance-layer"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 
 const originalEnv = new Map<string, string | undefined>()
+const servers: ReturnType<typeof Bun.serve>[] = []
 
 const rememberEnv = (k: string) => {
   if (!originalEnv.has(k)) originalEnv.set(k, process.env[k])
@@ -47,6 +49,8 @@ const remove = (k: string) =>
   })
 
 afterEach(async () => {
+  for (const server of servers.splice(0)) await server.stop(true)
+  bifrostAuthorizationHeaders.length = 0
   for (const [key, value] of originalEnv) {
     if (value === undefined) delete process.env[key]
     else process.env[key] = value
@@ -57,7 +61,7 @@ afterEach(async () => {
 
 const providerLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
   Provider.layer.pipe(
-    Layer.provide(AppFileSystem.defaultLayer),
+    Layer.provide(FSUtil.defaultLayer),
     Layer.provide(Env.defaultLayer),
     Layer.provide(Config.defaultLayer),
     Layer.provide(Auth.defaultLayer),
@@ -167,6 +171,88 @@ it.instance(
     expect(models).not.toContain("claude-sonnet-4-20250514")
   }),
   { config: { provider: { anthropic: { blacklist: ["claude-sonnet-4-20250514"] } } } },
+)
+
+it.instance(
+  "model filters support wildcard patterns",
+  Effect.gen(function* () {
+    const providers = yield* list
+    expect(providers[ProviderV2.ID.make("custom-provider")].models["codex/gpt-5"]).toBeUndefined()
+    expect(providers[ProviderV2.ID.make("custom-provider")].models["openai/gpt-5"]).toBeDefined()
+  }),
+  {
+    config: {
+      provider: {
+        "custom-provider": {
+          name: "Custom Provider",
+          npm: "@ai-sdk/openai-compatible",
+          api: "https://api.custom.com/v1",
+          options: { apiKey: "custom-key" },
+          blacklist: ["codex/*"],
+          models: {
+            "codex/gpt-5": { name: "Codex GPT-5" },
+            "openai/gpt-5": { name: "OpenAI GPT-5" },
+          },
+        },
+      },
+    },
+  },
+)
+
+const bifrostAuthorizationHeaders: string[] = []
+
+it.instance(
+  "bifrost discovers OpenAI-compatible models as OpenAI Responses models and applies wildcard whitelist",
+  Effect.gen(function* () {
+    const providers = yield* list
+    const bifrost = providers[ProviderV2.ID.bifrost]
+
+    expect(bifrost).toBeDefined()
+    expect(bifrostAuthorizationHeaders).toEqual(["Bearer bifrost-key"])
+    expect(bifrost.options.baseURL.endsWith("/")).toBe(false)
+    expect(Object.keys(bifrost.models)).toEqual(["codex/gpt-5"])
+    expect(bifrost.models["codex/gpt-5"].api.url).toBe(bifrost.options.baseURL)
+    expect(bifrost.models["codex/gpt-5"]).toMatchObject({
+      providerID: ProviderV2.ID.bifrost,
+      api: {
+        id: "codex/gpt-5",
+        npm: "@ai-sdk/openai",
+      },
+      name: "codex/gpt-5",
+      status: "active",
+      cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+      limit: { context: 0, output: 0 },
+      capabilities: {
+        toolcall: true,
+        input: { text: true },
+        output: { text: true },
+      },
+    })
+  }),
+  {
+    config: () => {
+      const server = Bun.serve({
+        port: 0,
+        fetch(request) {
+          if (new URL(request.url).pathname !== "/openai/models") return new Response("not found", { status: 404 })
+          bifrostAuthorizationHeaders.push(request.headers.get("Authorization") ?? "")
+          return Response.json({ data: [{ id: "codex/gpt-5" }, { id: "openai/gpt-5" }] })
+        },
+      })
+      servers.push(server)
+      return {
+        provider: {
+          bifrost: {
+            options: {
+              baseURL: new URL("/openai/", server.url).toString(),
+              apiKey: "bifrost-key",
+            },
+            whitelist: ["codex/*"],
+          },
+        },
+      }
+    },
+  },
 )
 
 it.instance(
@@ -293,7 +379,7 @@ it.instance("getModel returns model for valid provider/model", () =>
   Effect.gen(function* () {
     yield* setProcessEnv("ANTHROPIC_API_KEY", "test-api-key")
     const provider = yield* Provider.Service
-    const model = yield* provider.getModel(ProviderV2.ID.anthropic, ProviderV2.ModelID.make("claude-sonnet-4-20250514"))
+    const model = yield* provider.getModel(ProviderV2.ID.anthropic, ModelV2.ID.make("claude-sonnet-4-20250514"))
     expect(model).toBeDefined()
     expect(String(model.providerID)).toBe("anthropic")
     expect(String(model.id)).toBe("claude-sonnet-4-20250514")
@@ -306,7 +392,7 @@ it.instance("getModel throws ModelNotFoundError for invalid model", () =>
   Effect.gen(function* () {
     yield* set("ANTHROPIC_API_KEY", "test-api-key")
     const exit = yield* Provider.use
-      .getModel(ProviderV2.ID.anthropic, ProviderV2.ModelID.make("nonexistent-model"))
+      .getModel(ProviderV2.ID.anthropic, ModelV2.ID.make("nonexistent-model"))
       .pipe(Effect.exit)
     expect(exit._tag).toBe("Failure")
   }),
@@ -315,7 +401,7 @@ it.instance("getModel throws ModelNotFoundError for invalid model", () =>
 it.instance("getModel throws ModelNotFoundError for invalid provider", () =>
   Effect.gen(function* () {
     const exit = yield* Provider.use
-      .getModel(ProviderV2.ID.make("nonexistent-provider"), ProviderV2.ModelID.make("some-model"))
+      .getModel(ProviderV2.ID.make("nonexistent-provider"), ModelV2.ID.make("some-model"))
       .pipe(Effect.exit)
     expect(exit._tag).toBe("Failure")
   }),
@@ -464,7 +550,7 @@ it.instance(
     const providers = yield* list
     expect(providers[ProviderV2.ID.anthropic].models["my-sonnet"]).toBeDefined()
 
-    const model = yield* Provider.use.getModel(ProviderV2.ID.anthropic, ProviderV2.ModelID.make("my-sonnet"))
+    const model = yield* Provider.use.getModel(ProviderV2.ID.anthropic, ModelV2.ID.make("my-sonnet"))
     expect(model).toBeDefined()
     expect(String(model.id)).toBe("my-sonnet")
     expect(model.name).toBe("My Sonnet Alias")
@@ -979,14 +1065,8 @@ it.instance(
 it.instance("getModel returns consistent results", () =>
   Effect.gen(function* () {
     yield* set("ANTHROPIC_API_KEY", "test-api-key")
-    const model1 = yield* Provider.use.getModel(
-      ProviderV2.ID.anthropic,
-      ProviderV2.ModelID.make("claude-sonnet-4-20250514"),
-    )
-    const model2 = yield* Provider.use.getModel(
-      ProviderV2.ID.anthropic,
-      ProviderV2.ModelID.make("claude-sonnet-4-20250514"),
-    )
+    const model1 = yield* Provider.use.getModel(ProviderV2.ID.anthropic, ModelV2.ID.make("claude-sonnet-4-20250514"))
+    const model2 = yield* Provider.use.getModel(ProviderV2.ID.anthropic, ModelV2.ID.make("claude-sonnet-4-20250514"))
     expect(model1.providerID).toEqual(model2.providerID)
     expect(model1.id).toEqual(model2.id)
     expect(model1).toEqual(model2)
@@ -1017,7 +1097,7 @@ it.instance("ModelNotFoundError includes suggestions for typos", () =>
   Effect.gen(function* () {
     yield* set("ANTHROPIC_API_KEY", "test-api-key")
     const error = yield* Provider.use
-      .getModel(ProviderV2.ID.anthropic, ProviderV2.ModelID.make("claude-sonet-4"))
+      .getModel(ProviderV2.ID.anthropic, ModelV2.ID.make("claude-sonet-4"))
       .pipe(Effect.flip)
     expect(error.suggestions).toBeDefined()
     expect((error.suggestions ?? []).length).toBeGreaterThan(0)
@@ -1028,7 +1108,7 @@ it.instance("ModelNotFoundError for provider includes suggestions", () =>
   Effect.gen(function* () {
     yield* set("ANTHROPIC_API_KEY", "test-api-key")
     const error = yield* Provider.use
-      .getModel(ProviderV2.ID.make("antropic"), ProviderV2.ModelID.make("claude-sonnet-4"))
+      .getModel(ProviderV2.ID.make("antropic"), ModelV2.ID.make("claude-sonnet-4"))
       .pipe(Effect.flip)
     expect(error.suggestions).toBeDefined()
     expect(error.suggestions).toContain("anthropic")
@@ -1039,7 +1119,7 @@ it.instance("ModelNotFoundError suggests catalog models for unloaded providers",
   Effect.gen(function* () {
     yield* remove("OPENCODE_API_KEY")
     const error = yield* Provider.use
-      .getModel(ProviderV2.ID.opencode, ProviderV2.ModelID.make("claude-haiku-fake-model"))
+      .getModel(ProviderV2.ID.opencode, ModelV2.ID.make("claude-haiku-fake-model"))
       .pipe(Effect.flip)
     if (!Provider.ModelNotFoundError.isInstance(error)) throw error
     expect(error.suggestions ?? []).toContain("claude-haiku-4-5")
@@ -1577,7 +1657,7 @@ it.instance("Google Vertex: uses REP endpoint for Claude continental multi-regio
     const provider = yield* Provider.Service
     const model = yield* provider.getModel(
       ProviderV2.ID.make("google-vertex"),
-      ProviderV2.ModelID.make("claude-sonnet-4-6@default"),
+      ModelV2.ID.make("claude-sonnet-4-6@default"),
     )
     const language = yield* provider.getLanguage(model)
     expect(languageBaseURL(language)).toBe(
@@ -1593,7 +1673,7 @@ it.instance("Google Vertex Anthropic: uses REP endpoint for continental multi-re
     const provider = yield* Provider.Service
     const model = yield* provider.getModel(
       ProviderV2.ID.make("google-vertex-anthropic"),
-      ProviderV2.ModelID.make("claude-sonnet-4-6@default"),
+      ModelV2.ID.make("claude-sonnet-4-6@default"),
     )
     const language = yield* provider.getLanguage(model)
     expect(languageBaseURL(language)).toBe(
@@ -1609,7 +1689,7 @@ it.instance("Google Vertex: keeps regional Claude endpoints unchanged", () =>
     const provider = yield* Provider.Service
     const model = yield* provider.getModel(
       ProviderV2.ID.make("google-vertex"),
-      ProviderV2.ModelID.make("claude-sonnet-4-6@default"),
+      ModelV2.ID.make("claude-sonnet-4-6@default"),
     )
     const language = yield* provider.getLanguage(model)
     expect(languageBaseURL(language)).toBe(
@@ -1700,13 +1780,13 @@ it.effect("plugin config providers persist after instance dispose", () =>
 
     const first = yield* loadAndList
     expect(first[ProviderV2.ID.make("demo")]).toBeDefined()
-    expect(first[ProviderV2.ID.make("demo")].models[ProviderV2.ModelID.make("chat")]).toBeDefined()
+    expect(first[ProviderV2.ID.make("demo")].models[ModelV2.ID.make("chat")]).toBeDefined()
 
     yield* Effect.promise(() => disposeAllInstances())
 
     const second = yield* loadAndList
     expect(second[ProviderV2.ID.make("demo")]).toBeDefined()
-    expect(second[ProviderV2.ID.make("demo")].models[ProviderV2.ModelID.make("chat")]).toBeDefined()
+    expect(second[ProviderV2.ID.make("demo")].models[ModelV2.ID.make("chat")]).toBeDefined()
   }).pipe(provideMultiInstance),
 )
 

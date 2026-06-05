@@ -1,11 +1,11 @@
 import path from "path"
-import { SessionLegacy } from "@opencode-ai/core/session/legacy"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Effect, Schema } from "effect"
 import * as Tool from "./tool"
 import { Question } from "../question"
 import { Session } from "@/session/session"
+import { MessageV2 } from "../session/message-v2"
 import { Provider } from "@/provider/provider"
-import { ProviderV2 } from "@opencode-ai/core/provider"
 import { InstanceState } from "@/effect/instance-state"
 import { MessageID, PartID } from "../session/schema"
 import EXIT_DESCRIPTION from "./plan-exit.txt"
@@ -45,9 +45,12 @@ export const PlanExitTool = Tool.define(
 
           if (answers[0]?.[0] === "No") yield* new Question.RejectedError()
 
-          const model = contextModel(ctx.extra, info.model) ?? (yield* provider.defaultModel())
+          const messages = yield* session.messages({ sessionID: ctx.sessionID }).pipe(Effect.orDie)
+          const lastUser = messages.findLast((item) => item.info.role === "user" && item.info.model)
+          const model =
+            lastUser?.info.role === "user" && lastUser.info.model ? lastUser.info.model : yield* provider.defaultModel()
 
-          const msg: SessionLegacy.User = {
+          const msg: SessionV1.User = {
             id: MessageID.ascending(),
             sessionID: ctx.sessionID,
             role: "user",
@@ -63,7 +66,7 @@ export const PlanExitTool = Tool.define(
             type: "text",
             text: `The plan at ${plan} has been approved, you can now edit files. Execute the plan`,
             synthetic: true,
-          } satisfies SessionLegacy.TextPart)
+          } satisfies SessionV1.TextPart)
 
           return {
             title: "Switching to build agent",
@@ -74,20 +77,3 @@ export const PlanExitTool = Tool.define(
     }
   }),
 )
-
-function contextModel(extra: Tool.Context["extra"], sessionModel: Session.Info["model"]) {
-  const model = extra?.model
-  if (!model || typeof model !== "object") return
-
-  const candidate = model as Record<string, unknown>
-  if (typeof candidate.providerID !== "string") return
-  if (typeof candidate.id !== "string") return
-
-  return {
-    providerID: ProviderV2.ID.make(candidate.providerID),
-    modelID: ProviderV2.ModelID.make(candidate.id),
-    ...(sessionModel?.providerID === candidate.providerID && sessionModel.id === candidate.id && sessionModel.variant
-      ? { variant: sessionModel.variant }
-      : {}),
-  }
-}

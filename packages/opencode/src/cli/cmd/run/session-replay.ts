@@ -1,9 +1,7 @@
-import type { AssistantMessage, Event, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
-import { Buffer } from "node:buffer"
-import type { TranscriptV2Display } from "@/session/transcript-v2-display"
+import type { Event, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2"
 import { bootstrapSessionData, createSessionData, reduceSessionData, type SessionData } from "./session-data"
 import { messagePrompt, type SessionMessages } from "./session.shared"
-import type { FooterPatch, StreamCommit } from "./types"
+import type { FooterPatch, LocalReplayRow, StreamCommit } from "./types"
 
 type ReplayInput = {
   messages: SessionMessages
@@ -11,30 +9,6 @@ type ReplayInput = {
   questions: QuestionRequest[]
   thinking: boolean
   limits: Record<string, number>
-}
-
-type ReplayV2Input = {
-  messages: readonly TranscriptV2Display.DisplayTranscriptMessage[]
-  permissions: PermissionRequest[]
-  questions: QuestionRequest[]
-  thinking: boolean
-  limits: Record<string, number>
-  sessionID?: string
-}
-
-type BootstrapV2DisplayInput = {
-  data: SessionData
-  messages: readonly TranscriptV2Display.DisplayTranscriptMessage[]
-  permissions: PermissionRequest[]
-  questions: QuestionRequest[]
-}
-
-type ReplayV2MessagesInput = {
-  data: SessionData
-  messages: readonly TranscriptV2Display.DisplayTranscriptMessage[]
-  thinking: boolean
-  limits: Record<string, number>
-  sessionID: string
 }
 
 export type SessionReplay = {
@@ -213,398 +187,115 @@ export function replaySession(input: ReplayInput): SessionReplay {
   }
 }
 
-export function replaySessionV2(input: ReplayV2Input): SessionReplay {
-  const data = createSessionData()
-  const sessionID = replaySessionID(input)
-  const replay = replaySessionV2Messages({
-    data,
-    messages: input.messages,
-    thinking: input.thinking,
-    limits: input.limits,
-    sessionID,
-  })
-
-  bootstrapSessionData({
-    data,
-    messages: [],
-    permissions: input.permissions,
-    questions: input.questions,
-  })
-
-  return {
-    data,
-    commits: replay.commits,
-    patch: replayPatch(data, replay.patch),
-  }
-}
-
-export function replaySessionV2Messages(input: ReplayV2MessagesInput): ReplayMessage {
-  const commits: StreamCommit[] = []
-  let patch: FooterPatch | undefined
-
-  for (const message of orderDisplayMessages(input.messages)) {
-    const next = replayDisplayMessage(input.data, message, input.sessionID, input.thinking, input.limits)
-    commits.push(...next.commits)
-    patch = mergePatch(patch, next.patch)
-  }
-
-  return { commits, patch }
-}
-
-export function bootstrapSessionDataV2Display(input: BootstrapV2DisplayInput) {
-  for (const message of input.messages) {
-    if (message.type !== "assistant") {
-      continue
+export function replayLocalRows(
+  messages: SessionMessages,
+  commits: StreamCommit[],
+  rows: LocalReplayRow[],
+): StreamCommit[] {
+  const persisted = new Set(messages.map((message) => message.info.id))
+  return rows.reduce((out, local) => {
+    const row = local.commit
+    if (row.kind === "user" && row.messageID && persisted.has(row.messageID)) {
+      return out
     }
 
-    for (const content of message.content) {
-      if (content.type !== "tool") {
-        continue
-      }
-
-      const state = content.state
-      if (state.status === "pending") {
-        continue
-      }
-
-      input.data.call.set(`${message.id}:${content.callID}`, state.input)
+    if (!row.messageID) {
+      return [...out, row]
     }
-  }
 
-  bootstrapSessionData({
-    data: input.data,
-    messages: [],
-    permissions: input.permissions,
-    questions: input.questions,
-  })
+    const exact = local.after
+      ? out.findIndex(
+          (commit) =>
+            commit.kind === local.after?.kind &&
+            commit.text === local.after.text &&
+            commit.phase === local.after.phase &&
+            commit.toolState === local.after.toolState &&
+            (local.after.partID ? commit.partID === local.after.partID : commit.messageID === local.after.messageID),
+        )
+      : -1
+    const anchored =
+      exact !== -1
+        ? exact
+        : local.after
+          ? out.findLastIndex((commit) =>
+              local.after?.partID
+                ? commit.partID === local.after.partID
+                : commit.kind === local.after?.kind && commit.messageID === local.after.messageID,
+            )
+          : -1
+    if (anchored !== -1) {
+      const commit = out[anchored]
+      const visible = local.after?.visible
+      if (commit && visible && commit.text.startsWith(visible) && commit.text.length > visible.length) {
+        return [
+          ...out.slice(0, anchored),
+          { ...commit, text: visible },
+          row,
+          { ...commit, text: commit.text.slice(visible.length) },
+          ...out.slice(anchored + 1),
+        ]
+      }
+
+      return [...out.slice(0, anchored + 1), row, ...out.slice(anchored + 1)]
+    }
+
+    const after = out.findIndex((commit) => commit.kind === "user" && commit.messageID === row.messageID)
+    if (after !== -1) {
+      return [...out.slice(0, after + 1), row, ...out.slice(after + 1)]
+    }
+
+    const before = out.findIndex((commit) => commit.messageID && row.messageID! < commit.messageID)
+    if (before === -1) {
+      return [...out, row]
+    }
+
+    return [...out.slice(0, before), row, ...out.slice(before)]
+  }, commits)
 }
 
-function replaySessionID(input: ReplayV2Input) {
-  return input.sessionID ?? input.permissions[0]?.sessionID ?? input.questions[0]?.sessionID ?? "v2-replay"
-}
+export function replayActiveText(data: SessionData, current: SessionData): StreamCommit[] {
+  return [...current.part.entries()].flatMap(([partID, kind]) => {
+    if (kind === "user" || current.end.has(partID) || data.ids.has(partID)) {
+      return []
+    }
 
-function orderDisplayMessages(messages: readonly TranscriptV2Display.DisplayTranscriptMessage[]) {
-  return messages.slice().sort((left, right) => {
-    const time = left.time.created - right.time.created
-    if (time !== 0) return time
-    return Buffer.from(left.id).compare(Buffer.from(right.id))
-  })
-}
+    const text = current.text.get(partID) ?? ""
+    const existing = data.text.get(partID) ?? ""
+    const sent = current.sent.get(partID) ?? 0
+    const existingSent = data.sent.get(partID) ?? 0
+    const visible = current.visible.get(partID) ?? ""
+    const existingVisible = data.visible.get(partID) ?? ""
+    if (!text.startsWith(existing) || existingSent > sent || !visible.startsWith(existingVisible)) {
+      return []
+    }
 
-function replayDisplayMessage(
-  data: SessionData,
-  message: TranscriptV2Display.DisplayTranscriptMessage,
-  sessionID: string,
-  thinking: boolean,
-  limits: Record<string, number>,
-): ReplayMessage {
-  switch (message.type) {
-    case "user":
-      return replayDisplayUser(data, message, sessionID)
-    case "synthetic":
-      return replayDisplayTextCommit("system", message.text, message.id)
-    case "assistant":
-      return replayDisplayAssistant(data, message, sessionID, thinking, limits)
-    case "shell":
-      return replayDisplayShell(message)
-    case "compaction":
-      return replayDisplayTextCommit("system", message.summary, message.id)
-    case "agent-switched":
-    case "model-switched":
-      return { commits: [] }
-  }
-}
+    data.part.set(partID, kind)
+    data.text.set(partID, text)
+    data.sent.set(partID, sent)
+    data.visible.set(partID, visible)
+    const messageID = current.msg.get(partID)
+    if (messageID) {
+      data.msg.set(partID, messageID)
+      const role = current.role.get(messageID)
+      if (role) {
+        data.role.set(messageID, role)
+      }
+    }
 
-function replayDisplayUser(
-  data: SessionData,
-  message: TranscriptV2Display.DisplayUser,
-  sessionID: string,
-): ReplayMessage {
-  data.role.set(message.id, "user")
-  const commits: StreamCommit[] = []
-  if (message.text.trim()) {
-    commits.push({
-      kind: "user",
-      text: message.text,
-      phase: "start",
-      source: "system",
-      messageID: message.id,
-    })
-  }
+    const chunk = visible.slice(existingVisible.length)
+    if (!chunk) {
+      return []
+    }
 
-  for (const request of message.taskRequests ?? []) {
-    const id = request.id
-    data.msg.set(id, message.id)
-    data.ids.add(id)
-    commits.push({
-      kind: "tool",
-      text: request.description || request.prompt,
-      phase: "start",
-      source: "tool",
-      messageID: message.id,
-      partID: id,
-      tool: "task",
-      part: {
-        id,
-        sessionID,
-        messageID: message.id,
-        type: "tool",
-        callID: id,
-        tool: "task",
-        state: {
-          status: "completed",
-          input: { description: request.description, prompt: request.prompt, subagent_type: request.agent },
-          output: "",
-          title: "task",
-          metadata: {},
-          time: { start: message.time.created, end: message.time.completed ?? message.time.created },
-        },
-      },
-      toolState: "completed",
-    })
-  }
-
-  return { commits }
-}
-
-function replayDisplayTextCommit(kind: "system", text: string, messageID: string): ReplayMessage {
-  if (!text.trim()) return { commits: [] }
-  return {
-    commits: [
+    return [
       {
         kind,
-        text,
-        phase: "start",
-        source: "system",
-        messageID,
-      },
-    ],
-  }
-}
-
-function replayDisplayAssistant(
-  data: SessionData,
-  message: TranscriptV2Display.DisplayAssistant,
-  sessionID: string,
-  thinking: boolean,
-  limits: Record<string, number>,
-): ReplayMessage {
-  const commits: StreamCommit[] = []
-  let patch: FooterPatch | undefined
-  const assistantInfo = displayAssistantInfo(message, sessionID)
-  const info = apply(
-    data,
-    {
-      id: `bootstrap:v2:message:${message.id}`,
-      type: "message.updated",
-      properties: {
-        sessionID,
-        info: assistantInfo,
-      },
-    },
-    sessionID,
-    thinking,
-    limits,
-  )
-  commits.push(...info.commits)
-  patch = mergePatch(patch, info.footer?.patch)
-
-  for (const content of message.content) {
-    const next = replayDisplayAssistantContent(data, message, content, sessionID, thinking, limits)
-    commits.push(...next.commits)
-    patch = mergePatch(patch, next.patch)
-  }
-
-  return { commits, patch }
-}
-
-function displayAssistantInfo(message: TranscriptV2Display.DisplayAssistant, sessionID: string): AssistantMessage {
-  return {
-    id: message.id,
-    sessionID,
-    role: "assistant",
-    time: {
-      created: message.time.created,
-      ...(message.time.completed !== undefined ? { completed: message.time.completed } : {}),
-    },
-    parentID: "",
-    modelID: message.model.id,
-    providerID: message.model.providerID,
-    mode: "chat",
-    agent: message.agent,
-    path: { cwd: "", root: "" },
-    cost: message.cost ?? 0,
-    tokens: message.tokens ?? { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-    ...(message.finish !== undefined ? { finish: message.finish } : {}),
-    ...(message.error !== undefined ? { error: displayAssistantError(message.error) } : {}),
-  }
-}
-
-function displayAssistantError(error: NonNullable<TranscriptV2Display.DisplayAssistant["error"]>): AssistantMessage["error"] {
-  switch (error.type) {
-    case "unknown":
-      return { name: "UnknownError", data: { message: error.message } }
-    case "aborted":
-      return { name: "MessageAbortedError", data: { message: error.message } }
-    case "api":
-      return {
-        name: "APIError",
-        data: {
-          message: error.message,
-          isRetryable: error.isRetryable,
-          ...(error.statusCode !== undefined ? { statusCode: error.statusCode } : {}),
-          ...(error.responseHeaders !== undefined ? { responseHeaders: error.responseHeaders } : {}),
-          ...(error.responseBody !== undefined ? { responseBody: error.responseBody } : {}),
-          ...(error.metadata !== undefined ? { metadata: error.metadata } : {}),
-        },
-      }
-    case "auth":
-      return { name: "ProviderAuthError", data: { providerID: error.providerID, message: error.message } }
-    case "context_overflow":
-      return {
-        name: "ContextOverflowError",
-        data: {
-          message: error.message,
-          ...(error.responseBody !== undefined ? { responseBody: error.responseBody } : {}),
-        },
-      }
-    case "output_length":
-      return { name: "MessageOutputLengthError", data: {} }
-    case "structured_output":
-      return { name: "StructuredOutputError", data: { message: error.message, retries: error.retries } }
-  }
-}
-
-function replayDisplayAssistantContent(
-  data: SessionData,
-  message: TranscriptV2Display.DisplayAssistant,
-  content: TranscriptV2Display.DisplayAssistantContent,
-  sessionID: string,
-  thinking: boolean,
-  limits: Record<string, number>,
-): ReplayMessage {
-  if (content.type === "patch") {
-    const text = content.files.length > 0 ? `Patch ${content.hash}\n${content.files.join("\n")}` : `Patch ${content.hash}`
-    return replayDisplayTextCommit("system", text, message.id)
-  }
-
-  const part = content.type === "tool" ? displayToolPart(content, message.id, sessionID) : displayTextPart(content, message, sessionID)
-  const next = apply(
-    data,
-    {
-      id: `bootstrap:v2:part:${content.id}`,
-      type: "message.part.updated",
-      properties: {
-        sessionID,
-        part,
-        time: message.time.completed ?? message.time.created,
-      },
-    },
-    sessionID,
-    thinking,
-    limits,
-  )
-  return { commits: next.commits, patch: next.footer?.patch }
-}
-
-function displayTextPart(
-  content: TranscriptV2Display.DisplayAssistantText | TranscriptV2Display.DisplayAssistantReasoning,
-  message: TranscriptV2Display.DisplayAssistant,
-  sessionID: string,
-) {
-  return {
-    id: content.id,
-    sessionID,
-    messageID: message.id,
-    type: content.type,
-    text: content.text,
-    time: { start: message.time.created, ...(message.time.completed ? { end: message.time.completed } : {}) },
-  } as const
-}
-
-function displayToolPart(
-  content: TranscriptV2Display.DisplayAssistantTool,
-  messageID: string,
-  sessionID: string,
-): ToolPart {
-  const base = {
-    id: content.id,
-    sessionID,
-    messageID,
-    type: "tool" as const,
-    callID: content.callID,
-    tool: content.name,
-  }
-  const state = content.state
-  const output = toolOutputText("content" in state ? state.content : [])
-  if (state.status === "pending") {
-    return { ...base, state: { status: "pending", input: {}, raw: state.input } }
-  }
-  if (state.status === "running") {
-    return {
-      ...base,
-      state: {
-        status: "running",
-        input: state.input,
-        title: content.title,
-        metadata: content.provider,
-        time: { start: content.time.ran ?? content.time.created },
-      },
-    }
-  }
-  if (state.status === "completed") {
-    return {
-      ...base,
-      state: {
-        status: "completed",
-        input: state.input,
-        output,
-        title: content.title ?? content.name,
-        metadata: content.provider ?? {},
-        time: {
-          start: content.time.ran ?? content.time.created,
-          end: content.time.completed ?? content.time.ran ?? content.time.created,
-        },
-      },
-    }
-  }
-  return {
-    ...base,
-    state: {
-      status: "error",
-      input: state.input,
-      error: typeof state.error === "string" ? state.error : state.error.message,
-      metadata: content.provider,
-      time: {
-        start: content.time.ran ?? content.time.created,
-        end: content.time.completed ?? content.time.ran ?? content.time.created,
-      },
-    },
-  }
-}
-
-function toolOutputText(content: readonly TranscriptV2Display.DisplayToolOutput[]) {
-  return content
-    .flatMap((item) => {
-      if (item.type === "text") return [item.text]
-      return [`${item.name ?? item.uri}`]
-    })
-    .join("\n")
-}
-
-function replayDisplayShell(message: TranscriptV2Display.DisplayShell): ReplayMessage {
-  return {
-    commits: [
-      {
-        kind: "tool",
-        text: message.output,
+        text: chunk,
         phase: "progress",
-        source: "tool",
-        partID: message.id,
-        tool: "bash",
-        shell: { callID: message.callID, command: message.command },
-        toolState: "completed",
+        source: kind,
+        ...(messageID ? { messageID } : {}),
+        partID,
       },
-    ],
-  }
+    ] satisfies StreamCommit[]
+  })
 }

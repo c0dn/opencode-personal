@@ -1,5 +1,5 @@
 import { Agent } from "@/agent/agent"
-import { SessionLegacy } from "@opencode-ai/core/session/legacy"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { MCP } from "@/mcp"
@@ -20,6 +20,7 @@ import { PartID } from "./schema"
 import { Log } from "@opencode-ai/core/util/log"
 import { EffectBridge } from "@/effect/bridge"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 
 const log = Log.create({ service: "session.tools" })
 
@@ -27,12 +28,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
   model: Provider.Model
   session: Session.Info
-  processor: Pick<
-    SessionProcessor.Handle,
-    "message" | "ensureAssistantMessageID" | "updateToolCall" | "updateTaskToolMetadata" | "completeToolCall"
-  >
+  processor: Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
   bypassAgentCheck: boolean
-  messages: SessionLegacy.WithParts[]
+  messages: SessionV1.WithParts[]
   promptOps: TaskPromptOps
 }) {
   using _ = log.time("resolveTools")
@@ -53,38 +51,32 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     agent: input.agent.name,
     messages: input.messages,
     metadata: (val) =>
-      Effect.gen(function* () {
-        yield* input.processor.updateToolCall(options.toolCallId, (match) => {
-          if (!["running", "pending"].includes(match.state.status)) return match
-          return {
-            ...match,
-            state: {
-              title: val.title,
-              metadata: val.metadata,
-              status: "running",
-              input: args,
-              time: { start: Date.now() },
-            },
-          }
-        })
-        yield* input.processor.updateTaskToolMetadata(options.toolCallId, val.metadata)
+      input.processor.updateToolCall(options.toolCallId, (match) => {
+        if (!["running", "pending"].includes(match.state.status)) return match
+        return {
+          ...match,
+          state: {
+            title: val.title,
+            metadata: val.metadata,
+            status: "running",
+            input: args,
+            time: { start: Date.now() },
+          },
+        }
       }),
     ask: (req) =>
-      Effect.gen(function* () {
-        const assistantMessageID = yield* input.processor.ensureAssistantMessageID()
-        const metadata = Object.hasOwn(req.metadata, "input") ? req.metadata : { ...req.metadata, input: args }
-        yield* permission.ask({
+      permission
+        .ask({
           ...req,
           sessionID: input.session.id,
-          metadata,
-          tool: { messageID: assistantMessageID ?? input.processor.message.id, callID: options.toolCallId },
+          tool: { messageID: input.processor.message.id, callID: options.toolCallId },
           ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
         })
-      }).pipe(Effect.orDie),
+        .pipe(Effect.orDie),
   })
 
   for (const item of yield* registry.tools({
-    modelID: ProviderV2.ModelID.make(input.model.api.id),
+    modelID: ModelV2.ID.make(input.model.api.id),
     providerID: input.model.providerID,
     agent: input.agent,
   })) {
@@ -162,7 +154,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           )
 
           const textParts: string[] = []
-          const attachments: Omit<SessionLegacy.FilePart, "id" | "sessionID" | "messageID">[] = []
+          const attachments: Omit<SessionV1.FilePart, "id" | "sessionID" | "messageID">[] = []
           for (const contentItem of result.content) {
             if (contentItem.type === "text") textParts.push(contentItem.text)
             else if (contentItem.type === "image") {

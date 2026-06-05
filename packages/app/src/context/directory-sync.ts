@@ -8,11 +8,12 @@ import {
   getSessionPrefetchPromise,
   setSessionPrefetch,
 } from "./global-sync/session-prefetch"
-import { createServerSyncContext } from "./server-sync"
 import type { Message, Part } from "@opencode-ai/sdk/v2/client"
 import { SESSION_CACHE_LIMIT, dropSessionCaches, pickSessionCacheEvictions } from "./global-sync/session-cache"
+import { directoryKey } from "./global-sync/utils"
 import { diffs as list, message as clean } from "@/utils/diffs"
-import { useServerSDK } from "./server-sdk"
+import { createServerSdkContext, useServerSDK } from "./server-sdk"
+import { type createServerSyncContextInner } from "./server-sync"
 
 const SKIP_PARTS = new Set(["patch", "step-start", "step-finish"])
 
@@ -123,6 +124,12 @@ export function mergeOptimisticPage(page: MessagePage, items: OptimisticItem[]) 
   }
 }
 
+export function selectTargetDirectory(context: string, requested?: string) {
+  if (!requested) return undefined
+  if (directoryKey(requested) === directoryKey(context)) return undefined
+  return requested
+}
+
 export function applyOptimisticAdd(draft: OptimisticStore, input: OptimisticAddInput) {
   const messages = draft.message[input.sessionID]
   if (messages) {
@@ -171,8 +178,11 @@ function setOptimisticRemove(setStore: (...args: unknown[]) => void, input: Opti
   })
 }
 
-export const createDirSyncContext = (directory: string, serverSync: ReturnType<typeof createServerSyncContext>) => {
-  const serverSDK = useServerSDK()
+export const createDirSyncContext = (
+  directory: string,
+  serverSync: ReturnType<typeof createServerSyncContextInner>,
+  serverSDK: ReturnType<typeof createServerSdkContext> = useServerSDK(),
+) => {
   const client = serverSDK.createClient({ directory, throwOnError: true })
 
   type Child = ReturnType<(typeof serverSync)["child"]>
