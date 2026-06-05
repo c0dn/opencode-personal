@@ -278,7 +278,7 @@ test("tool failed terminalizes pending tools without creating or overwriting ter
   })
 })
 
-test("compaction events reduce to one summary message", () => {
+test("compaction lifecycle events are stateless no-ops", () => {
   const messageID = msgID("compaction")
   const state = applyEvents([
     {
@@ -303,13 +303,5 @@ test("compaction events reduce to one summary message", () => {
     },
   ] satisfies SessionEvent.Event[])
 
-  expect(state.messages).toHaveLength(1)
-  expect(state.messages[0]).toMatchObject({
-    id: messageID,
-    type: "compaction",
-    reason: "auto",
-    summary: "final summary",
-    include: "recent context",
-    time: { created: DateTime.makeUnsafe(1) },
-  })
+  expect(state.messages).toEqual([])
 })

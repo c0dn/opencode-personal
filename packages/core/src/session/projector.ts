@@ -1,9 +1,10 @@
 export * as SessionProjector from "./projector"
 
-import { and, desc, eq, sql } from "drizzle-orm"
+import { and, desc, eq, gt, lt, sql } from "drizzle-orm"
 import { DateTime, Effect, Layer, Schema } from "effect"
 import { Database } from "../database/database"
 import { EventV2 } from "../event"
+import { EventTable } from "../event/sql"
 import { SessionEvent } from "./event"
 import { SessionV1 } from "../v1/session"
 import { WorkspaceTable } from "../control-plane/workspace.sql"
@@ -18,9 +19,17 @@ type DatabaseService = Database.Interface["db"]
 
 const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Message)
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
+const decodeCompactionStarted = Schema.decodeUnknownSync(SessionEvent.Compaction.Started.data)
+const compactionStartedType = synchronizedType(SessionEvent.Compaction.Started)
+const compactionEndedType = synchronizedType(SessionEvent.Compaction.Ended)
 
 class PromptAlreadyProjected extends Error {}
 export class SessionAlreadyProjected extends Error {}
+
+function synchronizedType(definition: EventV2.Definition) {
+  if (!definition.sync) throw new Error(`Event type ${definition.type} is not synchronized`)
+  return EventV2.versionedType(definition.type, definition.sync.version)
+}
 
 type Usage = {
   cost: number
@@ -209,6 +218,15 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
 
 function insertMessage(db: DatabaseService, event: SessionEvent.Event, message: SessionMessage.Message) {
   if (event.seq === undefined) return Effect.die("Synchronized Session event is missing aggregate sequence")
+  return insertMessageWithSeq(db, event, message, event.seq)
+}
+
+function insertMessageWithSeq(
+  db: DatabaseService,
+  event: SessionEvent.Event,
+  message: SessionMessage.Message,
+  seq: number,
+) {
   const encoded = encodeMessage(message)
   const { id, type, ...data } = encoded
   return db
@@ -217,12 +235,89 @@ function insertMessage(db: DatabaseService, event: SessionEvent.Event, message: 
       id: SessionMessage.ID.make(id),
       session_id: event.data.sessionID,
       type,
-      seq: event.seq,
+      seq,
       time_created: DateTime.toEpochMillis(message.time.created),
       data,
     })
     .run()
     .pipe(Effect.orDie)
+}
+
+function projectCompactionEnded(db: DatabaseService, event: SessionEvent.Compaction.Ended) {
+  if (event.seq === undefined) return Effect.die("Synchronized Session event is missing aggregate sequence")
+  const seq = event.seq
+  return Effect.gen(function* () {
+    const latestPriorEnded = yield* db
+      .select({ seq: EventTable.seq })
+      .from(EventTable)
+      .where(
+        and(
+          eq(EventTable.aggregate_id, event.data.sessionID),
+          eq(EventTable.type, compactionEndedType),
+          lt(EventTable.seq, seq),
+        ),
+      )
+      .orderBy(desc(EventTable.seq))
+      .limit(1)
+      .get()
+      .pipe(Effect.orDie)
+    const startedRow = yield* db
+      .select({ seq: EventTable.seq, data: EventTable.data })
+      .from(EventTable)
+      .where(
+        and(
+          eq(EventTable.aggregate_id, event.data.sessionID),
+          eq(EventTable.type, compactionStartedType),
+          lt(EventTable.seq, seq),
+          latestPriorEnded ? gt(EventTable.seq, latestPriorEnded.seq) : undefined,
+        ),
+      )
+      .orderBy(desc(EventTable.seq))
+      .limit(1)
+      .get()
+      .pipe(Effect.orDie)
+    if (!startedRow) return
+
+    const started = decodeCompactionStarted(startedRow.data)
+    const compaction = new SessionMessage.Compaction({
+      id: started.messageID,
+      type: "compaction",
+      reason: started.reason,
+      summary: event.data.text,
+      include: event.data.include,
+      time: { created: started.timestamp },
+    })
+    yield* upsertCompletedCompaction(db, event, compaction, startedRow.seq)
+  })
+}
+
+function upsertCompletedCompaction(
+  db: DatabaseService,
+  event: SessionEvent.Compaction.Ended,
+  compaction: SessionMessage.Compaction,
+  seq: number,
+) {
+  return Effect.gen(function* () {
+    const existing = yield* db
+      .select()
+      .from(SessionMessageTable)
+      .where(eq(SessionMessageTable.id, compaction.id))
+      .get()
+      .pipe(Effect.orDie)
+    if (!existing) return yield* insertMessageWithSeq(db, event, compaction, seq)
+    if (existing.session_id !== event.data.sessionID || existing.type !== "compaction") {
+      return yield* Effect.die(`Compaction projection conflicts with existing non-compaction message ${compaction.id}`)
+    }
+
+    const encoded = encodeMessage(compaction)
+    const { id: _, type, ...data } = encoded
+    yield* db
+      .update(SessionMessageTable)
+      .set({ type, seq, time_created: DateTime.toEpochMillis(compaction.time.created), data })
+      .where(and(eq(SessionMessageTable.id, compaction.id), eq(SessionMessageTable.session_id, event.data.sessionID)))
+      .run()
+      .pipe(Effect.orDie)
+  })
 }
 
 export const layer = Layer.effectDiscard(
@@ -430,9 +525,9 @@ export const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Reasoning.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Reasoning.Ended, (event) => run(db, event))
     // yield* events.project(SessionEvent.Retried, (event) => run(db, event))
-    yield* events.project(SessionEvent.Compaction.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Compaction.Delta, (event) => run(db, event))
-    yield* events.project(SessionEvent.Compaction.Ended, (event) => run(db, event))
+    yield* events.project(SessionEvent.Compaction.Started, () => Effect.void)
+    yield* events.project(SessionEvent.Compaction.Delta, () => Effect.void)
+    yield* events.project(SessionEvent.Compaction.Ended, (event) => projectCompactionEnded(db, event))
   }),
 )
 

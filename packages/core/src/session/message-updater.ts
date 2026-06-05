@@ -377,43 +377,9 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
         })
       },
       "session.next.retried": () => Effect.void,
-      "session.next.compaction.started": (event) => {
-        return adapter.appendMessage(
-          new SessionMessage.Compaction({
-            id: event.data.messageID,
-            type: "compaction",
-            metadata: event.metadata,
-            reason: event.data.reason,
-            summary: "",
-            time: { created: event.data.timestamp },
-          }),
-        )
-      },
-      "session.next.compaction.delta": (event) => {
-        return Effect.gen(function* () {
-          const currentCompaction = yield* adapter.getCurrentCompaction()
-          if (currentCompaction) {
-            yield* adapter.updateCompaction(
-              produce(currentCompaction, (draft) => {
-                draft.summary += event.data.text
-              }),
-            )
-          }
-        })
-      },
-      "session.next.compaction.ended": (event) => {
-        return Effect.gen(function* () {
-          const currentCompaction = yield* adapter.getCurrentCompaction()
-          if (currentCompaction) {
-            yield* adapter.updateCompaction(
-              produce(currentCompaction, (draft) => {
-                draft.summary = event.data.text
-                draft.include = event.data.include
-              }),
-            )
-          }
-        })
-      },
+      "session.next.compaction.started": () => Effect.void,
+      "session.next.compaction.delta": () => Effect.void,
+      "session.next.compaction.ended": () => Effect.void,
     })
   })
 }
