@@ -11,7 +11,7 @@ const log = Log.create({ service: "acp-usage" })
 
 export type AssistantTokenCost = Pick<OpenCodeAssistantMessage, "cost" | "tokens">
 
-export type AssistantMessage = AssistantTokenCost &
+export type AssistantMessage = Partial<AssistantTokenCost> &
   Pick<OpenCodeAssistantMessage, "role"> &
   Partial<Pick<OpenCodeAssistantMessage, "providerID" | "modelID">>
 
@@ -25,7 +25,27 @@ export type MessagesInput = {
 }
 
 export type SDK = {
-  readonly session: {
+  readonly v2: {
+    readonly session: {
+      readonly messages: (
+        parameters:
+          | {
+              readonly sessionID: string
+              readonly directory: string
+              readonly limit: 200
+              readonly order: "asc"
+            }
+          | {
+              readonly sessionID: string
+              readonly directory: string
+              readonly limit: 200
+              readonly cursor: string
+            },
+        options: { readonly throwOnError: true },
+      ) => Promise<{ readonly data?: unknown; readonly error?: unknown }>
+    }
+  }
+  readonly session?: {
     readonly messages: (
       parameters: { readonly sessionID: string; readonly directory: string },
       options: { readonly throwOnError: true },
@@ -72,11 +92,10 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/AC
 export function messageLoaderFromSDK(sdk: SDK): MessageLoaderInterface {
   return MessageLoader.of({
     messages: (input) =>
-      Effect.promise(() =>
-        sdk.session
-          .messages({ sessionID: input.sessionID, directory: input.directory }, { throwOnError: true })
-          .then((response) => response.data ?? []),
-      ),
+      Effect.tryPromise({
+        try: () => loadV2UsageMessages(sdk, input),
+        catch: (error) => error,
+      }),
   })
 }
 
@@ -105,7 +124,7 @@ export function latestAssistantMessage(messages: readonly SessionMessage[]): Ass
 
 export function totalSessionCost(messages: readonly SessionMessage[]): number {
   return messages
-    .filter((message): message is { readonly info: AssistantMessage } => message.info.role === "assistant")
+    .filter((message): message is { readonly info: CompleteAssistantMessage } => isCompleteAssistantMessage(message.info))
     .reduce((sum, message) => sum + message.info.cost, 0)
 }
 
@@ -194,6 +213,7 @@ export const layer = Layer.effect(
       const message = latestAssistantMessage(messages)
       if (!message) return
       if (!message.providerID || !message.modelID) return
+      if (!isCompleteAssistantMessage(message)) return
 
       const size = yield* contextLimit({
         directory: input.directory,
@@ -228,6 +248,125 @@ export const layer = Layer.effect(
     })
   }),
 )
+
+type CompleteAssistantMessage = AssistantTokenCost &
+  Pick<OpenCodeAssistantMessage, "role"> &
+  Required<Pick<OpenCodeAssistantMessage, "providerID" | "modelID">>
+
+type V2UsagePage = {
+  readonly items: readonly unknown[]
+  readonly cursor: {
+    readonly next?: string
+  }
+}
+
+async function loadV2UsageMessages(sdk: SDK, input: MessagesInput): Promise<readonly SessionMessage[]> {
+  const messages: SessionMessage[] = []
+  const first = await sdk.v2.session.messages(
+    { sessionID: input.sessionID, directory: input.directory, limit: 200, order: "asc" },
+    { throwOnError: true },
+  )
+  const page = requireV2UsagePage(first.data)
+  messages.push(...page.items.flatMap(v2UsageMessage))
+
+  return loadV2UsageCursorMessages(sdk, input, page.cursor.next, messages)
+}
+
+async function loadV2UsageCursorMessages(
+  sdk: SDK,
+  input: MessagesInput,
+  cursor: string | undefined,
+  messages: SessionMessage[],
+): Promise<readonly SessionMessage[]> {
+  if (!cursor) return messages
+  const response = await sdk.v2.session.messages(
+    { sessionID: input.sessionID, directory: input.directory, limit: 200, cursor },
+    { throwOnError: true },
+  )
+  const page = requireV2UsagePage(response.data)
+  messages.push(...page.items.flatMap(v2UsageMessage))
+  return loadV2UsageCursorMessages(sdk, input, page.cursor.next, messages)
+}
+
+function requireV2UsagePage(data: unknown): V2UsagePage {
+  if (typeof data !== "object" || data === null) throw new Error("Malformed v2 usage messages response")
+  if (!("items" in data) || !Array.isArray(data.items)) throw new Error("Malformed v2 usage messages response")
+  if (!("cursor" in data) || typeof data.cursor !== "object" || data.cursor === null) {
+    throw new Error("Malformed v2 usage messages response")
+  }
+  if ("next" in data.cursor && typeof data.cursor.next !== "string" && data.cursor.next !== undefined) {
+    throw new Error("Malformed v2 usage messages response")
+  }
+  return data as V2UsagePage
+}
+
+function v2UsageMessage(row: unknown): readonly SessionMessage[] {
+  if (typeof row !== "object" || row === null || !("type" in row) || row.type !== "assistant") return []
+
+  const providerID = "model" in row && isModel(row.model) ? row.model.providerID : undefined
+  const modelID = "model" in row && isModel(row.model) ? row.model.id : undefined
+  if (!("cost" in row) || typeof row.cost !== "number" || !("tokens" in row) || !isTokens(row.tokens)) {
+    return [{ info: { role: "assistant", ...(providerID ? { providerID } : {}), ...(modelID ? { modelID } : {}) } }]
+  }
+  if (!providerID || !modelID) return [{ info: { role: "assistant" } }]
+
+  return [
+    {
+      info: {
+        role: "assistant",
+        providerID,
+        modelID,
+        cost: row.cost,
+        tokens: row.tokens,
+      },
+    },
+  ]
+}
+
+function isModel(value: unknown): value is { readonly providerID: string; readonly id: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "providerID" in value &&
+    typeof value.providerID === "string" &&
+    "id" in value &&
+    typeof value.id === "string"
+  )
+}
+
+function isTokens(value: unknown): value is AssistantTokenCost["tokens"] {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "input" in value &&
+    typeof value.input === "number" &&
+    "output" in value &&
+    typeof value.output === "number" &&
+    "reasoning" in value &&
+    typeof value.reasoning === "number" &&
+    "cache" in value &&
+    typeof value.cache === "object" &&
+    value.cache !== null &&
+    "read" in value.cache &&
+    typeof value.cache.read === "number" &&
+    "write" in value.cache &&
+    typeof value.cache.write === "number"
+  )
+}
+
+function isCompleteAssistantMessage(message: AssistantMessage | { readonly role: Message["role"] }): message is CompleteAssistantMessage {
+  return (
+    message.role === "assistant" &&
+    "providerID" in message &&
+    typeof message.providerID === "string" &&
+    "modelID" in message &&
+    typeof message.modelID === "string" &&
+    "cost" in message &&
+    typeof message.cost === "number" &&
+    "tokens" in message &&
+    isTokens(message.tokens)
+  )
+}
 
 export const defaultLayer = layer.pipe(
   Layer.provide(contextLimitLoaderLayer),

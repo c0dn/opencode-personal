@@ -592,6 +592,7 @@ function makeDirectoryService(sdk: OpencodeClient) {
 
 function makeUsageService(sdk: OpencodeClient) {
   const limits = new Map<string, Promise<number | undefined>>()
+  const messageLoader = UsageService.messageLoaderFromSDK(sdk)
   const contextLimit: UsageService.Interface["contextLimit"] = Effect.fn("ACP.promptUsage.contextLimit")(
     function* (params) {
       const key = `${params.directory}\u0000${params.providerID}\u0000${params.modelID}`
@@ -616,18 +617,7 @@ function makeUsageService(sdk: OpencodeClient) {
   )
 
   const sendUpdate: UsageService.Interface["sendUpdate"] = Effect.fn("ACP.promptUsage.sendUpdate")(function* (params) {
-    const messages = yield* request(
-      () =>
-        sdk.session.messages(
-          {
-            sessionID: params.sessionID,
-            directory: params.directory,
-          },
-          { throwOnError: true },
-        ),
-      "session",
-    ).pipe(
-      Effect.map((messages) => messages as readonly UsageService.SessionMessage[]),
+    const messages = yield* messageLoader.messages({ sessionID: params.sessionID, directory: params.directory }).pipe(
       Effect.catch((error) =>
         Effect.sync(() => {
           log.error("failed to fetch messages for usage update", { error })
@@ -638,7 +628,8 @@ function makeUsageService(sdk: OpencodeClient) {
     if (!messages) return
 
     const message = UsageService.latestAssistantMessage(messages)
-    if (!message?.providerID || !message.modelID) return
+    if (!message?.providerID || !message.modelID || typeof message.cost !== "number" || !message.tokens) return
+    const tokens = message.tokens
 
     const size = yield* contextLimit({
       directory: params.directory,
@@ -653,7 +644,7 @@ function makeUsageService(sdk: OpencodeClient) {
           sessionId: params.sessionID,
           update: {
             sessionUpdate: "usage_update",
-            used: message.tokens.input + message.tokens.cache.read,
+            used: tokens.input + tokens.cache.read,
             size,
             cost: { amount: UsageService.totalSessionCost(messages), currency: "USD" },
           },
