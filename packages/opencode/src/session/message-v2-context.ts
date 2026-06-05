@@ -8,6 +8,27 @@ export type Latest = {
   finishedAssistant?: SessionMessage.Assistant
 }
 
+type AgentTask = {
+  type: "subtask"
+  id: string
+  message: SessionMessage.User
+  agent: NonNullable<SessionMessage.User["agents"]>[number]
+  index: number
+}
+
+type CompactionTask = {
+  type: "compaction"
+  id: SessionMessage.ID
+  message: SessionMessage.Compaction
+  auto: boolean
+}
+
+export type Task = AgentTask | CompactionTask
+
+export type LatestWithTasks = Latest & {
+  tasks: Task[]
+}
+
 export function chronological(messages: readonly SessionMessage.Message[]) {
   return messages.slice().sort((left, right) => compareMessages(left, right))
 }
@@ -44,6 +65,17 @@ export function latest(messages: readonly SessionMessage.Message[]): Latest {
   }
 }
 
+export function latestWithTasks(messages: readonly SessionMessage.Message[]): LatestWithTasks {
+  const ordered = chronological(messages)
+  const state = latest(ordered)
+  const boundary = state.finishedAssistant ? ordered.findIndex((message) => message.id === state.finishedAssistant?.id) : -1
+  const pending = boundary === -1 ? ordered : ordered.slice(boundary + 1)
+  return {
+    ...state,
+    tasks: pending.flatMap(tasksForMessage),
+  }
+}
+
 function compareMessages(left: SessionMessage.Message, right: SessionMessage.Message) {
   const time = DateTime.toEpochMillis(left.time.created) - DateTime.toEpochMillis(right.time.created)
   if (time !== 0) return time
@@ -53,6 +85,28 @@ function compareMessages(left: SessionMessage.Message, right: SessionMessage.Mes
 function compareID(left: string, right: string) {
   // Compare by byte order intentionally; IDs are not locale-collated text.
   return Buffer.from(left).compare(Buffer.from(right))
+}
+
+function tasksForMessage(message: SessionMessage.Message): Task[] {
+  if (message.type === "user") return agentTasks(message)
+  if (message.type === "compaction" && isPendingCompaction(message)) {
+    return [{ type: "compaction", id: message.id, message, auto: message.reason === "auto" }]
+  }
+  return []
+}
+
+function agentTasks(message: SessionMessage.User): AgentTask[] {
+  return (message.agents ?? []).map((agent, index) => ({
+    type: "subtask" as const,
+    id: `${message.id}/agent/${index}`,
+    message,
+    agent,
+    index,
+  }))
+}
+
+function isPendingCompaction(message: SessionMessage.Compaction) {
+  return message.summary === "" && message.include === undefined
 }
 
 function isTerminalAssistant(message: SessionMessage.Assistant) {
