@@ -2738,6 +2738,12 @@ export type SessionBusyError = {
   message: string
 }
 
+export type UnsupportedOperationError = {
+  _tag: "UnsupportedOperationError"
+  message: string
+  operation?: string
+}
+
 export type EventTuiPromptAppend = {
   type: "tui.prompt.append"
   properties: {
@@ -8441,6 +8447,10 @@ export type SessionDeleteMessageErrors = {
    * SessionBusyError
    */
   409: SessionBusyError
+  /**
+   * UnsupportedOperationError
+   */
+  410: UnsupportedOperationError
 }
 
 export type SessionDeleteMessageError = SessionDeleteMessageErrors[keyof SessionDeleteMessageErrors]
@@ -8999,6 +9009,10 @@ export type PartDeleteErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * UnsupportedOperationError
+   */
+  410: UnsupportedOperationError
 }
 
 export type PartDeleteError = PartDeleteErrors[keyof PartDeleteErrors]
@@ -9035,6 +9049,10 @@ export type PartUpdateErrors = {
    * NotFoundError
    */
   404: NotFoundError
+  /**
+   * UnsupportedOperationError
+   */
+  410: UnsupportedOperationError
 }
 
 export type PartUpdateError = PartUpdateErrors[keyof PartUpdateErrors]

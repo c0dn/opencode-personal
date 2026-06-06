@@ -49,7 +49,6 @@ const categories = {
       /(?:\b(?:session|sessions|sessionSvc)\.(?:updateMessage|updatePart|updatePartDelta|removeMessage|removePart)\b|\bSession\.(?:updateMessage|updatePart|updatePartDelta|removeMessage|removePart)\b)/,
     allowed: [
       "packages/opencode/src/cli/cmd/debug/agent.handler.ts",
-      "packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts",
       "packages/opencode/src/session/compaction.ts",
       "packages/opencode/src/session/processor.ts",
       "packages/opencode/src/session/prompt.ts",

@@ -935,7 +935,7 @@ describe("session HttpApi", () => {
   )
 
   it.instance(
-    "serves message mutation routes",
+    "rejects legacy message mutation routes without mutating transcript rows",
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -944,7 +944,7 @@ describe("session HttpApi", () => {
         const first = yield* createTextMessage(session.id, "first")
         const second = yield* createTextMessage(session.id, "second")
 
-        const updated = yield* requestJson<SessionV1.Part>(
+        const updated = yield* request(
           pathFor(SessionPaths.updatePart, {
             sessionID: session.id,
             messageID: first.info.id,
@@ -956,31 +956,53 @@ describe("session HttpApi", () => {
             body: JSON.stringify({ ...first.part, text: "updated" }),
           },
         )
-        expect(updated).toMatchObject({ id: first.part.id, type: "text", text: "updated" })
+        expect(updated.status).toBe(410)
+        expect(yield* responseJson(updated)).toMatchObject({
+          _tag: "UnsupportedOperationError",
+          operation: "part.update",
+        })
 
-        expect(
-          yield* requestJson<boolean>(
-            pathFor(SessionPaths.deletePart, {
-              sessionID: session.id,
-              messageID: first.info.id,
-              partID: first.part.id,
-            }),
-            { method: "DELETE", headers },
-          ),
-        ).toBe(true)
+        const deletedPart = yield* request(
+          pathFor(SessionPaths.deletePart, {
+            sessionID: session.id,
+            messageID: first.info.id,
+            partID: first.part.id,
+          }),
+          { method: "DELETE", headers },
+        )
+        expect(deletedPart.status).toBe(410)
+        expect(yield* responseJson(deletedPart)).toMatchObject({
+          _tag: "UnsupportedOperationError",
+          operation: "part.delete",
+        })
 
-        expect(
-          yield* requestJson<boolean>(
-            pathFor(SessionPaths.deleteMessage, { sessionID: session.id, messageID: second.info.id }),
-            { method: "DELETE", headers },
-          ),
-        ).toBe(true)
+        const deletedMessage = yield* request(
+          pathFor(SessionPaths.deleteMessage, { sessionID: session.id, messageID: second.info.id }),
+          { method: "DELETE", headers },
+        )
+        expect(deletedMessage.status).toBe(410)
+        expect(yield* responseJson(deletedMessage)).toMatchObject({
+          _tag: "UnsupportedOperationError",
+          operation: "session.deleteMessage",
+        })
+
+        const firstAfter = yield* requestJson<SessionV1.WithParts>(
+          pathFor(SessionPaths.message, { sessionID: session.id, messageID: first.info.id }),
+          { headers },
+        )
+        expect(firstAfter.parts).toEqual([expect.objectContaining({ id: first.part.id, text: "first" })])
+
+        const secondAfter = yield* requestJson<SessionV1.WithParts>(
+          pathFor(SessionPaths.message, { sessionID: session.id, messageID: second.info.id }),
+          { headers },
+        )
+        expect(secondAfter.info.id).toBe(second.info.id)
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )
 
   it.instance(
-    "rejects part updates whose path and body ids disagree",
+    "rejects part updates as unsupported before legacy id mutation semantics",
     () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
@@ -1000,7 +1022,11 @@ describe("session HttpApi", () => {
           },
         )
 
-        expect(response.status).toBe(400)
+        expect(response.status).toBe(410)
+        expect(yield* responseJson(response)).toMatchObject({
+          _tag: "UnsupportedOperationError",
+          operation: "part.update",
+        })
       }),
     { git: true, config: { formatter: false, lsp: false } },
   )

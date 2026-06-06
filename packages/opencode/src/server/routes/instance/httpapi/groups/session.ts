@@ -20,7 +20,7 @@ import {
   WorkspaceRoutingQuery,
   WorkspaceRoutingQueryFields,
 } from "../middleware/workspace-routing"
-import { ApiNotFoundError, PermissionNotFoundError, SessionBusyError } from "../errors"
+import { ApiNotFoundError, PermissionNotFoundError, SessionBusyError, UnsupportedOperationError } from "../errors"
 import { described } from "./metadata"
 import { QueryBoolean } from "./query"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -410,24 +410,26 @@ export const SessionApi = HttpApi.make("session")
           params: { sessionID: SessionID, messageID: MessageID },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "Successfully deleted message"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, SessionBusyError, UnsupportedOperationError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.deleteMessage",
             summary: "Delete message",
             description:
-              "Permanently delete a specific message and all of its parts from a session without reverting file changes.",
+              "Unsupported legacy transcript mutation route. Use canonical v2 mutation APIs when available.",
+            deprecated: true,
           }),
         ),
         HttpApiEndpoint.delete("deletePart", SessionPaths.deletePart, {
           params: { sessionID: SessionID, messageID: MessageID, partID: PartID },
           query: WorkspaceRoutingQuery,
           success: described(Schema.Boolean, "Successfully deleted part"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, UnsupportedOperationError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "part.delete",
-            description: "Delete a part from a message.",
+            description: "Unsupported legacy transcript mutation route. Use canonical v2 mutation APIs when available.",
+            deprecated: true,
           }),
         ),
         HttpApiEndpoint.patch("updatePart", SessionPaths.updatePart, {
@@ -435,11 +437,12 @@ export const SessionApi = HttpApi.make("session")
           query: WorkspaceRoutingQuery,
           payload: SessionV1.Part,
           success: described(SessionV1.Part, "Successfully updated part"),
-          error: [HttpApiError.BadRequest, ApiNotFoundError],
+          error: [HttpApiError.BadRequest, ApiNotFoundError, UnsupportedOperationError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "part.update",
-            description: "Update a part in a message.",
+            description: "Unsupported legacy transcript mutation route. Use canonical v2 mutation APIs when available.",
+            deprecated: true,
           }),
         ),
       )

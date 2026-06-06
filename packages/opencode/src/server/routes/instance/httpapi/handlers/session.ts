@@ -10,7 +10,6 @@ import { SessionCompaction } from "@/session/compaction"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
-import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
@@ -35,7 +34,7 @@ import {
   SummarizePayload,
   UpdatePayload,
 } from "../groups/session"
-import { PermissionNotFoundError } from "../errors"
+import { PermissionNotFoundError, UnsupportedOperationError } from "../errors"
 import * as SessionError from "./session-errors"
 
 const tryParseJson = (text: string) =>
@@ -51,7 +50,6 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const promptSvc = yield* SessionPrompt.Service
     const revertSvc = yield* SessionRevert.Service
     const compactSvc = yield* SessionCompaction.Service
-    const runState = yield* SessionRunState.Service
     const agentSvc = yield* Agent.Service
     const permissionSvc = yield* Permission.Service
     const statusSvc = yield* SessionStatus.Service
@@ -381,17 +379,14 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID; messageID: MessageID }
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* SessionError.mapBusy(runState.assertNotBusy(ctx.params.sessionID))
-      yield* session.removeMessage(ctx.params)
-      return true
+      return yield* unsupportedTranscriptMutation("session.deleteMessage")
     })
 
     const deletePart = Effect.fn("SessionHttpApi.deletePart")(function* (ctx: {
       params: { sessionID: SessionID; messageID: MessageID; partID: PartID }
     }) {
       yield* requireSession(ctx.params.sessionID)
-      yield* session.removePart(ctx.params)
-      return true
+      return yield* unsupportedTranscriptMutation("part.delete")
     })
 
     const updatePart = Effect.fn("SessionHttpApi.updatePart")(function* (ctx: {
@@ -399,15 +394,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       payload: typeof SessionV1.Part.Type
     }) {
       yield* requireSession(ctx.params.sessionID)
-      const payload = ctx.payload as SessionV1.Part
-      if (
-        payload.id !== ctx.params.partID ||
-        payload.messageID !== ctx.params.messageID ||
-        payload.sessionID !== ctx.params.sessionID
-      ) {
-        return yield* new HttpApiError.BadRequest({})
-      }
-      return yield* session.updatePart(payload)
+      return yield* unsupportedTranscriptMutation("part.update")
     })
 
     return handlers
@@ -440,3 +427,10 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("updatePart", updatePart)
   }),
 )
+
+function unsupportedTranscriptMutation(operation: string) {
+  return new UnsupportedOperationError({
+    operation,
+    message: `${operation} is no longer supported on legacy transcript routes. Use canonical v2 mutation APIs when available.`,
+  })
+}

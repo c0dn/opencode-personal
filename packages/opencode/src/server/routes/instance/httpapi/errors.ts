@@ -31,6 +31,15 @@ export class ConflictError extends Schema.TaggedErrorClass<ConflictError>()(
   { httpApiStatus: 409 },
 ) {}
 
+export class UnsupportedOperationError extends Schema.TaggedErrorClass<UnsupportedOperationError>()(
+  "UnsupportedOperationError",
+  {
+    message: Schema.String,
+    operation: Schema.optional(Schema.String),
+  },
+  { httpApiStatus: 410 },
+) {}
+
 export class UpstreamError extends Schema.TaggedErrorClass<UpstreamError>()(
   "UpstreamError",
   {
