@@ -1,5 +1,6 @@
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionV2 } from "@opencode-ai/core/session"
+import { TaskToolMetadataRemediation } from "@opencode-ai/core/session/task-tool-metadata-remediation"
 import { Effect, Schema } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { V2Api } from "../../api"
@@ -46,6 +47,24 @@ export const messageHandlers = HttpApiBuilder.group(V2Api, "v2.message", (handle
                 sessionID: error.sessionID,
                 message: `Session not found: ${error.sessionID}`,
               }),
+          ),
+        )
+        yield* TaskToolMetadataRemediation.ensure({ sessionID: ctx.params.sessionID }).pipe(
+          Effect.tap((result) =>
+            result.status === "retryable"
+              ? Effect.logWarning("v2 task-tool metadata remediation is retryable").pipe(
+                  Effect.annotateLogs({
+                    sessionID: ctx.params.sessionID,
+                    marker: result.marker,
+                    reasons: result.reasons.join(", "),
+                  }),
+                )
+              : Effect.void,
+          ),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("v2 task-tool metadata remediation failed").pipe(
+              Effect.annotateLogs({ sessionID: ctx.params.sessionID, cause }),
+            ),
           ),
         )
         const messages = yield* session

@@ -1,4 +1,4 @@
-import type { Event, Message, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
+import type { Event, PermissionRequest, QuestionRequest, SessionMessage, ToolPart } from "@opencode-ai/sdk/v2"
 import * as Locale from "@/util/locale"
 import {
   bootstrapSessionData,
@@ -18,13 +18,12 @@ const SUBAGENT_ROLE_LIMIT = 32
 const SUBAGENT_ERROR_LIMIT = 16
 const SUBAGENT_ECHO_LIMIT = 8
 
-type SessionMessage = {
-  parts: Part[]
+type AssistantMessage = Extract<SessionMessage, { type: "assistant" }>
+type CanonicalToolPart = ToolPart & {
+  state: Extract<ToolPart["state"], { status: "running" | "completed" | "error" }>
 }
-
-type BootstrapChildMessage = SessionMessage & {
-  info: Message
-}
+type AssistantTool = Extract<AssistantMessage["content"][number], { type: "tool" }>
+type AssistantToolContent = Extract<AssistantTool["state"], { status: "running" | "completed" | "error" }>["content"]
 
 type Frame = {
   key: string
@@ -287,8 +286,31 @@ function stateUpdatedAt(part: ToolPart) {
   return time.end ?? time.start ?? Date.now()
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined
+  }
+
+  return value as Record<string, unknown>
+}
+
+function canonicalTaskMetadata(part: ToolPart) {
+  const structured = "structured" in part.state ? record(part.state.structured)?.task : undefined
+  const legacy = "metadata" in part.state ? record(part.state.metadata)?.task : undefined
+  return record(structured) ?? record(legacy)
+}
+
 function metadata(part: ToolPart, key: string) {
   return ("metadata" in part.state ? part.state.metadata?.[key] : undefined) ?? part.metadata?.[key]
+}
+
+function taskToolCalls(part: ToolPart) {
+  const canonical = num(canonicalTaskMetadata(part)?.toolCalls)
+  if (canonical !== undefined && canonical >= 0) {
+    return canonical
+  }
+
+  return num(metadata(part, "toolcalls")) ?? num(metadata(part, "toolCalls")) ?? num(metadata(part, "calls"))
 }
 
 function taskTab(part: ToolPart, sessionID: string): FooterSubagentTab {
@@ -304,12 +326,17 @@ function taskTab(part: ToolPart, sessionID: string): FooterSubagentTab {
     description,
     status,
     title: stateTitle(part),
-    toolCalls: num(metadata(part, "toolcalls")) ?? num(metadata(part, "toolCalls")) ?? num(metadata(part, "calls")),
+    toolCalls: taskToolCalls(part),
     lastUpdatedAt: stateUpdatedAt(part),
   }
 }
 
 function taskSessionID(part: ToolPart) {
+  const canonical = text(canonicalTaskMetadata(part)?.sessionID)
+  if (canonical) {
+    return canonical
+  }
+
   return text(metadata(part, "sessionId")) ?? text(metadata(part, "sessionID"))
 }
 
@@ -336,6 +363,200 @@ function syncTaskTab(data: SubagentData, part: ToolPart, children?: Set<string>)
   data.tabs.set(sessionID, next)
   ensureDetail(data, sessionID)
   return true
+}
+
+function canonicalInput(tool: AssistantTool): Record<string, unknown> | undefined {
+  return record(tool.state.input)
+}
+
+function canonicalTask(tool: AssistantTool) {
+  if (!("structured" in tool.state)) {
+    return undefined
+  }
+
+  const task = record(tool.state.structured.task)
+  const sessionID = text(task?.sessionID)
+  if (!sessionID) {
+    return undefined
+  }
+
+  const toolCalls = num(task?.toolCalls)
+  return {
+    sessionID,
+    toolCalls: toolCalls !== undefined && toolCalls >= 0 ? toolCalls : undefined,
+  }
+}
+
+function canonicalUpdatedAt(tool: AssistantTool) {
+  return tool.time.completed ?? tool.time.ran ?? tool.time.created ?? Date.now()
+}
+
+function canonicalStatus(tool: AssistantTool): FooterSubagentTab["status"] {
+  if (tool.state.status === "completed") {
+    return "completed"
+  }
+
+  if (tool.state.status === "error") {
+    return "error"
+  }
+
+  return "running"
+}
+
+function canonicalTaskTab(tool: AssistantTool, task: { sessionID: string; toolCalls?: number }): FooterSubagentTab {
+  const input = canonicalInput(tool) ?? {}
+  const label = Locale.titlecase(text(input.subagent_type) ?? "general")
+  const description = text(input.description) ?? inputLabel(input) ?? ""
+
+  return {
+    sessionID: task.sessionID,
+    partID: tool.id,
+    callID: tool.id,
+    label,
+    description,
+    status: canonicalStatus(tool),
+    toolCalls: task.toolCalls,
+    lastUpdatedAt: canonicalUpdatedAt(tool),
+  }
+}
+
+function syncCanonicalTaskTab(data: SubagentData, tool: AssistantTool, children?: Set<string>) {
+  if (tool.name !== "task") {
+    return false
+  }
+
+  const task = canonicalTask(tool)
+  if (!task) {
+    return false
+  }
+
+  if (children && children.size > 0 && !children.has(task.sessionID)) {
+    return false
+  }
+
+  const next = canonicalTaskTab(tool, task)
+  if (sameSubagentTab(data.tabs.get(task.sessionID), next)) {
+    ensureDetail(data, task.sessionID)
+    return false
+  }
+
+  data.tabs.set(task.sessionID, next)
+  ensureDetail(data, task.sessionID)
+  return true
+}
+
+function toolStatus(part: ToolPart): string {
+  if (part.tool !== "task") {
+    return `running ${part.tool}`
+  }
+
+  const description = text(part.state.input.description)
+  if (description) {
+    return `running ${description}`
+  }
+
+  const type = text(part.state.input.subagent_type)
+  if (type) {
+    return `running ${type}`
+  }
+
+  return "running task"
+}
+
+function contentText(content: AssistantToolContent): string | undefined {
+  const body = content
+    .filter((item) => item.type === "text")
+    .map((item) => item.text)
+    .join("")
+    .trim()
+  return body || undefined
+}
+
+function resultText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined
+}
+
+function canonicalToolOutput(tool: AssistantTool) {
+  if (!("content" in tool.state)) {
+    return ""
+  }
+
+  const result = "result" in tool.state ? tool.state.result : undefined
+  const body = contentText(tool.state.content) ?? resultText(result)
+  if (body) {
+    return body
+  }
+
+  if (tool.state.status === "error") {
+    return formatError(tool.state.error)
+  }
+
+  return ""
+}
+
+function canonicalToolPart(sessionID: string, message: AssistantMessage, tool: AssistantTool): CanonicalToolPart | undefined {
+  const input = canonicalInput(tool)
+  if (!input) {
+    return undefined
+  }
+
+  const start = tool.time.ran ?? tool.time.created
+  if (tool.state.status === "running") {
+    return {
+      id: tool.id,
+      sessionID,
+      messageID: message.id,
+      type: "tool",
+      callID: tool.id,
+      tool: tool.name,
+      state: {
+        status: "running",
+        input,
+        metadata: tool.state.structured,
+        time: { start },
+      },
+    }
+  }
+
+  if (tool.state.status === "completed") {
+    return {
+      id: tool.id,
+      sessionID,
+      messageID: message.id,
+      type: "tool",
+      callID: tool.id,
+      tool: tool.name,
+      state: {
+        status: "completed",
+        input,
+        output: canonicalToolOutput(tool),
+        title: tool.name,
+        metadata: tool.state.structured,
+        time: { start, end: tool.time.completed ?? start },
+      },
+    }
+  }
+
+  if (tool.state.status === "error") {
+    const error = canonicalToolOutput(tool)
+    return {
+      id: tool.id,
+      sessionID,
+      messageID: message.id,
+      type: "tool",
+      callID: tool.id,
+      tool: tool.name,
+      state: {
+        status: "error",
+        input,
+        error,
+        metadata: tool.state.structured,
+        time: { start, end: tool.time.completed ?? start },
+      },
+    }
+  }
+
+  return undefined
 }
 
 function frameKey(commit: StreamCommit) {
@@ -534,66 +755,148 @@ function applyChildEvent(input: {
   return changed || queueChanged(input.detail.data, before)
 }
 
-function bootstrapChildEvent(input: {
-  detail: DetailState
-  event: Event
-  thinking: boolean
-  limits: Record<string, number>
-}) {
-  const out = reduceSessionData({
-    data: input.detail.data,
-    event: input.event,
-    sessionID: input.detail.sessionID,
-    thinking: input.thinking,
-    limits: input.limits,
-  })
+function seedCanonicalToolCalls(detail: DetailState, messages: SessionMessage[]) {
+  for (const message of messages) {
+    if (message.type !== "assistant") {
+      continue
+    }
 
-  return appendCommits(input.detail, out.commits)
+    for (const item of message.content) {
+      if (item.type !== "tool") {
+        continue
+      }
+
+      const input = canonicalInput(item)
+      if (!input) {
+        continue
+      }
+
+      const key = callKey(message.id, item.id)
+      if (key) {
+        detail.data.call.set(key, input)
+      }
+    }
+  }
 }
 
-function bootstrapChildMessages(input: {
+function hasLiveChildState(detail: DetailState) {
+  return (
+    detail.frames.length > 0 ||
+    detail.data.ids.size > 0 ||
+    detail.data.tools.size > 0 ||
+    detail.data.role.size > 0 ||
+    detail.data.msg.size > 0 ||
+    detail.data.part.size > 0 ||
+    detail.data.text.size > 0 ||
+    detail.data.sent.size > 0 ||
+    detail.data.end.size > 0
+  )
+}
+
+function bootstrapCanonicalChildMessages(input: {
   detail: DetailState
-  messages: BootstrapChildMessage[]
+  messages: SessionMessage[]
   thinking: boolean
-  limits: Record<string, number>
 }) {
-  let changed = false
+  const commits: StreamCommit[] = []
 
   for (const message of input.messages) {
-    changed =
-      bootstrapChildEvent({
-        detail: input.detail,
-        event: {
-          id: `bootstrap:message:${message.info.id}`,
-          type: "message.updated",
-          properties: {
-            sessionID: input.detail.sessionID,
-            info: message.info,
-          },
-        },
-        thinking: input.thinking,
-        limits: input.limits,
-      }) || changed
+    if (message.type === "user") {
+      const body = message.text.replace(/^\n+/, "")
+      if (!body.trim()) {
+        continue
+      }
 
-    for (const part of message.parts) {
-      changed =
-        bootstrapChildEvent({
-          detail: input.detail,
-          event: {
-            id: `bootstrap:part:${part.id}`,
-            type: "message.part.updated",
-            properties: {
-              sessionID: input.detail.sessionID,
-              part,
-              time: 0,
-            },
-          },
-          thinking: input.thinking,
-          limits: input.limits,
-        }) || changed
+      commits.push({
+        kind: "user",
+        text: body,
+        phase: "start",
+        source: "system",
+        messageID: message.id,
+      })
+      continue
+    }
+
+    if (message.type !== "assistant") {
+      continue
+    }
+
+    for (const item of message.content) {
+      if (item.type === "text") {
+        const body = item.text.replace(/^\n+/, "")
+        if (!body.trim()) {
+          continue
+        }
+
+        commits.push({
+          kind: "assistant",
+          text: body,
+          phase: "progress",
+          source: "assistant",
+          messageID: message.id,
+          partID: item.id,
+        })
+        continue
+      }
+
+      if (item.type === "reasoning") {
+        if (!input.thinking) {
+          continue
+        }
+
+        const body = item.text.replace(/^\n+/, "")
+        if (!body.trim()) {
+          continue
+        }
+
+        commits.push({
+          kind: "reasoning",
+          text: `Thinking: ${body.replace(/\[REDACTED\]/g, "")}`,
+          phase: "progress",
+          source: "reasoning",
+          messageID: message.id,
+          partID: item.id,
+        })
+        continue
+      }
+
+      const part = canonicalToolPart(input.detail.sessionID, message, item)
+      if (!part) {
+        continue
+      }
+
+      commits.push({
+        kind: "tool",
+        text: toolStatus(part),
+        phase: "start",
+        source: "tool",
+        messageID: message.id,
+        partID: item.id,
+        tool: item.name,
+        part,
+        toolState: "running",
+      })
+
+      if (part.state.status === "running") {
+        continue
+      }
+
+      commits.push({
+        kind: "tool",
+        text: part.state.status === "completed" ? part.state.output : part.state.error,
+        phase: "final",
+        source: "tool",
+        messageID: message.id,
+        partID: item.id,
+        tool: item.name,
+        part,
+        toolState: part.state.status,
+        ...(part.state.status === "error" ? { toolError: part.state.error } : {}),
+      })
     }
   }
 
+  const changed = appendCommits(input.detail, commits)
   compactDetail(input.detail)
   return changed
 }
@@ -672,12 +975,16 @@ export function bootstrapSubagentData(input: BootstrapSubagentInput) {
   let changed = false
 
   for (const message of input.messages) {
-    for (const part of message.parts) {
-      if (part.type !== "tool") {
+    if (message.type !== "assistant") {
+      continue
+    }
+
+    for (const item of message.content) {
+      if (item.type !== "tool") {
         continue
       }
 
-      changed = syncTaskTab(input.data, part, children) || changed
+      changed = syncCanonicalTaskTab(input.data, item, children) || changed
     }
   }
 
@@ -722,9 +1029,8 @@ export function bootstrapSubagentData(input: BootstrapSubagentInput) {
 export function bootstrapSubagentCalls(input: {
   data: SubagentData
   sessionID: string
-  messages: BootstrapChildMessage[]
+  messages: SessionMessage[]
   thinking: boolean
-  limits: Record<string, number>
 }) {
   if (!knownSession(input.data, input.sessionID) || input.messages.length === 0) {
     return false
@@ -733,17 +1039,23 @@ export function bootstrapSubagentCalls(input: {
   const detail = ensureDetail(input.data, input.sessionID)
   const before = queueSnapshot(detail.data)
   const beforeCallCount = detail.data.call.size
+  const hasLive = hasLiveChildState(detail)
+  seedCanonicalToolCalls(detail, input.messages)
   bootstrapSessionData({
     data: detail.data,
-    messages: input.messages,
+    messages: [],
     permissions: detail.data.permissions,
     questions: detail.data.questions,
   })
-  const changed = bootstrapChildMessages({
+  if (hasLive) {
+    compactDetail(detail)
+    return beforeCallCount !== detail.data.call.size || queueChanged(detail.data, before)
+  }
+
+  const changed = bootstrapCanonicalChildMessages({
     detail,
     messages: input.messages,
     thinking: input.thinking,
-    limits: input.limits,
   })
 
   return changed || beforeCallCount !== detail.data.call.size || queueChanged(detail.data, before)

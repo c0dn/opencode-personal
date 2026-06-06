@@ -608,6 +608,18 @@ function createLayer(input: StreamInput) {
             Effect.orElseSucceed(() => []),
           )
 
+        const subagentMessages = (sessionID: string, limit?: number) =>
+          Effect.promise(() =>
+            input.sdk.v2.session.messages({
+              sessionID,
+              order: "desc",
+              ...(typeof limit === "number" ? { limit } : {}),
+            }),
+          ).pipe(
+            Effect.map((item) => (item.data?.data ?? []).slice().reverse()),
+            Effect.orElseSucceed(() => []),
+          )
+
         const replayMessages = () =>
           Effect.promise(() =>
             input.sdk.session.messages({
@@ -646,7 +658,7 @@ function createLayer(input: StreamInput) {
           yield* Effect.forEach(
             sessions,
             (sessionID) =>
-              messages(sessionID, SUBAGENT_CALL_BOOTSTRAP_LIMIT).pipe(
+              subagentMessages(sessionID, SUBAGENT_CALL_BOOTSTRAP_LIMIT).pipe(
                 Effect.tap((messagesList) =>
                   Effect.sync(() => {
                     if (
@@ -655,7 +667,6 @@ function createLayer(input: StreamInput) {
                         sessionID,
                         messages: messagesList,
                         thinking: input.thinking,
-                        limits: input.limits(),
                       })
                     ) {
                       return
@@ -673,9 +684,17 @@ function createLayer(input: StreamInput) {
         })
 
         const bootstrap = Effect.fn("RunStreamTransport.bootstrap")(function* () {
-          const [messagesList, children, permissions, questions] = yield* Effect.all(
+          const [messagesList, subagentMessagesList, children, permissions, questions] = yield* Effect.all(
             [
               messages(
+                input.sessionID,
+                input.replay
+                  ? input.replayLimit === undefined
+                    ? undefined
+                    : Math.max(input.replayLimit, SUBAGENT_BOOTSTRAP_LIMIT)
+                  : SUBAGENT_BOOTSTRAP_LIMIT,
+              ),
+              subagentMessages(
                 input.sessionID,
                 input.replay
                   ? input.replayLimit === undefined
@@ -746,7 +765,7 @@ function createLayer(input: StreamInput) {
 
           bootstrapSubagentData({
             data: state.subagent,
-            messages: messagesList,
+            messages: subagentMessagesList,
             children,
             permissions,
             questions,
