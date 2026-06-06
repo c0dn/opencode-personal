@@ -23,7 +23,6 @@ const categories = {
     allowed: [
       "packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts",
       "packages/opencode/src/session/message-v2.ts",
-      "packages/opencode/src/session/processor.ts",
       "packages/opencode/src/session/prompt.ts",
       "packages/opencode/src/session/session.ts",
     ],

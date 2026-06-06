@@ -1,6 +1,7 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Database } from "@opencode-ai/core/database/database"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
@@ -177,11 +178,10 @@ const assistant = Effect.fn("TestSession.assistant")(function* (
 
 const status = SessionStatus.layer.pipe(Layer.provideMerge(EventV2Bridge.defaultLayer))
 const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
-const deps = Layer.mergeAll(
+const depsWithoutPermission = Layer.mergeAll(
   Session.defaultLayer,
   Snapshot.defaultLayer,
   AgentSvc.defaultLayer,
-  Permission.defaultLayer,
   Plugin.defaultLayer,
   Config.defaultLayer,
   LLM.defaultLayer,
@@ -190,6 +190,7 @@ const deps = Layer.mergeAll(
   Database.defaultLayer,
   EventV2Bridge.defaultLayer,
 ).pipe(Layer.provideMerge(infra))
+const deps = Layer.mergeAll(depsWithoutPermission, Permission.defaultLayer)
 const env = Layer.mergeAll(
   TestLLMServer.layer,
   SessionProcessor.layer.pipe(
@@ -200,7 +201,31 @@ const env = Layer.mergeAll(
   ),
 )
 
+const doomLoopRequests: PermissionV1.AskInput[] = []
+const doomLoopPermission = Layer.succeed(
+  Permission.Service,
+  Permission.Service.of({
+    ask: (input) =>
+      Effect.sync(() => {
+        doomLoopRequests.push(input)
+      }),
+    reply: () => Effect.void,
+    list: () => Effect.succeed([]),
+  }),
+)
+const doomLoopEnv = Layer.mergeAll(
+  TestLLMServer.layer,
+  SessionProcessor.layer.pipe(
+    Layer.provide(summary),
+    Layer.provide(Image.defaultLayer),
+    Layer.provide(RuntimeFlags.layer({})),
+    Layer.provide(doomLoopPermission),
+    Layer.provideMerge(depsWithoutPermission),
+  ),
+)
+
 const it = testEffect(env)
+const itDoomLoop = testEffect(doomLoopEnv)
 
 const providerErrorLLM = Layer.succeed(
   LLM.Service,
@@ -802,6 +827,72 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
         expect(v2Tool.state.status).toBe("completed")
         if (v2Tool.state.status !== "completed") return
         expect(v2Tool.state.structured).toEqual({ source: "test" })
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+itDoomLoop.live("session.processor effect tests asks doom-loop permission from local recent tool history", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        doomLoopRequests.length = 0
+        const { processors, session, provider } = yield* boot()
+
+        yield* llm.tool("lookup", { query: "weather" })
+        yield* llm.tool("lookup", { query: "weather" })
+        yield* llm.tool("lookup", { query: "weather" })
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "tool")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+        const input = {
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "tool" }],
+          tools: {
+            lookup: tool({
+              description: "Look up information",
+              inputSchema: z.object({ query: z.string() }),
+              execute: async (toolInput) => ({
+                title: "Lookup",
+                output: `result:${toolInput.query}`,
+                metadata: {},
+              }),
+            }),
+          },
+        } satisfies LLM.StreamInput
+
+        expect(yield* handle.process(input)).toBe("continue")
+        expect(doomLoopRequests).toHaveLength(0)
+        expect(yield* handle.process(input)).toBe("continue")
+        expect(doomLoopRequests).toHaveLength(0)
+        expect(yield* handle.process(input)).toBe("continue")
+
+        expect(doomLoopRequests).toHaveLength(1)
+        expect(doomLoopRequests[0]).toMatchObject({
+          permission: "doom_loop",
+          patterns: ["lookup"],
+          sessionID: chat.id,
+          metadata: { tool: "lookup", input: { query: "weather" } },
+          always: ["lookup"],
+        })
       }),
     { config: (url) => providerCfg(url) },
   ),
