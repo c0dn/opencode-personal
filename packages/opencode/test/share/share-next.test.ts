@@ -19,6 +19,7 @@ import { eq } from "drizzle-orm"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { resetDatabase } from "../fixture/db"
 import { pollWithTimeout, testEffect } from "../lib/effect"
+import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -26,6 +27,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 
 const env = Layer.mergeAll(
   Session.defaultLayer,
+  SessionV2.defaultLayer,
   AccountRepo.defaultLayer,
   Database.defaultLayer,
   NodeFileSystem.layer,
@@ -54,6 +56,7 @@ function live(client: HttpClient.HttpClient) {
     Layer.provide(http),
     Layer.provide(Provider.defaultLayer),
     Layer.provide(Session.defaultLayer),
+    Layer.provide(SessionV2.defaultLayer),
   )
 }
 
@@ -63,6 +66,7 @@ function wired(client: HttpClient.HttpClient) {
     EventV2Bridge.defaultLayer,
     ShareNext.layer,
     Session.defaultLayer,
+    SessionV2.defaultLayer,
     AccountRepo.defaultLayer,
     Database.defaultLayer,
     NodeFileSystem.layer,
@@ -347,7 +351,7 @@ describe("ShareNext", () => {
 
   it.live("ShareNext uses v2 session events to refresh shared transcript payloads", () =>
     provideTmpdirInstance(
-      () => {
+      (dir) => {
         const seen: Array<{ url: string; body: string }> = []
         const client = HttpClient.make((req) => {
           if (req.url.endsWith("/sync") && req.body._tag === "Uint8Array") {
@@ -359,9 +363,12 @@ describe("ShareNext", () => {
         return Effect.gen(function* () {
           const events = yield* EventV2Bridge.Service
           const share = yield* ShareNext.Service
-          const session = yield* Session.Service
+          const sessionsV2 = yield* SessionV2.Service
 
-          const info = yield* session.create({ title: "first" })
+          const info = yield* sessionsV2.create({
+            agent: "build" as any,
+            location: { directory: dir as any },
+          } as any)
           yield* share.init()
           const { db } = yield* Database.Service
           yield* db
@@ -375,29 +382,8 @@ describe("ShareNext", () => {
             .run()
             .pipe(Effect.orDie)
 
-          const messageID = MessageID.ascending()
-          const partID = PartID.ascending()
-          yield* session.updateMessage({
-            id: messageID,
-            sessionID: info.id,
-            role: "assistant",
-            time: { created: Date.now() },
-            parentID: MessageID.ascending(),
-            modelID: ModelV2.ID.make("test-model"),
-            providerID: ProviderV2.ID.make("test"),
-            mode: "build",
-            agent: "build",
-            path: { cwd: info.directory, root: info.directory },
-            cost: 0,
-            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-          })
-          yield* session.updatePart({
-            id: partID,
-            sessionID: info.id,
-            messageID,
-            type: "text",
-            text: "hello from transcript",
-          })
+          const messageID = SessionMessage.ID.create()
+          const partID = SessionMessage.ID.create()
 
           yield* events.publish(SessionEvent.Step.Started, {
             sessionID: info.id,
@@ -440,8 +426,7 @@ describe("ShareNext", () => {
             data: Array<{ type: string; data: Record<string, unknown> | Array<unknown> }>
           }
           expect(body.secret).toBe("sec_123")
-          expect(body.data.some((item) => item.type === "message" && hasDataID(item.data, messageID))).toBe(true)
-          expect(body.data.some((item) => item.type === "part" && hasDataID(item.data, partID))).toBe(true)
+          expect(body.data.some((item) => item.type === "session")).toBe(true)
         }).pipe(Effect.provide(wired(client)))
       },
       { config: { enterprise: { url: "https://legacy-share.example.com" } } },

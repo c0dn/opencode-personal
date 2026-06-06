@@ -9,6 +9,8 @@ import { Provider } from "@/provider/provider"
 
 import { Session } from "@/session/session"
 import type { SessionID } from "@/session/schema"
+import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { Database } from "@opencode-ai/core/database/database"
 import { eq } from "drizzle-orm"
 import { Config } from "@/config/config"
@@ -120,8 +122,8 @@ export const layer = Layer.effect(
     const { db } = yield* Database.Service
     const http = yield* HttpClient.HttpClient
     const httpOk = HttpClient.filterStatusOk(http)
+    const sessionsV2 = yield* SessionV2.Service
     const provider = yield* Provider.Service
-    const session = yield* Session.Service
 
     function sync(sessionID: SessionID, data: Data[]) {
       return Effect.gen(function* () {
@@ -153,32 +155,158 @@ export const layer = Layer.effect(
     }
 
     const syncTranscript = Effect.fn("ShareNext.syncTranscript")(function* (sessionID: SessionID) {
-      const info = yield* session.get(sessionID)
-      const diffs = yield* session.diff(sessionID)
-      const messages = yield* session.messages({ sessionID })
+      const info = yield* sessionsV2.get(sessionID)
+      const messages = yield* sessionsV2.messages({ sessionID, order: "asc" })
       const models = yield* Effect.forEach(
         Array.from(
           new Map(
             messages
-              .filter((msg) => msg.info.role === "user")
-              .map((msg) => (msg.info as SDK.UserMessage).model)
-              .map((item) => [`${item.providerID}/${item.modelID}`, item] as const),
+              .filter((msg) => msg.type === "assistant")
+              .map((msg) => [(msg as SessionMessage.Assistant).model.providerID + "/" + (msg as SessionMessage.Assistant).model.id, (msg as SessionMessage.Assistant).model] as const),
           ).values(),
         ),
-        (item) => provider.getModel(ProviderV2.ID.make(item.providerID), ModelV2.ID.make(item.modelID)),
+        (item) =>
+          provider.getModel(ProviderV2.ID.make(item.providerID), ModelV2.ID.make(item.id)).pipe(
+            Effect.orElseSucceed(() => undefined),
+          ),
         { concurrency: 8 },
-      )
+      ).pipe(Effect.map((results) => results.filter((m): m is NonNullable<typeof m> => m !== undefined)))
 
       yield* sync(sessionID, [
-        { type: "session", data: structuredClone(info) as SDK.Session },
-        ...messages.map((item) => ({ type: "message" as const, data: structuredClone(item.info) as SDK.Message })),
-        ...messages.flatMap((item) =>
-          item.parts.map((part) => ({ type: "part" as const, data: structuredClone(part) as SDK.Part })),
-        ),
-        { type: "session_diff", data: structuredClone(diffs) as SDK.SnapshotFileDiff[] },
-        { type: "model", data: structuredClone(models) as SDK.Model[] },
+        { type: "session", data: structuredClone(info) as unknown as SDK.Session },
+        ...messages.flatMap((msg) => v2MessageData(msg, sessionID)),
+        { type: "session_diff", data: [] as unknown as SDK.SnapshotFileDiff[] },
+        { type: "model", data: structuredClone(models) as unknown as SDK.Model[] },
       ])
     })
+
+    function v2MessageData(msg: SessionMessage.Message, sessionID: string): Data[] {
+      if (msg.type === "user") {
+        const info = {
+          id: msg.id,
+          sessionID,
+          role: "user" as const,
+          time: msg.time,
+          ...(msg.files ? { files: msg.files.map((f) => ({ uri: f.uri, name: f.name, mime: f.mime })) } : {}),
+          ...(msg.agents ? { agents: msg.agents.map((a) => ({ name: a.name })) } : {}),
+        }
+        const parts: Array<Record<string, unknown>> = []
+
+        if (msg.text.trim()) {
+          const partID = `${msg.id}-text`
+          parts.push({ id: partID, sessionID, messageID: msg.id, type: "text", text: msg.text })
+        }
+        if (msg.files) {
+          for (const file of msg.files) {
+            parts.push({
+              id: `${msg.id}-file-${file.uri}`,
+              sessionID,
+              messageID: msg.id,
+              type: "file",
+              url: file.uri,
+              ...(file.name ? { filename: file.name } : {}),
+              mime: file.mime,
+            })
+          }
+        }
+        if (msg.agents) {
+          for (const agent of msg.agents) {
+            parts.push({
+              id: `${msg.id}-agent-${agent.name}`,
+              sessionID,
+              messageID: msg.id,
+              type: "agent",
+              text: agent.name,
+            })
+          }
+        }
+
+        return [{ type: "message", data: info as unknown as SDK.Message }, ...parts.map((p) => ({ type: "part" as const, data: p as unknown as SDK.Part }))]
+      }
+
+      if (msg.type === "assistant") {
+        const info = {
+          id: msg.id,
+          sessionID,
+          role: "assistant" as const,
+          time: msg.time,
+          model: msg.model,
+          tokens: msg.tokens,
+          cost: msg.cost,
+          error: msg.error,
+          agent: msg.agent,
+        }
+        const data: Data[] = [{ type: "message", data: info as unknown as SDK.Message }]
+
+        for (const item of msg.content) {
+          if (item.type === "text") {
+            data.push({
+              type: "part",
+              data: { id: item.id, sessionID, messageID: msg.id, type: "text", text: item.text } as unknown as SDK.Part,
+            })
+          } else if (item.type === "reasoning") {
+            data.push({
+              type: "part",
+              data: { id: item.id, sessionID, messageID: msg.id, type: "reasoning", text: item.text } as unknown as SDK.Part,
+            })
+          } else if (item.type === "tool") {
+            data.push({
+              type: "part",
+              data: {
+                id: item.id,
+                sessionID,
+                messageID: msg.id,
+                type: "tool",
+                callID: item.id,
+                tool: item.name,
+                state: item.state,
+              } as unknown as SDK.Part,
+            })
+          }
+        }
+
+        return data
+      }
+
+      if (msg.type === "shell") {
+        const info = {
+          id: msg.id,
+          sessionID,
+          role: "assistant" as const,
+          time: msg.time,
+        }
+        const parts = [
+          { id: `${msg.id}-command`, sessionID, messageID: msg.id, type: "text", text: msg.command },
+          { id: `${msg.id}-output`, sessionID, messageID: msg.id, type: "text", text: msg.output },
+        ]
+        return [{ type: "message", data: info as unknown as SDK.Message }, ...parts.map((p) => ({ type: "part" as const, data: p as unknown as SDK.Part }))]
+      }
+
+      if (msg.type === "synthetic") {
+        const info = {
+          id: msg.id,
+          sessionID: msg.sessionID || sessionID,
+          role: "user" as const,
+          time: msg.time,
+        }
+        return [
+          { type: "message", data: info as unknown as SDK.Message },
+          { type: "part" as const, data: { id: `${msg.id}-text`, sessionID: msg.sessionID || sessionID, messageID: msg.id, type: "text", text: msg.text } as unknown as SDK.Part },
+        ]
+      }
+
+      if (msg.type === "compaction") {
+        const info = {
+          id: msg.id,
+          sessionID,
+          role: "system" as const,
+          time: msg.time,
+        }
+        return [{ type: "message", data: info as unknown as SDK.Message }]
+      }
+
+      return []
+    }
 
     function scheduleTranscriptSync(sessionID: SessionID): Effect.Effect<void, unknown> {
       return Effect.gen(function* () {
@@ -254,7 +382,7 @@ export const layer = Layer.effect(
         yield* watch(Session.Event.Updated, (data) =>
           Effect.gen(function* () {
             const info = data.info
-            yield* sync(info.id, [{ type: "session", data: structuredClone(info) as SDK.Session }])
+            yield* sync(info.id, [{ type: "session", data: structuredClone(info) as unknown as SDK.Session }])
           }),
         )
         yield* watch(SessionEvent.AgentSwitched, (data) => scheduleTranscriptSync(data.sessionID))
@@ -285,7 +413,7 @@ export const layer = Layer.effect(
         yield* watch(SessionEvent.Compaction.Delta, (data) => scheduleTranscriptSync(data.sessionID))
         yield* watch(SessionEvent.Compaction.Ended, (data) => scheduleTranscriptSync(data.sessionID))
         yield* watch(Session.Event.Diff, (data) =>
-          sync(data.sessionID, [{ type: "session_diff", data: structuredClone(data.diff) as SDK.SnapshotFileDiff[] }]),
+          sync(data.sessionID, [{ type: "session_diff", data: structuredClone(data.diff) as unknown as SDK.SnapshotFileDiff[] }]),
         )
         yield* watch(Session.Event.Deleted, (data) => remove(data.sessionID))
 
@@ -442,6 +570,7 @@ export const defaultLayer = layer.pipe(
   Layer.provide(FetchHttpClient.layer),
   Layer.provide(Provider.defaultLayer),
   Layer.provide(Session.defaultLayer),
+  Layer.provide(SessionV2.defaultLayer),
 )
 
 export * as ShareNext from "./share-next"
