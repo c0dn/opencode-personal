@@ -337,8 +337,8 @@ const baseLayer = Layer.effect(
       return selection.include
     })
 
-    // goes backwards through parts until there are PRUNE_PROTECT tokens worth of tool
-    // calls, then erases output of older tool calls to free context space
+    // V2 prune: reads legacy messages for now, publishes Tool.Compacted v2 events
+    // instead of legacy session.updatePart.
     const prune = Effect.fn("SessionCompaction.prune")(function* (input: { sessionID: SessionID }) {
       const cfg = yield* config.get()
       if (!cfg.compaction?.prune) return
@@ -376,10 +376,14 @@ const baseLayer = Layer.effect(
       log.info("found", { pruned, total })
       if (pruned > PRUNE_MINIMUM) {
         for (const part of toPrune) {
-          if (part.state.status === "completed") {
-            part.state.time.compacted = Date.now()
-            yield* session.updatePart(part)
-          }
+          ;(part.state as { time?: { compacted?: number } }).time = { compacted: Date.now() }
+          yield* session.updatePart(part)
+          yield* events.publish(SessionEvent.Tool.Compacted, {
+            sessionID: input.sessionID,
+            toolCallID: part.callID,
+            messageID: SessionMessage.ID.make(part.messageID),
+            timestamp: DateTime.makeUnsafe(Date.now()),
+          })
         }
         log.info("pruned", { count: toPrune.length })
       }
