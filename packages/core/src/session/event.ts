@@ -465,6 +465,16 @@ export namespace Tool {
     },
   })
   export type Failed = typeof Failed.Type
+
+  export const Compacted = EventV2.define({
+    type: "session.next.tool.compacted",
+    schema: {
+      ...Base,
+      toolCallID: Schema.String,
+      messageID: SessionMessageID.ID,
+    },
+  })
+  export type Compacted = typeof Compacted.Type
 }
 
 export const RetryError = Schema.Struct({
@@ -522,6 +532,37 @@ export namespace Compaction {
     },
   })
   export type Ended = typeof Ended.Type
+
+  export const Failed = EventV2.define({
+    type: "session.next.compaction.failed",
+    schema: {
+      ...Base,
+      messageID: SessionMessageID.ID,
+      error: Schema.optional(Schema.Unknown),
+    },
+  })
+  export type Failed = typeof Failed.Type
+}
+
+export const MessageRemoved = EventV2.define({
+  type: "session.message.removed",
+  schema: {
+    ...Base,
+    messageID: SessionMessageID.ID,
+  },
+})
+export type MessageRemoved = typeof MessageRemoved.Type
+
+export namespace Patch {
+  export const Created = EventV2.define({
+    type: "session.next.patch.created",
+    schema: {
+      ...Base,
+      messageID: SessionMessageID.ID,
+      patch: Schema.Unknown,
+    },
+  })
+  export type Created = typeof Created.Type
 }
 
 const DurableDefinitions = [
@@ -546,12 +587,16 @@ const DurableDefinitions = [
   Tool.Progress,
   Tool.Success,
   Tool.Failed,
+  Tool.Compacted,
   Reasoning.Started,
   Reasoning.Ended,
   Retried,
   Compaction.Started,
   Compaction.Delta,
   Compaction.Ended,
+  Compaction.Failed,
+  MessageRemoved,
+  Patch.Created,
 ] as const
 const EphemeralDefinitions = [Text.Delta, Tool.Input.Delta, Reasoning.Delta] as const
 

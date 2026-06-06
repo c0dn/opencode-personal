@@ -494,6 +494,10 @@ export const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Compaction.Started, () => Effect.void)
     yield* events.project(SessionEvent.Compaction.Delta, () => Effect.void)
     yield* events.project(SessionEvent.Compaction.Ended, (event) => projectCompactionEnded(db, event))
+    yield* events.project(SessionEvent.Compaction.Failed, () => Effect.void)
+    yield* events.project(SessionEvent.Tool.Compacted, () => Effect.void)
+    yield* events.project(SessionEvent.MessageRemoved, () => Effect.void)
+    yield* events.project(SessionEvent.Patch.Created, () => Effect.void)
   }),
 )
 
