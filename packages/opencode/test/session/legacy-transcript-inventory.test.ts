@@ -26,7 +26,6 @@ const categories = {
       "packages/opencode/src/session/processor.ts",
       "packages/opencode/src/session/prompt.ts",
       "packages/opencode/src/session/session.ts",
-      "packages/opencode/src/tool/task.ts",
     ],
   },
   MessageV2LegacyEvents: {
@@ -45,7 +44,6 @@ const categories = {
       "packages/opencode/src/session/revert.ts",
       "packages/opencode/src/session/session.ts",
       "packages/opencode/src/session/summary.ts",
-      "packages/opencode/src/tool/plan.ts",
     ],
   },
   SessionLegacyMutations: {
