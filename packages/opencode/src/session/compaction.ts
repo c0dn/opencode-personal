@@ -1,4 +1,5 @@
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import type { ModelMessage } from "ai"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Database } from "@opencode-ai/core/database/database"
 import { Session } from "./session"
@@ -7,6 +8,8 @@ import { Provider } from "@/provider/provider"
 import { MessageV2 } from "./message-v2"
 import { MessageV2Compaction } from "./message-v2-compaction"
 import { MessageV2Model } from "./message-v2-model"
+import { MessageV2Readiness } from "./message-v2-readiness"
+import { MessageV2Provider } from "./message-v2-provider"
 import { Token } from "@/util/token"
 import { Log } from "@opencode-ai/core/util/log"
 import { SessionProcessor } from "./processor"
@@ -382,6 +385,60 @@ const baseLayer = Layer.effect(
       }
     })
 
+    const selectV2 = Effect.fnUntraced(function* (input: {
+      sessionID: SessionID
+      cfg: ConfigV1.Info
+      model: Provider.Model
+    }) {
+      const anchor = yield* SessionCompactionAnchor.findLatestPendingStarted({
+        db: database.db,
+        sessionID: input.sessionID,
+      })
+      if (!anchor) return yield* Effect.fail(new Error("v2 compaction: no pending compaction anchor"))
+
+      const v2Messages = yield* sessions.messages({ sessionID: input.sessionID, order: "asc" }).pipe(Effect.orDie)
+      const selection = yield* Effect.promise(() =>
+        MessageV2Compaction.select({
+          messages: v2Messages,
+          anchor: { id: anchor.id, time: anchor.time },
+          tailTurns: input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS,
+          preserveRecentTokens: preserveRecentBudget({ cfg: input.cfg, model: input.model }),
+          estimate: async (candidate) => {
+            const result = await MessageV2Model.toModelMessages(candidate.slice(), {
+              stripMedia: true,
+              toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+            })
+            return Token.estimate(JSON.stringify(result))
+          },
+        }),
+      )
+
+      if (selection.type === "blocked") {
+        return yield* Effect.fail(new Error(`v2 compaction: ${selection.reason}`))
+      }
+
+      const readiness = MessageV2Readiness.compactionProviderReadiness(selection.messages)
+      if (readiness.type === "blocked") {
+        return yield* Effect.fail(new Error(`v2 compaction readiness: ${readiness.reason}`))
+      }
+
+      const prepared = yield* Effect.promise(() =>
+        MessageV2Provider.prepareCompactionProviderMessages({
+          messages: readiness.messages,
+          options: { stripMedia: true, toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS },
+        }),
+      )
+
+      if (prepared.type !== "ready") {
+        return yield* Effect.fail(new Error("v2 compaction provider prep: not ready"))
+      }
+
+      return {
+        modelMessages: prepared.modelMessages,
+        previousSummary: selection.previousSummary,
+      }
+    })
+
     const processCompaction = Effect.fn("SessionCompaction.process")(function* (input: {
       parentID: MessageID
       messages: SessionV1.WithParts[]
@@ -436,19 +493,51 @@ const baseLayer = Layer.effect(
         model,
       })
       const canonicalEndedInclude = yield* canonicalInclude({ sessionID: input.sessionID, cfg, model })
+
+      // V2 provider-input: select, readiness-gate, and convert to model messages.
+      // Only activates when a v2 compaction anchor exists. Falls through to legacy
+      // selection when the compaction was started via the legacy path.
+      let v2ModelMessages: ModelMessage[] | undefined
+      let v2PreviousSummary: string | undefined
+      {
+        const v2Anchor = yield* SessionCompactionAnchor.findLatestPendingStarted({
+          db: database.db,
+          sessionID: input.sessionID,
+        })
+        if (v2Anchor) {
+          const applied = yield* selectV2({ sessionID: input.sessionID, cfg, model }).pipe(
+            Effect.map((result) => ({ type: "ok" as const, ...result })),
+            Effect.catch((cause) =>
+              Effect.sync(() => {
+                log.error("v2 compaction failed, continuing with legacy selection", { sessionID: input.sessionID, cause })
+                return { type: "failed" as const }
+              }),
+            ),
+          )
+          if (applied.type === "ok") {
+            v2ModelMessages = applied.modelMessages
+            v2PreviousSummary = applied.previousSummary
+          }
+        }
+      }
+
+      // Legacy model message conversion (used when v2 selection is unavailable or fails).
+      if (!v2ModelMessages) {
+        const msgs = structuredClone(selected.head)
+        yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+        v2ModelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
+          stripMedia: true,
+          toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+        })
+      }
+
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
         "experimental.session.compacting",
         { sessionID: input.sessionID },
         { context: [], prompt: undefined },
       )
-      const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
-      const msgs = structuredClone(selected.head)
-      yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
-        stripMedia: true,
-        toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-      })
+      const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary: v2PreviousSummary ?? previousSummary, context: compacting.context })
       const ctx = yield* InstanceState.context
       const msg: SessionV1.Assistant = {
         id: MessageID.ascending(),
@@ -489,7 +578,7 @@ const baseLayer = Layer.effect(
         tools: {},
         system: [],
         messages: [
-          ...modelMessages,
+          ...(v2ModelMessages ?? []),
           {
             role: "user",
             content: [{ type: "text", text: nextPrompt }],
