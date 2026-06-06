@@ -65,6 +65,7 @@ const categories = {
     allowed: [
       "packages/core/src/session/projector.ts",
       "packages/core/src/session/sql.ts",
+      "packages/core/src/session/task-tool-metadata-remediation.ts",
       "packages/opencode/src/cli/cmd/import.ts",
       "packages/opencode/src/session/message-v2.ts",
       "packages/opencode/src/storage/schema.ts",
@@ -75,6 +76,7 @@ const categories = {
     allowed: [
       "packages/core/src/session/projector.ts",
       "packages/core/src/session/sql.ts",
+      "packages/core/src/session/task-tool-metadata-remediation.ts",
       "packages/opencode/src/cli/cmd/import.ts",
       "packages/opencode/src/session/message-v2.ts",
       "packages/opencode/src/session/session.ts",
