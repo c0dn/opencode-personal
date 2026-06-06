@@ -26,6 +26,7 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
+import { TaskToolMetadata } from "@opencode-ai/core/session/task-tool-metadata"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import * as DateTime from "effect/DateTime"
@@ -35,6 +36,11 @@ import { ToolOutput } from "@opencode-ai/core/tool-output"
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
+
+function toolSuccessStructured(toolName: string, metadata: Record<string, unknown>) {
+  if (toolName !== "task") return metadata
+  return TaskToolMetadata.mergeIntoStructured({}, metadata)
+}
 
 export type Result = "compact" | "stop" | "continue"
 
@@ -635,7 +641,7 @@ export const layer = Layer.effect(
                   sessionID: ctx.sessionID,
                   assistantMessageID,
                   callID: value.id,
-                  structured: output.metadata,
+                  structured: toolSuccessStructured(value.name, output.metadata),
                   content,
                   result: value.result,
                   provider: {

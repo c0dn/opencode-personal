@@ -1,4 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node"
+import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -788,6 +789,92 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
         expect(call.state.metadata).toEqual({ source: "test" })
         expect(call.state.time.start).toBeDefined()
         expect(call.state.time.end).toBeDefined()
+
+        const messages = yield* SessionV2.Service.use((session) => session.messages({ sessionID: chat.id })).pipe(
+          Effect.provide(SessionV2.defaultLayer),
+        )
+        const v2Assistant = messages.find((message) => message.type === "assistant")
+        expect(v2Assistant?.type).toBe("assistant")
+        if (v2Assistant?.type !== "assistant") return
+        const v2Tool = v2Assistant.content.find((item) => item.type === "tool" && item.id === "call_1")
+        expect(v2Tool?.type).toBe("tool")
+        if (v2Tool?.type !== "tool") return
+        expect(v2Tool.state.status).toBe("completed")
+        if (v2Tool.state.status !== "completed") return
+        expect(v2Tool.state.structured).toEqual({ source: "test" })
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor effect tests sanitize task tool success structured metadata", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        yield* llm.tool("task", { prompt: "check child" })
+
+        const chat = yield* session.create({})
+        const child = yield* session.create({})
+        const parent = yield* user(chat.id, "task")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "task" }],
+          tools: {
+            task: tool({
+              description: "Run a child task",
+              inputSchema: z.object({ prompt: z.string() }),
+              execute: async () => ({
+                title: "Task",
+                output: "child done",
+                metadata: {
+                  sessionId: child.id,
+                  parentSessionId: chat.id,
+                  model: "test/test-model",
+                  background: true,
+                  jobId: "job_123",
+                  sourceMessageId: "msg_legacy",
+                  toolCalls: 2,
+                },
+              }),
+            }),
+          },
+        })
+
+        const messages = yield* SessionV2.Service.use((session) => session.messages({ sessionID: chat.id })).pipe(
+          Effect.provide(SessionV2.defaultLayer),
+        )
+        const v2Assistant = messages.find((message) => message.type === "assistant")
+        expect(value).toBe("continue")
+        expect(v2Assistant?.type).toBe("assistant")
+        if (v2Assistant?.type !== "assistant") return
+        const v2Tool = v2Assistant.content.find((item) => item.type === "tool" && item.id === "call_1")
+        expect(v2Tool?.type).toBe("tool")
+        if (v2Tool?.type !== "tool") return
+        expect(v2Tool.state.status).toBe("completed")
+        if (v2Tool.state.status !== "completed") return
+        expect(v2Tool.name).toBe("task")
+        expect(v2Tool.state.structured).toEqual({ task: { sessionID: child.id, toolCalls: 2 } })
       }),
     { config: (url) => providerCfg(url) },
   ),
