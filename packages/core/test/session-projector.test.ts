@@ -17,6 +17,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionInput } from "@opencode-ai/core/session/input"
 import { SessionStore } from "@opencode-ai/core/session/store"
+import { SessionCompactionAnchor } from "@opencode-ai/core/session/compaction-anchor"
 import { SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-ai/core/session/sql"
 import { testEffect } from "./lib/effect"
 
@@ -525,6 +526,59 @@ describe("SessionProjector", () => {
           time: { created: DateTime.makeUnsafe(2) },
         }),
       ])
+    }),
+  )
+
+  it.effect("finds the latest pending compaction started anchor between ended boundaries", () =>
+    Effect.gen(function* () {
+      yield* setupSession
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      const staleID = SessionMessage.ID.make("msg_compaction_stale_anchor")
+      const olderID = SessionMessage.ID.make("msg_compaction_older_pending_anchor")
+      const latestID = SessionMessage.ID.make("msg_compaction_latest_pending_anchor")
+
+      yield* events.publish(SessionEvent.Compaction.Started, {
+        sessionID,
+        messageID: staleID,
+        timestamp: DateTime.makeUnsafe(1),
+        reason: "manual",
+      })
+      yield* events.publish(SessionEvent.Compaction.Ended, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(2),
+        text: "stale summary",
+      })
+      yield* events.publish(SessionEvent.Compaction.Started, {
+        sessionID,
+        messageID: olderID,
+        timestamp: DateTime.makeUnsafe(3),
+        reason: "manual",
+      })
+      yield* events.publish(SessionEvent.Compaction.Started, {
+        sessionID,
+        messageID: latestID,
+        timestamp: DateTime.makeUnsafe(4),
+        reason: "auto",
+      })
+
+      const beforeEnding = yield* SessionCompactionAnchor.findLatestPendingStarted({ db, sessionID })
+      expect(beforeEnding).toMatchObject({ id: latestID, messageID: latestID, reason: "auto" })
+
+      const ended = yield* events.publish(SessionEvent.Compaction.Ended, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(5),
+        text: "latest summary",
+      })
+      const atEndedBoundary = yield* SessionCompactionAnchor.findLatestPendingStarted({
+        db,
+        sessionID,
+        beforeSeq: ended.seq,
+      })
+      const afterEnding = yield* SessionCompactionAnchor.findLatestPendingStarted({ db, sessionID })
+
+      expect(atEndedBoundary).toMatchObject({ id: latestID, messageID: latestID, reason: "auto" })
+      expect(afterEnding).toBeUndefined()
     }),
   )
 

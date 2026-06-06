@@ -1,10 +1,9 @@
 export * as SessionProjector from "./projector"
 
-import { and, desc, eq, gt, lt, sql } from "drizzle-orm"
+import { and, desc, eq, sql } from "drizzle-orm"
 import { DateTime, Effect, Layer, Schema } from "effect"
 import { Database } from "../database/database"
 import { EventV2 } from "../event"
-import { EventTable } from "../event/sql"
 import { SessionEvent } from "./event"
 import { SessionV1 } from "../v1/session"
 import { WorkspaceTable } from "../control-plane/workspace.sql"
@@ -14,22 +13,14 @@ import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./sql"
 import type { DeepMutable } from "../schema"
+import { SessionCompactionAnchor } from "./compaction-anchor"
 
 type DatabaseService = Database.Interface["db"]
 
 const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Message)
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
-const decodeCompactionStarted = Schema.decodeUnknownSync(SessionEvent.Compaction.Started.data)
-const compactionStartedType = synchronizedType(SessionEvent.Compaction.Started)
-const compactionEndedType = synchronizedType(SessionEvent.Compaction.Ended)
-
 class PromptAlreadyProjected extends Error {}
 export class SessionAlreadyProjected extends Error {}
-
-function synchronizedType(definition: EventV2.Definition) {
-  if (!definition.sync) throw new Error(`Event type ${definition.type} is not synchronized`)
-  return EventV2.versionedType(definition.type, definition.sync.version)
-}
 
 type Usage = {
   cost: number
@@ -245,49 +236,23 @@ function insertMessageWithSeq(
 
 function projectCompactionEnded(db: DatabaseService, event: SessionEvent.Compaction.Ended) {
   if (event.seq === undefined) return Effect.die("Synchronized Session event is missing aggregate sequence")
-  const seq = event.seq
   return Effect.gen(function* () {
-    const latestPriorEnded = yield* db
-      .select({ seq: EventTable.seq })
-      .from(EventTable)
-      .where(
-        and(
-          eq(EventTable.aggregate_id, event.data.sessionID),
-          eq(EventTable.type, compactionEndedType),
-          lt(EventTable.seq, seq),
-        ),
-      )
-      .orderBy(desc(EventTable.seq))
-      .limit(1)
-      .get()
-      .pipe(Effect.orDie)
-    const startedRow = yield* db
-      .select({ seq: EventTable.seq, data: EventTable.data })
-      .from(EventTable)
-      .where(
-        and(
-          eq(EventTable.aggregate_id, event.data.sessionID),
-          eq(EventTable.type, compactionStartedType),
-          lt(EventTable.seq, seq),
-          latestPriorEnded ? gt(EventTable.seq, latestPriorEnded.seq) : undefined,
-        ),
-      )
-      .orderBy(desc(EventTable.seq))
-      .limit(1)
-      .get()
-      .pipe(Effect.orDie)
-    if (!startedRow) return
+    const anchor = yield* SessionCompactionAnchor.findLatestPendingStarted({
+      db,
+      sessionID: event.data.sessionID,
+      beforeSeq: event.seq,
+    })
+    if (!anchor) return
 
-    const started = decodeCompactionStarted(startedRow.data)
     const compaction = new SessionMessage.Compaction({
-      id: started.messageID,
+      id: anchor.id,
       type: "compaction",
-      reason: started.reason,
+      reason: anchor.reason,
       summary: event.data.text,
       include: event.data.include,
-      time: { created: started.timestamp },
+      time: { created: anchor.time },
     })
-    yield* upsertCompletedCompaction(db, event, compaction, startedRow.seq)
+    yield* upsertCompletedCompaction(db, event, compaction, anchor.seq)
   })
 }
 

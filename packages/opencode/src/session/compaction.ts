@@ -1,9 +1,12 @@
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
+import { Database } from "@opencode-ai/core/database/database"
 import { Session } from "./session"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Provider } from "@/provider/provider"
 import { MessageV2 } from "./message-v2"
+import { MessageV2Compaction } from "./message-v2-compaction"
+import { MessageV2Model } from "./message-v2-model"
 import { Token } from "@/util/token"
 import { Log } from "@opencode-ai/core/util/log"
 import { SessionProcessor } from "./processor"
@@ -21,6 +24,8 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
+import { SessionCompactionAnchor } from "@opencode-ai/core/session/compaction-anchor"
+import { SessionV2 } from "@opencode-ai/core/session"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -213,7 +218,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Se
 
 export const use = serviceUse(Service)
 
-export const layer = Layer.effect(
+const baseLayer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
@@ -224,6 +229,8 @@ export const layer = Layer.effect(
     const provider = yield* Provider.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const database = yield* Database.Service
+    const sessions = yield* SessionV2.Service
 
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: SessionV1.Assistant["tokens"]
@@ -294,6 +301,37 @@ export const layer = Layer.effect(
         head: input.messages.slice(0, keep.start),
         tail_start_id: keep.id,
       }
+    })
+
+    const canonicalInclude = Effect.fn("SessionCompaction.canonicalInclude")(function* (input: {
+      sessionID: SessionID
+      cfg: ConfigV1.Info
+      model: Provider.Model
+    }) {
+      const anchor = yield* SessionCompactionAnchor.findLatestPendingStarted({
+        db: database.db,
+        sessionID: input.sessionID,
+      })
+      if (!anchor) return undefined
+
+      const messages = yield* sessions.messages({ sessionID: input.sessionID, order: "asc" }).pipe(Effect.orDie)
+      const selection = yield* Effect.promise(() =>
+        MessageV2Compaction.select({
+          messages,
+          anchor: { id: anchor.id, time: anchor.time },
+          tailTurns: input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS,
+          preserveRecentTokens: preserveRecentBudget({ cfg: input.cfg, model: input.model }),
+          estimate: async (candidate) => {
+            const modelMessages = await MessageV2Model.toModelMessages(candidate.slice(), {
+              stripMedia: true,
+              toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+            })
+            return Token.estimate(JSON.stringify(modelMessages))
+          },
+        }),
+      )
+      if (selection.type !== "selected") return undefined
+      return selection.include
     })
 
     // goes backwards through parts until there are PRUNE_PROTECT tokens worth of tool
@@ -397,6 +435,7 @@ export const layer = Layer.effect(
         cfg,
         model,
       })
+      const canonicalEndedInclude = yield* canonicalInclude({ sessionID: input.sessionID, cfg, model })
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
         "experimental.session.compacting",
@@ -575,7 +614,7 @@ export const layer = Layer.effect(
           sessionID: input.sessionID,
           timestamp: DateTime.makeUnsafe(Date.now()),
           text: summary ?? "",
-          include: selected.tail_start_id,
+          include: canonicalEndedInclude,
         })
         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
       }
@@ -589,13 +628,14 @@ export const layer = Layer.effect(
       auto: boolean
       overflow?: boolean
     }) {
+      const now = Date.now()
       const msg = yield* session.updateMessage({
         id: MessageID.ascending(),
         role: "user",
         model: input.model,
         sessionID: input.sessionID,
         agent: input.agent,
-        time: { created: Date.now() },
+        time: { created: now },
       })
       yield* session.updatePart({
         id: PartID.ascending(),
@@ -608,7 +648,7 @@ export const layer = Layer.effect(
       yield* events.publish(SessionEvent.Compaction.Started, {
         sessionID: input.sessionID,
         messageID: SessionMessage.ID.create(),
-        timestamp: DateTime.makeUnsafe(Date.now()),
+        timestamp: DateTime.makeUnsafe(now),
         reason: input.auto ? "auto" : "manual",
       })
     })
@@ -622,6 +662,8 @@ export const layer = Layer.effect(
   }),
 )
 
+export const layer = baseLayer.pipe(Layer.provide(SessionV2.defaultLayer))
+
 export const defaultLayer = Layer.suspend(() =>
   layer.pipe(
     Layer.provide(Provider.defaultLayer),
@@ -632,6 +674,7 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Config.defaultLayer),
     Layer.provide(RuntimeFlags.defaultLayer),
     Layer.provide(EventV2Bridge.defaultLayer),
+    Layer.provide(Database.defaultLayer),
   ),
 )
 
