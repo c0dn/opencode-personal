@@ -10,6 +10,7 @@ import { SessionSchema } from "./schema"
 import { Location } from "../location"
 import { RelativePath } from "../schema"
 import { SessionMessageID } from "./message-id"
+import { TaskToolMetadata } from "./task-tool-metadata"
 
 export { FileAttachment }
 
@@ -407,6 +408,18 @@ export namespace Tool {
   })
   export type Called = typeof Called.Type
 
+  export const MetadataUpdated = EventV2.define({
+    type: "session.next.tool.metadata.updated",
+    ...options,
+    schema: {
+      ...Base,
+      assistantMessageID: SessionMessageID.ID.pipe(Schema.optional),
+      callID: Schema.String,
+      task: TaskToolMetadata.Metadata,
+    },
+  })
+  export type MetadataUpdated = typeof MetadataUpdated.Type
+
   /**
    * Replayable bounded running-tool state. Tools should checkpoint semantic
    * transitions or at a bounded cadence, not persist every stdout/stderr chunk.
@@ -529,6 +542,7 @@ const DurableDefinitions = [
   Tool.Input.Started,
   Tool.Input.Ended,
   Tool.Called,
+  Tool.MetadataUpdated,
   Tool.Progress,
   Tool.Success,
   Tool.Failed,

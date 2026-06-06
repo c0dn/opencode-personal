@@ -42,6 +42,7 @@ export type Event =
   | EventSessionNextToolInputDelta
   | EventSessionNextToolInputEnded
   | EventSessionNextToolCalled
+  | EventSessionNextToolMetadataUpdated
   | EventSessionNextToolProgress
   | EventSessionNextToolSuccess
   | EventSessionNextToolFailed
@@ -1135,6 +1136,17 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.tool.metadata.updated"
+        properties: {
+          timestamp: number
+          sessionID: string
+          assistantMessageID?: string
+          callID: string
+          task: SessionTaskToolMetadata
+        }
+      }
+    | {
+        id: string
         type: "session.next.tool.progress"
         properties: {
           timestamp: number
@@ -1706,6 +1718,7 @@ export type GlobalEvent = {
     | SyncEventSessionNextToolInputStarted
     | SyncEventSessionNextToolInputEnded
     | SyncEventSessionNextToolCalled
+    | SyncEventSessionNextToolMetadataUpdated
     | SyncEventSessionNextToolProgress
     | SyncEventSessionNextToolSuccess
     | SyncEventSessionNextToolFailed
@@ -3205,6 +3218,11 @@ export type SessionErrorUnknown = {
   message: string
 }
 
+export type SessionTaskToolMetadata = {
+  sessionID: string
+  toolCalls?: number
+}
+
 export type ToolTextContent = {
   type: "text"
   text: string
@@ -3911,6 +3929,24 @@ export type SyncEventSessionNextToolCalled = {
           }
         }
       }
+    }
+  }
+}
+
+export type SyncEventSessionNextToolMetadataUpdated = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.tool.metadata.updated.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      assistantMessageID?: string
+      callID: string
+      task: SessionTaskToolMetadata
     }
   }
 }
@@ -5022,6 +5058,18 @@ export type EventSessionNextToolCalled = {
         }
       }
     }
+  }
+}
+
+export type EventSessionNextToolMetadataUpdated = {
+  id: string
+  type: "session.next.tool.metadata.updated"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID?: string
+    callID: string
+    task: SessionTaskToolMetadata
   }
 }
 

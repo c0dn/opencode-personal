@@ -34,14 +34,53 @@ const assistantRow = (
   id: SessionMessage.ID,
   seq: number,
   time: { created: DateTime.Utc; completed?: DateTime.Utc } = { created },
+  content: SessionMessage.AssistantContent[] = [],
 ) => {
   const {
     id: _,
     type,
     ...data
-  } = encodeMessage(new SessionMessage.Assistant({ id, type: "assistant", agent: "build", model, content: [], time }))
+  } = encodeMessage(new SessionMessage.Assistant({ id, type: "assistant", agent: "build", model, content, time }))
   return { id, session_id: sessionID, type, seq, time_created: DateTime.toEpochMillis(time.created), data }
 }
+
+const runningTool = (id: string, name = "task", structured: Record<string, unknown> = {}) =>
+  new SessionMessage.AssistantTool({
+    type: "tool",
+    id,
+    name,
+    time: { created },
+    state: new SessionMessage.ToolStateRunning({ status: "running", input: {}, structured, content: [] }),
+  })
+
+const completedTool = (id: string, name = "task", structured: Record<string, unknown> = {}) =>
+  new SessionMessage.AssistantTool({
+    type: "tool",
+    id,
+    name,
+    time: { created, completed: DateTime.makeUnsafe(1) },
+    state: new SessionMessage.ToolStateCompleted({
+      status: "completed",
+      input: {},
+      structured,
+      content: [],
+    }),
+  })
+
+const errorTool = (id: string, name = "task", structured: Record<string, unknown> = {}) =>
+  new SessionMessage.AssistantTool({
+    type: "tool",
+    id,
+    name,
+    time: { created, completed: DateTime.makeUnsafe(1) },
+    state: new SessionMessage.ToolStateError({
+      status: "error",
+      input: {},
+      structured,
+      content: [],
+      error: { type: "unknown", message: "failed" },
+    }),
+  })
 
 const setupSession = Effect.gen(function* () {
   const { db } = yield* Database.Service
@@ -808,6 +847,233 @@ describe("SessionProjector", () => {
       expect(
         yield* SessionMessageUpdater.memory({ messages: [stale, completed] }).getCurrentAssistant(),
       ).toBeUndefined()
+    }),
+  )
+
+  it.effect("projects task tool metadata onto a running task tool without replacing structured output", () =>
+    Effect.gen(function* () {
+      yield* setupSession
+      const events = yield* EventV2.Service
+      const assistantMessageID = SessionMessage.ID.make("msg_task_metadata_running")
+
+      yield* events.publish(SessionEvent.Step.Started, {
+        sessionID,
+        assistantMessageID,
+        timestamp: created,
+        agent: "build",
+        model,
+      })
+      yield* events.publish(SessionEvent.Tool.Input.Started, {
+        sessionID,
+        assistantMessageID,
+        timestamp: created,
+        callID: "call_task",
+        name: "task",
+      })
+      yield* events.publish(SessionEvent.Tool.Called, {
+        sessionID,
+        assistantMessageID,
+        timestamp: created,
+        callID: "call_task",
+        tool: "task",
+        input: {},
+        provider: { executed: false },
+      })
+      yield* events.publish(SessionEvent.Tool.Progress, {
+        sessionID,
+        assistantMessageID,
+        timestamp: created,
+        callID: "call_task",
+        structured: { keep: "value" },
+        content: [],
+      })
+      yield* events.publish(SessionEvent.Tool.MetadataUpdated, {
+        sessionID,
+        assistantMessageID,
+        timestamp: created,
+        callID: "call_task",
+        task: { sessionID: SessionV2.ID.make("ses_child_running"), toolCalls: 2 },
+      })
+
+      const assistant = (yield* loadProjectedMessages).find((item) => item.message.id === assistantMessageID)?.message
+      expect(assistant?.type).toBe("assistant")
+      if (assistant?.type !== "assistant") return
+      const task = assistant.content.find((item) => item.type === "tool" && item.id === "call_task")
+      expect(task?.type).toBe("tool")
+      if (task?.type !== "tool" || task.state.status !== "running") return
+      expect(task.state.status).toBe("running")
+      expect(task.state.structured).toEqual({ keep: "value", task: { sessionID: "ses_child_running", toolCalls: 2 } })
+    }),
+  )
+
+  it.effect("preserves task tool metadata when a task tool succeeds after metadata projection", () =>
+    Effect.gen(function* () {
+      yield* setupSession
+      const events = yield* EventV2.Service
+      const assistantMessageID = SessionMessage.ID.make("msg_task_metadata_success")
+
+      yield* events.publish(SessionEvent.Step.Started, {
+        sessionID,
+        assistantMessageID,
+        timestamp: created,
+        agent: "build",
+        model,
+      })
+      yield* events.publish(SessionEvent.Tool.Input.Started, {
+        sessionID,
+        assistantMessageID,
+        timestamp: created,
+        callID: "call_task_success",
+        name: "task",
+      })
+      yield* events.publish(SessionEvent.Tool.Called, {
+        sessionID,
+        assistantMessageID,
+        timestamp: created,
+        callID: "call_task_success",
+        tool: "task",
+        input: {},
+        provider: { executed: false },
+      })
+      yield* events.publish(SessionEvent.Tool.MetadataUpdated, {
+        sessionID,
+        assistantMessageID,
+        timestamp: created,
+        callID: "call_task_success",
+        task: { sessionID: SessionV2.ID.make("ses_child_success") },
+      })
+      yield* events.publish(SessionEvent.Tool.Success, {
+        sessionID,
+        assistantMessageID,
+        timestamp: DateTime.makeUnsafe(1),
+        callID: "call_task_success",
+        structured: { result: true },
+        content: [],
+        provider: { executed: false },
+      })
+
+      const assistant = (yield* loadProjectedMessages).find((item) => item.message.id === assistantMessageID)?.message
+      expect(assistant?.type).toBe("assistant")
+      if (assistant?.type !== "assistant") return
+      const task = assistant.content.find((item) => item.type === "tool" && item.id === "call_task_success")
+      expect(task?.type).toBe("tool")
+      if (task?.type !== "tool" || task.state.status !== "completed") return
+      expect(task.state.status).toBe("completed")
+      expect(task.state.structured).toEqual({ result: true, task: { sessionID: "ses_child_success" } })
+    }),
+  )
+
+  it.effect("projects explicit task metadata onto completed and error task tools", () =>
+    Effect.gen(function* () {
+      yield* setupSession
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      const assistantMessageID = SessionMessage.ID.make("msg_task_metadata_terminal")
+      yield* db
+        .insert(SessionMessageTable)
+        .values(
+          assistantRow(assistantMessageID, 10, { created }, [
+            completedTool("call_completed", "task", { completed: true }),
+            errorTool("call_error", "task", { failed: true }),
+          ]),
+        )
+        .run()
+        .pipe(Effect.orDie)
+
+      yield* events.publish(SessionEvent.Tool.MetadataUpdated, {
+        sessionID,
+        assistantMessageID,
+        timestamp: created,
+        callID: "call_completed",
+        task: { sessionID: SessionV2.ID.make("ses_child_completed") },
+      })
+      yield* events.publish(SessionEvent.Tool.MetadataUpdated, {
+        sessionID,
+        assistantMessageID,
+        timestamp: created,
+        callID: "call_error",
+        task: { sessionID: SessionV2.ID.make("ses_child_error"), toolCalls: 1 },
+      })
+
+      const assistant = (yield* loadProjectedMessages).find((item) => item.message.id === assistantMessageID)?.message
+      expect(assistant?.type).toBe("assistant")
+      if (assistant?.type !== "assistant") return
+      const completed = assistant.content.find((item) => item.type === "tool" && item.id === "call_completed")
+      const error = assistant.content.find((item) => item.type === "tool" && item.id === "call_error")
+      expect(completed?.type).toBe("tool")
+      expect(error?.type).toBe("tool")
+      if (completed?.type !== "tool" || completed.state.status !== "completed") return
+      if (error?.type !== "tool" || error.state.status !== "error") return
+      expect(completed.state.structured).toEqual({ completed: true, task: { sessionID: "ses_child_completed" } })
+      expect(error.state.structured).toEqual({ failed: true, task: { sessionID: "ses_child_error", toolCalls: 1 } })
+    }),
+  )
+
+  it.effect("treats fallback task metadata with duplicate active task call IDs as a no-op", () =>
+    Effect.gen(function* () {
+      yield* setupSession
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      const assistantMessageID = SessionMessage.ID.make("msg_task_metadata_duplicate")
+      yield* db
+        .insert(SessionMessageTable)
+        .values(
+          assistantRow(assistantMessageID, 10, { created }, [
+            runningTool("call_duplicate", "task", { first: true }),
+            runningTool("call_duplicate", "task", { second: true }),
+          ]),
+        )
+        .run()
+        .pipe(Effect.orDie)
+
+      yield* events.publish(SessionEvent.Tool.MetadataUpdated, {
+        sessionID,
+        timestamp: created,
+        callID: "call_duplicate",
+        task: { sessionID: SessionV2.ID.make("ses_child_duplicate") },
+      })
+
+      const assistant = (yield* loadProjectedMessages).find((item) => item.message.id === assistantMessageID)?.message
+      expect(assistant?.type).toBe("assistant")
+      if (assistant?.type !== "assistant") return
+      expect(
+        assistant.content.map((item) =>
+          item.type === "tool" && item.state.status === "running" ? item.state.structured : undefined,
+        ),
+      ).toEqual([
+        { first: true },
+        { second: true },
+      ])
+    }),
+  )
+
+  it.effect("does not project task metadata onto a same-call non-task tool", () =>
+    Effect.gen(function* () {
+      yield* setupSession
+      const { db } = yield* Database.Service
+      const events = yield* EventV2.Service
+      const assistantMessageID = SessionMessage.ID.make("msg_task_metadata_non_task")
+      yield* db
+        .insert(SessionMessageTable)
+        .values(assistantRow(assistantMessageID, 10, { created }, [runningTool("call_same", "bash", { output: true })]))
+        .run()
+        .pipe(Effect.orDie)
+
+      yield* events.publish(SessionEvent.Tool.MetadataUpdated, {
+        sessionID,
+        assistantMessageID,
+        timestamp: created,
+        callID: "call_same",
+        task: { sessionID: SessionV2.ID.make("ses_child_non_task") },
+      })
+
+      const assistant = (yield* loadProjectedMessages).find((item) => item.message.id === assistantMessageID)?.message
+      expect(assistant?.type).toBe("assistant")
+      if (assistant?.type !== "assistant") return
+      const tool = assistant.content.find((item) => item.type === "tool" && item.id === "call_same")
+      expect(tool?.type).toBe("tool")
+      if (tool?.type !== "tool" || tool.state.status !== "running") return
+      expect(tool.state.structured).toEqual({ output: true })
     }),
   )
 

@@ -971,6 +971,117 @@ it.live("session.processor effect tests sanitize task tool success structured me
   ),
 )
 
+it.live("session.processor effect tests publish sanitized task tool metadata updates", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const database = yield* Database.Service
+        const events = yield* EventV2Bridge.Service
+        const { processors, session, provider } = yield* boot()
+
+        const unblock = defer<void>()
+        yield* llm.tool("task", { prompt: "check child" })
+
+        const chat = yield* session.create({})
+        const child = yield* session.create({})
+        const parent = yield* user(chat.id, "task metadata")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+        const metadataUpdates: Array<typeof SessionEvent.Tool.MetadataUpdated.Type> = []
+        const off = yield* events.listen((event) => {
+          if (event.type === SessionEvent.Tool.MetadataUpdated.type)
+            metadataUpdates.push(event as typeof SessionEvent.Tool.MetadataUpdated.Type)
+          return Effect.void
+        })
+
+        const run = yield* handle
+          .process({
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user",
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            } satisfies SessionV1.User,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "task metadata" }],
+            tools: {
+              task: tool({
+                description: "Run a child task",
+                inputSchema: z.object({ prompt: z.string() }),
+                execute: async () => {
+                  await unblock.promise
+                  return { title: "Task", output: "done", metadata: {} }
+                },
+              }),
+            },
+          })
+          .pipe(Effect.forkChild)
+
+        yield* llm.wait(1)
+        yield* waitFor(
+          MessageV2.parts(msg.id).pipe(
+            Effect.map((parts) =>
+              parts.find(
+                (part): part is SessionV1.ToolPart => part.type === "tool" && part.callID === "call_1" && part.state.status === "running",
+              ),
+            ),
+            Effect.provideService(Database.Service, database),
+          ),
+          "timed out waiting for running task tool part",
+        )
+        yield* handle.updateToolCall("call_1", (part) => {
+          if (part.state.status !== "running") return part
+          return {
+            ...part,
+            state: {
+              ...part.state,
+              metadata: {
+                sessionId: child.id,
+                parentSessionId: chat.id,
+                model: "test/test-model",
+                background: true,
+                jobId: "job_123",
+                sourceMessageId: "msg_legacy",
+                sourcePartId: "prt_legacy",
+                toolCalls: 2,
+                arbitrary: "drop me",
+              },
+            },
+          }
+        })
+        yield* off
+        unblock.resolve()
+        yield* Fiber.await(run)
+
+        expect(metadataUpdates).toHaveLength(1)
+        expect(metadataUpdates[0]?.data).toMatchObject({
+          sessionID: chat.id,
+          callID: "call_1",
+          task: { sessionID: child.id, toolCalls: 2 },
+        })
+        const encoded = JSON.stringify(metadataUpdates[0]?.data)
+        const taskEncoded = JSON.stringify(metadataUpdates[0]?.data.task)
+        expect(encoded).not.toContain("parentSessionId")
+        expect(encoded).not.toContain("job_123")
+        expect(encoded).not.toContain("test-model")
+        expect(taskEncoded).not.toContain("msg_")
+        expect(taskEncoded).not.toContain("prt_")
+        expect(encoded).not.toContain("arbitrary")
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
 it.live("session.processor effect tests mark pending tools as aborted on cleanup", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>

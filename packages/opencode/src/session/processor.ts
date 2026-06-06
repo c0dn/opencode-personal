@@ -41,6 +41,12 @@ function toolSuccessStructured(toolName: string, metadata: Record<string, unknow
   return TaskToolMetadata.mergeIntoStructured({}, metadata)
 }
 
+function taskToolMetadata(part: SessionV1.ToolPart) {
+  if (part.tool !== "task") return undefined
+  const stateMetadata = "metadata" in part.state ? part.state.metadata : undefined
+  return TaskToolMetadata.sanitize(stateMetadata ?? part.metadata)
+}
+
 export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
@@ -240,6 +246,16 @@ export const layer = Layer.effect(
           partID: part.id,
           messageID: part.messageID,
           sessionID: part.sessionID,
+        }
+        const task = taskToolMetadata(part)
+        if (task && match.call.assistantMessageID) {
+          yield* events.publish(SessionEvent.Tool.MetadataUpdated, {
+            sessionID: ctx.sessionID,
+            assistantMessageID: match.call.assistantMessageID,
+            callID: toolCallID,
+            task,
+            timestamp: DateTime.makeUnsafe(Date.now()),
+          })
         }
         return part
       })
