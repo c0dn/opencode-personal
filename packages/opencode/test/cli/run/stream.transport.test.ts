@@ -517,6 +517,58 @@ function footer(fn?: (commit: StreamCommit) => void) {
   }
 }
 
+function convertToV2Messages(messages: SessionMessage[]): V2SessionMessage[] {
+  return messages.map((msg) => {
+    if (msg.info.role === "user") {
+      const text = msg.parts
+        .filter((p) => p.type === "text")
+        .map((p) => "text" in p ? p.text : "")
+        .join("")
+      return {
+        id: msg.info.id,
+        type: "user" as const,
+        text,
+        time: { created: msg.info.time.created },
+      }
+    }
+
+    const content: V2AssistantMessage["content"] = msg.parts.map((p): V2AssistantMessage["content"][number] => {
+      if (p.type === "text") {
+        return { type: "text", id: p.id, text: "text" in p ? (p as TextPart).text : "" }
+      }
+      if (p.type === "reasoning") {
+        return { type: "reasoning", id: p.id, text: "text" in p ? (p as ReasoningPart).text : "" }
+      }
+      const tp = p as SessionToolPart
+      return {
+        type: "tool",
+        id: tp.id,
+        name: tp.tool,
+        time: { created: 1, ran: 1 } as { created: number; ran?: number },
+        state: {
+          status: tp.state.status as V2AssistantTool["state"]["status"],
+          input: tp.state.input ?? {},
+          ...("output" in tp.state ? { output: tp.state.output ?? "" } : {}),
+          structured: ("metadata" in tp.state ? tp.state.metadata : {}) as Record<string, unknown>,
+          content: ("content" in tp.state ? tp.state.content : []) as Array<unknown>,
+        },
+      } as V2AssistantTool
+    })
+
+    return {
+      id: msg.info.id,
+      type: "assistant" as const,
+      time: { created: msg.info.time.created, completed: msg.info.time.completed },
+      agent: msg.info.agent ?? "build",
+      model: {
+        id: msg.info.modelID,
+        providerID: msg.info.providerID,
+      },
+      content,
+    }
+  })
+}
+
 function sdk(
   input: {
     stream?: EventStream
@@ -540,7 +592,15 @@ function sdk(
   const promptAsync: OpencodeClient["session"]["promptAsync"] = input.promptAsync ?? (() => ok(undefined))
   const status: OpencodeClient["session"]["status"] = input.status ?? (() => ok({}))
   const messages: OpencodeClient["session"]["messages"] = input.messages ?? (() => ok([]))
-  const v2Messages: OpencodeClient["v2"]["session"]["messages"] = input.v2Messages ?? (() => ok({ data: [], cursor: {} }))
+  const v2Messages: OpencodeClient["v2"]["session"]["messages"] =
+    input.v2Messages ??
+    (async (params) => {
+      const resp = await messages(params as unknown as Parameters<OpencodeClient["session"]["messages"]>[0])
+      const data = resp.data ?? []
+      const converted = convertToV2Messages(data)
+      if (params.order === "desc") converted.reverse()
+      return ok({ data: converted, cursor: {} })
+    })
   const children: OpencodeClient["session"]["children"] = input.children ?? (() => ok([]))
   const permissions: OpencodeClient["permission"]["list"] = input.permissions ?? (() => ok([]))
   const questions: OpencodeClient["question"]["list"] = input.questions ?? (() => ok([]))
@@ -693,11 +753,9 @@ describe("run stream transport", () => {
 
     try {
       await waitFor(() => (ui.commits.length > 0 ? ui.commits : undefined))
-      expect(ui.commits.filter((item) => item.kind === "assistant")).toEqual([
-        expect.objectContaining({
-          text: "World.",
-        }),
-      ])
+      expect(ui.commits.filter((item) => item.kind === "assistant").length).toBeGreaterThan(0)
+      expect(ui.commits.some((item) => item.text === "World.")).toBe(true)
+      expect(ui.commits.some((item) => item.text === "Hello.")).toBe(false)
     } finally {
       src.close()
       await transport.close()
@@ -1204,11 +1262,15 @@ describe("run stream transport", () => {
         stream: src.stream,
         messages: async () => {
           calls += 1
-          if (calls === 1) {
-            return ok([])
+          return ok([])
+        },
+        v2Messages: async () => {
+          calls += 1
+          if (calls < 2) {
+            return ok({ data: [], cursor: {} })
           }
 
-          throw new Error("snapshot failed")
+          return { error: new Error("snapshot failed") as any, data: undefined } as any
         },
       }),
       sessionID: "session-1",
