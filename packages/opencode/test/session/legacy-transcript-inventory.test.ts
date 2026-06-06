@@ -36,7 +36,6 @@ const categories = {
       /(?:^|[^\w.'"`])(?:session|sessions|sessionSvc|svc)\.(?:messages|findMessage)\b|\bSession\.(?:messages|findMessage)\b/m,
     allowed: [
       "packages/opencode/src/server/routes/instance/httpapi/handlers/session.ts",
-      "packages/opencode/src/cli/cmd/export.ts",
       "packages/opencode/src/share/share-next.ts",
       "packages/opencode/src/session/compaction.ts",
       "packages/opencode/src/session/prompt.ts",

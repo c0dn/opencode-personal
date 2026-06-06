@@ -12,6 +12,7 @@ export const Payload = Schema.Struct({
 export type Payload = typeof Payload.Type
 export type EncodedPayload = typeof Payload.Encoded
 
+export const decode = Schema.decodeUnknownSync(Payload)
 export const encode = Schema.encodeUnknownSync(Payload)
 
 export const load = Effect.fn("TranscriptV2Public.load")(function* (sessionID: SessionID) {
