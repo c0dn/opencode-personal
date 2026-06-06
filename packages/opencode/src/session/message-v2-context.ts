@@ -65,6 +65,33 @@ export function latest(messages: readonly SessionMessage.Message[]): Latest {
   }
 }
 
+export type PromptContext = LatestWithTasks & {
+  activeAgent?: string
+  activeModel?: {
+    id: string
+    providerID: string
+    variant?: string
+  }
+}
+
+export function promptContext(messages: readonly SessionMessage.Message[]): PromptContext {
+  const state = latestWithTasks(messages)
+  const ordered = chronological(messages)
+
+  const latestAgent = ordered.findLast(
+    (message): message is SessionMessage.AgentSwitched => message.type === "agent-switched",
+  )
+  const latestModel = ordered.findLast(
+    (message): message is SessionMessage.ModelSwitched => message.type === "model-switched",
+  )
+
+  return {
+    ...state,
+    ...(latestAgent ? { activeAgent: latestAgent.agent } : {}),
+    ...(latestModel ? { activeModel: { id: latestModel.model.id, providerID: latestModel.model.providerID, variant: latestModel.model.variant } } : {}),
+  }
+}
+
 export function latestWithTasks(messages: readonly SessionMessage.Message[]): LatestWithTasks {
   const ordered = chronological(messages)
   const state = latest(ordered)
