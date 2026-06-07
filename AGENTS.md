@@ -36,6 +36,7 @@ bun run dev:desktop
 - Keep personal patches small and isolated so upstream syncs stay easy.
 - Do not rename the binary. Personal releases still install and run as `opencode`.
 - Release-channel files are fork-specific: installer/updater use `c0dn/opencode-personal`, package-manager upgrades are blocked, and personal release builds are Linux x64/arm64 only.
+- **NEVER create PRs against upstream (`anomalyco/opencode`).** All PRs must target `c0dn/opencode-personal:dev`. Always use `--repo c0dn/opencode-personal` with `gh pr create`.
 
 ## Style Guide
 
