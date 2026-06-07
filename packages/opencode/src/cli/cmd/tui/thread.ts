@@ -110,6 +110,11 @@ export const TuiThreadCommand = cmd({
       .option("agent", {
         type: "string",
         describe: "agent to use",
+      })
+      .option("route", {
+        type: "string",
+        hidden: true,
+        describe: "initial route for the TUI (JSON)",
       }),
   handler: async (args) => {
     const { TuiConfig } = await import("./config/tui")
@@ -242,14 +247,15 @@ export const TuiThreadCommand = cmd({
           directory: cwd,
           fetch: transport.fetch,
           events: transport.events,
-          args: {
-            continue: args.continue,
-            sessionID: args.session,
-            agent: args.agent,
-            model: args.model,
-            prompt,
-            fork: args.fork,
-          },
+            args: {
+              continue: args.continue,
+              sessionID: args.session,
+              agent: args.agent,
+              model: args.model,
+              prompt,
+              fork: args.fork,
+              route: args.route as string | undefined,
+            },
         })
         await handle.done
       } finally {

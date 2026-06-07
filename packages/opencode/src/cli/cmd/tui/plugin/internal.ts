@@ -9,6 +9,7 @@ import SidebarFooter from "../feature-plugins/sidebar/footer"
 import PluginManager from "../feature-plugins/system/plugins"
 import Notifications from "../feature-plugins/system/notifications"
 import SessionV2Debug from "../feature-plugins/system/session-v2"
+import StatsPlugin from "../stats/plugin"
 import WhichKey from "../feature-plugins/system/which-key"
 import DiffViewer from "../feature-plugins/system/diff-viewer"
 import SessionSwitcher from "../feature-plugins/session"
@@ -37,6 +38,7 @@ export function internalTuiPlugins(_flags: RuntimeFlags.Info): InternalTuiPlugin
     WhichKey,
     DiffViewer,
     SessionV2Debug,
+    StatsPlugin,
     ...(Flag.OPENCODE_EXPERIMENTAL_SESSION_SWITCHER ? [SessionSwitcher] : []),
   ]
 }
