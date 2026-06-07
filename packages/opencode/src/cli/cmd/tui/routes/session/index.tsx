@@ -7,6 +7,7 @@ import {
   For,
   Match,
   on,
+  onCleanup,
   onMount,
   Show,
   Switch,
@@ -251,6 +252,17 @@ export function Session() {
   const toast = useToast()
   const sdk = useSDK()
   const editor = useEditorContext()
+
+  // Subscribe WS to active session for event pre-fetch filtering
+  createEffect(() => {
+    const id = route.sessionID
+    const ws = sdk.ws
+    if (!ws) return
+    ws.subscribe([id]).catch(() => {})
+    onCleanup(() => {
+      ws.unsubscribe([id]).catch(() => {})
+    })
+  })
 
   createEffect(() => {
     const sessionID = route.sessionID

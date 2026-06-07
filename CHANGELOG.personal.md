@@ -11,7 +11,86 @@ Versioning note: automated upstream mirrors are published as
 
 ## Unreleased
 
-- No unreleased personal changes.
+### Added
+- **Unified WebSocket transport** (`GET /ws`): Replaces the multi-transport
+  architecture (HTTP REST + SSE + separate PTY WS) with a single multiplexed
+  WebSocket using MessagePack + Brotli binary frames with selective raw bypass
+  for sub-64-byte payloads.
+- **100+ WS message types** covering all existing REST endpoints:
+  session CRUD, prompt/command/shell, message deletion, MCP status, config,
+  providers, project listing.
+- **Push-based session state**: `push.snapshot` (paginated 10/page),
+  `push.batch` (16ms event batching), `push.meta` (surgical session metadata
+  patches), `push.static` (config/MCP/providers once on connect).
+- **Per-connection event filtering**: `session.subscribe`/`unsubscribe` for
+  session-level event culling. Empty subscribed set = all events pass.
+- **Request idempotency**: 5-minute server-side idempotency cache keyed by
+  `idempotencyID`, with probabilistic cleanup at 1000 entries. Safe retry for
+  mutating requests.
+- **Reconnect recovery**: Full session snapshot on reconnect, version-aware
+  static data (config/MCP/providers) via DJB2 hash comparison to skip
+  redundant pushes, automatic re-subscription to tracked sessions, and replay
+  of in-flight request queue after reconnect.
+- **Bounded backpressure**: 256-frame outbound queue with 4 MiB frame limit.
+  Connection is closed when the queue is full.
+- **WS heartbeat**: 15-second ping interval with 45-second timeout.
+- **SDK client** (`packages/sdk/js/src/v2/ws/`): `WsClient` class with
+  connect/reconnect, exponential backoff (250ms base, 60s max, 10 attempts),
+  heartbeat, request multiplexing with configurable timeout, fire-and-forget
+  send, `subscribe()`/`unsubscribe()` with reconnect tracking, event/snapshot/
+  meta/static/hello/stateChange handlers.
+- **Web UI WS context** (`packages/app/src/context/server-ws.tsx`): SolidJS
+  context with 16ms event batching + coalescence by event key,
+  `push.meta` surgical session store patches, `push.static` separation for
+  config/MCP/providers, `loadMessages()` auto-subscribe, `activate()` for
+  tab-switch subscribe/unsubscribe.
+- **TUI WS integration**: Prefers WS for events with SSE fallback,
+  `createEffect` subscribes to active session on navigation.
+- **WS tests** (`packages/opencode/test/ws/`): 52 unit tests covering protocol
+  encode/decode (26), connection lifecycle (13), multiplex dispatch (13).
+
+### Changed
+- **Server**: Registered WS route at `/ws` with auth token query parameter and
+  Origin validation. Registered the unified transport as an Effect `HttpRouter`
+  layer.
+- **Event bridge**: Uses `GlobalBus.on("event")` (V1 event bus, downstream of
+  the existing EventV2→GlobalBus bridge). Events accumulate synchronously in a
+  native array with 16ms setTimeout drain, avoiding per-event Effect fiber
+  overhead.
+- **Handler runtime**: Uses a pre-built V1-only `ManagedRuntime` providing
+  `Session`, `Config`, `MCP`, `Provider`, `Project`, and all other V1 services
+  — no EventV2 dependency.
+- **Dependencies**: Added `@msgpack/msgpack@3.1.3` and `brotli-wasm@3.0.1` to
+  `packages/opencode` and `packages/sdk/js`.
+
+### Removed
+- **PTY server mode**: Deleted `groups/pty.ts`, `handlers/pty.ts`,
+  `pty-ticket.ts`, PTY auth middleware, and 4 PTY-dependent test files.
+  PTY endpoints no longer registered on the server.
+- **PTY exerciser scenarios**: Removed 9 PTY scenarios and the
+  `controlledPtyInput()` DSL helper from the HTTP API exerciser.
+- **PTY OpenAPI error test**: Removed PTY resource/ticket error documentation
+  test.
+
+### Fixed
+- **Scope lifecycle**: `Scope.close()` finalizer prevents fiber leaks on
+  disconnect; drain/heartbeat/event listener fibers all cleaned up.
+- **GlobalBus listener cleanup**: `GlobalBus.off("event", ...)` registered via
+  `Scope.addFinalizer` on scope close.
+- **Web UI unsubscribe tracking**: Fixed unsubscribe to use the tracking-aware
+  `ws.unsubscribe()` method so reconnect re-subscription does not leak
+  previously unsubscribed sessions.
+- **Double subscription bookkeeping**: Removed duplicate `subscribedSessions`
+  Set from Web UI context; all tracking consolidated in `WsClient.subscribed`.
+- **Double snapshot push**: Consolidated initial state delivery into a single
+  `sync.catchup` handler path, eliminating the double snapshot push on
+  reconnect.
+- **Static data on reconnect**: Version-aware static data push — client tracks
+  `lastStaticHash` from DJB2 hash, skips redundant `push.static` on reconnect
+  when version matches.
+- **Request retention**: In-flight requests are moved to a retry queue on
+  disconnect and replayed after successful reconnect, instead of being
+  rejected.
 
 ## v1.16.0-c0dn.1 - 2026-06-05
 

@@ -23,7 +23,7 @@ import { TestLLMServer } from "../../lib/llm-server"
 import { mkdir } from "fs/promises"
 import path from "path"
 import { array, boolean, check, isRecord, message, object, stable } from "./assertions"
-import { controlledPtyInput, http, route } from "./dsl"
+import { http, route } from "./dsl"
 import {
   cleanupExercisePaths,
   exerciseConfigDirectory,
@@ -857,55 +857,6 @@ const scenarios: Scenario[] = [
     .mutating()
     .at((ctx) => ({ path: route("/mcp/{name}/disconnect", { name: "httpapi-missing" }), headers: ctx.headers() }))
     .json(404, object, "status"),
-  http.protected.get("/pty/shells", "pty.shells").json(200, array),
-  http.protected.get("/pty", "pty.list").json(200, array),
-  http.protected
-    .post("/pty", "pty.create")
-    .mutating()
-    .at((ctx) => ({ path: "/pty", headers: ctx.headers(), body: controlledPtyInput("HTTP API PTY") }))
-    .json(
-      200,
-      (body, ctx) => {
-        object(body)
-        check(body.title === "HTTP API PTY", "PTY create should return requested title")
-        check(body.command === "/bin/sh", "PTY create should use controlled shell command")
-        check(body.cwd === ctx.directory, "PTY create should default cwd to scenario directory")
-      },
-      "status",
-    ),
-  http.protected
-    .post("/pty", "pty.create.invalid")
-    .at((ctx) => ({ path: "/pty", headers: ctx.headers(), body: { command: 1 } }))
-    .status(400),
-  http.protected
-    .post("/pty/{ptyID}/connect-token", "pty.connectToken.invalid")
-    .at((ctx) => ({
-      path: route("/pty/{ptyID}/connect-token", { ptyID: "pty_httpapi_missing" }),
-      headers: ctx.headers(),
-    }))
-    .status(403, undefined, "status"),
-  http.protected
-    .get("/pty/{ptyID}", "pty.get")
-    .at((ctx) => ({ path: route("/pty/{ptyID}", { ptyID: "pty_httpapi_missing" }), headers: ctx.headers() }))
-    .status(404),
-  http.protected
-    .put("/pty/{ptyID}", "pty.update")
-    .mutating()
-    .at((ctx) => ({
-      path: route("/pty/{ptyID}", { ptyID: "pty_httpapi_missing" }),
-      headers: ctx.headers(),
-      body: { size: { rows: 0, cols: 0 } },
-    }))
-    .status(400),
-  http.protected
-    .delete("/pty/{ptyID}", "pty.remove")
-    .mutating()
-    .at((ctx) => ({ path: route("/pty/{ptyID}", { ptyID: "pty_httpapi_missing" }), headers: ctx.headers() }))
-    .json(404, object, "status"),
-  http.protected
-    .get("/pty/{ptyID}/connect", "pty.connect")
-    .at((ctx) => ({ path: route("/pty/{ptyID}/connect", { ptyID: "pty_httpapi_missing" }), headers: ctx.headers() }))
-    .status(404, undefined, "none"),
   http.protected.get("/experimental/console", "experimental.console.get").json(),
   http.protected.get("/experimental/console/orgs", "experimental.console.listOrgs").json(),
   http.protected
