@@ -17,10 +17,6 @@ export const StatsCommand = effectCmd({
   instance: false,
   builder: (yargs) =>
     yargs
-      .option("tui", {
-        type: "boolean",
-        describe: "launch interactive TUI dashboard",
-      })
       .option("range", {
         type: "string",
         choices: ["all", "7d", "30d"],
@@ -29,11 +25,6 @@ export const StatsCommand = effectCmd({
       }),
   handler: Effect.fn("Cli.stats")(function* (args) {
     const range = (args.range as TimeRange) ?? "all"
-
-    if (!args.tui) {
-      console.log("Use --tui for interactive stats dashboard")
-      return
-    }
 
     // Compute stats data (catch DB errors)
     const data = yield* loadStats(range).pipe(
