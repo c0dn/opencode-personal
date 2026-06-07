@@ -1,6 +1,6 @@
-import type { WsMessage, WsResponse, ConnectionState, ReconnectState, WsPushEvent, WsSnapshot, SessionMeta } from "./types.js"
+import type { WsMessage, WsResponse, ConnectionState, ReconnectState, WsPushEvent, WsSnapshot, SessionMeta, WsHello, WsPushBatch, WsPushMeta, WsPushStatic } from "./types.js"
 
-export type { WsMessage, WsResponse, ConnectionState, ReconnectState, WsPushEvent, WsSnapshot, SessionMeta }
+export type { WsMessage, WsResponse, ConnectionState, ReconnectState, WsPushEvent, WsSnapshot, SessionMeta, WsHello, WsPushBatch, WsPushMeta, WsPushStatic }
 
 const HEARTBEAT_INTERVAL = 15_000
 const HEARTBEAT_TIMEOUT = 45_000
@@ -12,6 +12,7 @@ const CONNECT_TIMEOUT = 5_000
 type EventHandler = (event: WsPushEvent) => void
 type SnapshotHandler = (snapshot: WsSnapshot) => void
 type StateChangeHandler = (state: ConnectionState) => void
+type HelloHandler = (protocolVersion: number) => void
 
 /**
  * WebSocket binary protocol client.
@@ -24,7 +25,11 @@ export class WsClient {
   private eventHandlers: EventHandler[] = []
   private snapshotHandlers: SnapshotHandler[] = []
   private stateHandlers: StateChangeHandler[] = []
+  private helloHandlers: HelloHandler[] = []
+  private metaHandlers: ((meta: WsPushMeta) => void)[] = []
+  private staticHandlers: ((data: WsPushStatic) => void)[] = []
   private heartbeatTimer: ReturnType<typeof setTimeout> | undefined
+  private protocolVersion = 1
   private lastPongAt = 0
   private reconnectAttempts = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
@@ -139,6 +144,33 @@ export class WsClient {
     }
   }
 
+  /** Called on hello with the negotiated protocol version. */
+  onHello(handler: HelloHandler): () => void {
+    this.helloHandlers.push(handler)
+    return () => {
+      const idx = this.helloHandlers.indexOf(handler)
+      if (idx >= 0) this.helloHandlers.splice(idx, 1)
+    }
+  }
+
+  /** Subscribe to push.meta session metadata patches. */
+  onMeta(handler: (meta: WsPushMeta) => void): () => void {
+    this.metaHandlers.push(handler)
+    return () => {
+      const idx = this.metaHandlers.indexOf(handler)
+      if (idx >= 0) this.metaHandlers.splice(idx, 1)
+    }
+  }
+
+  /** Subscribe to push.static data (config, MCP, providers, projects). */
+  onStatic(handler: (data: WsPushStatic) => void): () => void {
+    this.staticHandlers.push(handler)
+    return () => {
+      const idx = this.staticHandlers.indexOf(handler)
+      if (idx >= 0) this.staticHandlers.splice(idx, 1)
+    }
+  }
+
   get reconnect(): { cursors: Map<string, number>; trackedSessions: Set<string> } {
     return {
       cursors: this.reconnectState.cursors,
@@ -162,9 +194,21 @@ export class WsClient {
         this.handleResponse(msg as WsResponse)
       } else if (msg.type === "push.event") {
         for (const h of this.eventHandlers) h(msg as WsPushEvent)
+      } else if (msg.type === "push.batch") {
+        const batch = msg as WsPushBatch
+        for (const event of batch.events) {
+          for (const h of this.eventHandlers) h(event)
+        }
       } else if (msg.type === "push.snapshot") {
         for (const h of this.snapshotHandlers) h(msg as unknown as WsSnapshot)
+      } else if (msg.type === "push.meta") {
+        for (const h of this.metaHandlers) h(msg as WsPushMeta)
+      } else if (msg.type === "push.static") {
+        for (const h of this.staticHandlers) h(msg as WsPushStatic)
       } else if (msg.type === "hello") {
+        const hello = msg as WsHello
+        this.protocolVersion = hello.protocolVersion ?? 1
+        for (const h of this.helloHandlers) h(this.protocolVersion)
         this.setState("connected")
         this.reconnectAttempts = 0
       } else if (msg.type === "pong") {
@@ -255,15 +299,37 @@ export class WsClient {
 
   private async encode(value: unknown): Promise<Uint8Array> {
     const { encode } = await import("@msgpack/msgpack")
-    const brotli = await this.getBrotli()
     const packed = encode(value)
-    return brotli.compress(packed, { quality: 4 })
+
+    // Tiny frames: skip Brotli (overhead > savings)
+    if (packed.length < 64) {
+      const frame = new Uint8Array(packed.length + 1)
+      frame[0] = 0x00 // raw marker
+      frame.set(packed, 1)
+      return frame
+    }
+
+    const brotli = await this.getBrotli()
+    const compressed = brotli.compress(packed, { quality: 4 })
+    const frame = new Uint8Array(compressed.length + 1)
+    frame[0] = 0x01 // Brotli marker
+    frame.set(compressed, 1)
+    return frame
   }
 
   private async decode(bytes: Uint8Array): Promise<unknown> {
     const { decode } = await import("@msgpack/msgpack")
+    const marker = bytes[0]
+
+    // Raw marker: skip decompression
+    if (marker === 0x00) {
+      return decode(bytes.slice(1))
+    }
+
+    // Brotli marker (0x01) or legacy (no marker): decompress
+    const compressed = marker === 0x01 ? bytes.slice(1) : bytes
     const brotli = await this.getBrotli()
-    const decompressed = brotli.decompress(bytes)
+    const decompressed = brotli.decompress(compressed)
     return decode(decompressed)
   }
 

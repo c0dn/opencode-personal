@@ -17,7 +17,31 @@ export interface WsResponse {
   error?: { code: string; message: string }
 }
 
-export type WsMessage = WsRequest | WsResponse | WsPushEvent
+export interface WsHello {
+  type: "hello"
+  serverVersion: string
+  protocolVersion?: number
+}
+
+export interface WsPushBatch {
+  type: "push.batch"
+  events: WsPushEvent[]
+}
+
+export interface WsPushMeta {
+  type: "push.meta"
+  sessions: Record<string, Partial<SessionMeta> & { _deleted?: true } | null>
+}
+
+export interface WsPushStatic {
+  type: "push.static"
+  config?: unknown
+  mcp?: unknown
+  providers?: unknown
+  projects?: unknown
+}
+
+export type WsMessage = WsRequest | WsResponse | WsPushEvent | WsPushBatch | WsPushMeta | WsPushStatic | WsHello
 
 export interface WsPushEvent {
   type: "push.event"

@@ -9,6 +9,9 @@ export type ProtocolError =
   | { _tag: "FrameTooLarge"; size: number; maxSize: number; message: string }
 
 const BROTLI_QUALITY = 4
+const BROTLI_THRESHOLD = 64
+const MARKER_RAW = 0x00
+const MARKER_BROTLI = 0x01
 
 let brotliInstance: {
   compress(buf: Uint8Array, opts?: { quality?: number }): Uint8Array
@@ -24,24 +27,45 @@ async function getBrotli() {
 }
 
 /**
- * Encode a JS value to a compressed binary frame ready for WebSocket transmission.
+ * Encode a JS value to a binary frame ready for WebSocket transmission.
  *
- * Pipeline: object → MessagePack encode → Brotli compress → Uint8Array
+ * Pipeline: object → MessagePack encode → (skip Brotli if < 64 bytes) → marker byte + payload
+ * Marker: 0x00 = raw MessagePack, 0x01 = Brotli-compressed
  */
 export async function encode(value: unknown): Promise<Uint8Array | ProtocolError> {
   try {
-    const brotli = await getBrotli()
     const packed = encodeMsgPack(value, { sortKeys: false })
+
+    // Tiny frames: skip Brotli (overhead > savings)
+    if (packed.length < BROTLI_THRESHOLD) {
+      if (packed.length + 1 > MAX_FRAME_SIZE) {
+        return {
+          _tag: "FrameTooLarge",
+          size: packed.length + 1,
+          maxSize: MAX_FRAME_SIZE,
+          message: `Frame size ${packed.length + 1} exceeds max ${MAX_FRAME_SIZE}`,
+        }
+      }
+      const frame = new Uint8Array(packed.length + 1)
+      frame[0] = MARKER_RAW
+      frame.set(packed, 1)
+      return frame
+    }
+
+    const brotli = await getBrotli()
     const compressed = brotli.compress(packed, { quality: BROTLI_QUALITY })
-    if (compressed.byteLength > MAX_FRAME_SIZE) {
+    if (compressed.byteLength + 1 > MAX_FRAME_SIZE) {
       return {
         _tag: "FrameTooLarge",
-        size: compressed.byteLength,
+        size: compressed.byteLength + 1,
         maxSize: MAX_FRAME_SIZE,
-        message: `Frame size ${compressed.byteLength} exceeds max ${MAX_FRAME_SIZE}`,
+        message: `Frame size ${compressed.byteLength + 1} exceeds max ${MAX_FRAME_SIZE}`,
       }
     }
-    return compressed
+    const frame = new Uint8Array(compressed.length + 1)
+    frame[0] = MARKER_BROTLI
+    frame.set(compressed, 1)
+    return frame
   } catch (cause) {
     return {
       _tag: "EncodeError",
@@ -52,13 +76,13 @@ export async function encode(value: unknown): Promise<Uint8Array | ProtocolError
 }
 
 /**
- * Decode a compressed binary frame from a WebSocket message back to a JS value.
+ * Decode a binary frame from a WebSocket message back to a JS value.
  *
- * Pipeline: Uint8Array → Brotli decompress → MessagePack decode → object
+ * Pipeline: marker byte check → (raw skip or Brotli decompress) → MessagePack decode → object
+ * Legacy frames without a 0x00/0x01 marker are treated as Brotli-compressed.
  */
 export async function decode(bytes: Uint8Array): Promise<unknown | ProtocolError> {
   try {
-    const brotli = await getBrotli()
     if (bytes.byteLength > MAX_FRAME_SIZE) {
       return {
         _tag: "FrameTooLarge",
@@ -67,7 +91,16 @@ export async function decode(bytes: Uint8Array): Promise<unknown | ProtocolError
         message: `Frame size ${bytes.byteLength} exceeds max ${MAX_FRAME_SIZE}`,
       }
     }
-    const decompressed = brotli.decompress(bytes)
+
+    const marker = bytes[0]
+    if (marker === MARKER_RAW) {
+      const payload = bytes.slice(1)
+      return decodeMsgPack(payload)
+    }
+    // MARKER_BROTLI or legacy (no marker): decompress as Brotli
+    const compressed = marker === MARKER_BROTLI ? bytes.slice(1) : bytes
+    const brotli = await getBrotli()
+    const decompressed = brotli.decompress(compressed)
     if (decompressed.byteLength > MAX_FRAME_SIZE * 4) {
       return {
         _tag: "FrameTooLarge",

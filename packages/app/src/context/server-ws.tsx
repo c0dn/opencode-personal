@@ -1,5 +1,5 @@
 import { createOpencodeWsClient, WsClient } from "@opencode-ai/sdk/v2/ws"
-import type { WsSnapshot, WsPushEvent, SessionMeta } from "@opencode-ai/sdk/v2/ws"
+import type { WsSnapshot, WsPushEvent, WsPushMeta, WsPushStatic, SessionMeta } from "@opencode-ai/sdk/v2/ws"
 import { createSimpleContext } from "@opencode-ai/ui/context"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { batch, onCleanup } from "solid-js"
@@ -50,26 +50,105 @@ export function createServerWsContext(server: ServerConnection.Any) {
 
       ws.onSnapshot((snapshot: WsSnapshot) => {
         batch(() => {
-          // Page 1 carries non-session data
+          // Page 1 replaces session list; subsequent pages append
           if (snapshot.page === 1) {
-            setStore({
-              sessions: snapshot.sessions,
-              config: snapshot.config ?? store.config,
-              mcp: snapshot.mcp ?? store.mcp,
-              providers: snapshot.providers ?? store.providers,
-              projects: snapshot.projects ?? store.projects,
-              ready: true,
-            })
+            setStore("sessions", snapshot.sessions)
           } else {
             setStore("sessions", (prev) => [...prev, ...snapshot.sessions])
           }
         })
       })
 
+      // ---- Event batching (ported from server-sdk.tsx) ----
+      const FLUSH_FRAME_MS = 16
+      let eventQueue: WsPushEvent[] = []
+      let eventTimer: ReturnType<typeof setTimeout> | undefined
+      let eventLast = 0
+
+      const eventKey = (event: WsPushEvent): string | undefined => {
+        const dir = event.directory ?? "global"
+        const props = event.payload.properties as Record<string, unknown>
+        if (event.payload.type === "session.status")
+          return `session.status:${dir}:${props.sessionID}`
+        if (event.payload.type === "lsp.updated")
+          return `lsp.updated:${dir}`
+        if (event.payload.type === "message.part.updated") {
+          const part = props.part as { messageID: string; id: string }
+          return `message.part.updated:${dir}:${part.messageID}:${part.id}`
+        }
+        return undefined
+      }
+
+      const eventFlush = () => {
+        if (eventTimer) clearTimeout(eventTimer)
+        eventTimer = undefined
+        if (eventQueue.length === 0) return
+
+        const events = eventQueue
+        eventQueue = []
+        eventLast = Date.now()
+
+        batch(() => {
+          for (const event of events) {
+            const directory = event.directory ?? "global"
+            emitter.emit(directory, event)
+          }
+        })
+      }
+
+      const eventSchedule = () => {
+        if (eventTimer) return
+        const elapsed = Date.now() - eventLast
+        eventTimer = setTimeout(eventFlush, Math.max(0, FLUSH_FRAME_MS - elapsed))
+      }
+
       ws.onEvent((event: WsPushEvent) => {
-        // Route through existing event emitter — same shape as SSE
-        const directory = event.directory ?? "global"
-        emitter.emit(directory, event)
+        // Coalesce: same-key events replace previous in queue
+        const key = eventKey(event)
+        if (key !== undefined) {
+          const idx = eventQueue.findIndex((e) => eventKey(e) === key)
+          if (idx !== -1) {
+            eventQueue[idx] = event
+            eventSchedule()
+            return
+          }
+        }
+        eventQueue.push(event)
+        eventSchedule()
+      })
+
+      ws.onMeta((meta: WsPushMeta) => {
+        batch(() => {
+          for (const [id, patch] of Object.entries(meta.sessions)) {
+            if (patch === null) continue
+            if (patch._deleted) {
+              setStore("sessions", (prev) => prev.filter((s) => s.id !== id))
+              continue
+            }
+            const idx = store.sessions.findIndex((s) => s.id === id)
+            if (idx === -1) {
+              // New session -- must have enough fields to be a valid SessionMeta
+              if (patch.id || patch.title) {
+                setStore("sessions", (prev) => [...prev, patch as unknown as SessionMeta])
+              }
+            } else {
+              // Patch existing session
+              setStore("sessions", idx, patch as never)
+            }
+          }
+        })
+      })
+
+      ws.onStatic((data: WsPushStatic) => {
+        batch(() => {
+          setStore({
+            config: data.config ?? store.config,
+            mcp: data.mcp ?? store.mcp,
+            providers: data.providers ?? store.providers,
+            projects: data.projects ?? store.projects,
+            ready: true,
+          })
+        })
       })
 
       ws.onStateChange((state) => {
