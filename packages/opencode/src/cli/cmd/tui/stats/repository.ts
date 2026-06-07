@@ -24,11 +24,18 @@ export function loadStats(range: TimeRange) {
   return Effect.gen(function* () {
     const cutoff = cutoffFor(range)
 
-    const aggregate = yield* queryOverview(cutoff)
-    const messageModels = yield* queryModelUsage(cutoff)
-    const tools = yield* queryToolUsage(cutoff)
-    const heatmap = yield* queryDailyActivity()
-    const sessions = yield* querySessionList(cutoff)
+    // Queries are independent reads — run them concurrently instead of
+    // sequentially so the dashboard does not wait for five round-trips in series.
+    const [aggregate, messageModels, tools, heatmap, sessions] = yield* Effect.all(
+      [
+        queryOverview(cutoff),
+        queryModelUsage(cutoff),
+        queryToolUsage(cutoff),
+        queryDailyActivity(),
+        querySessionList(cutoff),
+      ],
+      { concurrency: "unbounded" },
+    )
 
     return buildStatsData(aggregate, messageModels, tools, heatmap, sessions)
   })
@@ -119,6 +126,8 @@ function queryDailyActivity() {
 function querySessionList(cutoff: number) {
   return Effect.gen(function* () {
     const { db } = yield* Database.Service
+    // Message counts come from a single grouped scan joined once, instead of a
+    // correlated subquery that re-counts the message table for every session row.
     return yield* db.all<SessionListRow>(
       sql`SELECT
         s.id,
@@ -132,9 +141,14 @@ function querySessionList(cutoff: number) {
         s.tokens_cache_write,
         s.time_created,
         s.time_updated,
-        (SELECT COUNT(*) FROM message m2 WHERE m2.session_id = s.id) as message_count
+        COALESCE(mc.message_count, 0) as message_count
       FROM session s
       LEFT JOIN project p ON s.project_id = p.id
+      LEFT JOIN (
+        SELECT session_id, COUNT(*) as message_count
+        FROM message
+        GROUP BY session_id
+      ) mc ON mc.session_id = s.id
       WHERE s.parent_id IS NULL
         AND s.time_updated >= ${cutoff}
       ORDER BY s.time_updated DESC`,
