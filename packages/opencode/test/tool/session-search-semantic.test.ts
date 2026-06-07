@@ -12,6 +12,8 @@ import { sql } from "drizzle-orm"
 // Requires OPENCODE_JINA_API_KEY env var to run semantic tests
 // Run: OPENCODE_JINA_API_KEY="jina_..." bun test test/tool/session-search-semantic.test.ts
 
+const hasKey = !!process.env.OPENCODE_JINA_API_KEY
+
 const it = testEffect(Layer.mergeAll(ToolRegistry.defaultLayer, Database.defaultLayer))
 
 function mockContext(): Tool.Context {
@@ -80,6 +82,8 @@ function getSearchTool() {
 describe("session_search (semantic)", () => {
   it.instance("returns semantic matches with Jina API key", () =>
     Effect.gen(function* () {
+      expect(hasKey).toBe(true)
+
       const sessionId = SessionID.descending()
       yield* seedSession(sessionId, "Retry Logic Discussion")
       yield* seedMessage(sessionId, "We need to implement exponential backoff with jitter for the HTTP retry mechanism")
@@ -102,6 +106,8 @@ describe("session_search (semantic)", () => {
 
   it.instance("falls back to lexical when semantic: false", () =>
     Effect.gen(function* () {
+      expect(hasKey).toBe(true)
+
       const sessionId = SessionID.descending()
       yield* seedSession(sessionId, "Lexical Test")
       yield* seedMessage(sessionId, "exact phrase match test word")
@@ -119,6 +125,8 @@ describe("session_search (semantic)", () => {
 
   it.instance("embeddings are cached on second query", () =>
     Effect.gen(function* () {
+      expect(hasKey).toBe(true)
+
       const sessionId = SessionID.descending()
       yield* seedSession(sessionId, "Cache Test")
       yield* seedMessage(sessionId, "distributed systems consensus algorithms like Raft and Paxos ensure consistency across nodes")
