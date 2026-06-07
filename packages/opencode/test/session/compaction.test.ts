@@ -4,10 +4,8 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session/event"
-import { SessionMessage } from "@opencode-ai/core/session/message"
-import { Prompt } from "@opencode-ai/core/session/prompt"
 import { APICallError } from "ai"
-import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Config } from "@/config/config"
 import { Image } from "@/image/image"
@@ -111,21 +109,6 @@ function createUserMessage(sessionID: SessionID, text: string) {
       sessionID,
       type: "text",
       text,
-    })
-    return msg
-  })
-}
-
-function createUserMessageWithCanonicalPrompt(sessionID: SessionID, text: string) {
-  return Effect.gen(function* () {
-    const events = yield* EventV2Bridge.Service
-    const msg = yield* createUserMessage(sessionID, text)
-    yield* events.publish(SessionEvent.Prompted, {
-      sessionID,
-      messageID: SessionMessage.ID.make(msg.id),
-      timestamp: DateTime.makeUnsafe(msg.time.created),
-      prompt: new Prompt({ text }),
-      delivery: "steer",
     })
     return msg
   })
@@ -271,7 +254,6 @@ const compactionEnv = Layer.mergeAll(
   SessionNs.defaultLayer,
   Database.defaultLayer,
   EventV2Bridge.defaultLayer,
-  SessionV2.defaultLayer,
   CrossSpawnSpawner.defaultLayer,
 )
 const itCompaction = testEffect(compactionEnv)
@@ -312,7 +294,6 @@ function compactionProcessLayer(options?: CompactionProcessOptions) {
     Layer.provide(options?.config ?? Config.defaultLayer),
     Layer.provide(RuntimeFlags.layer({})),
     Layer.provide(EventV2Bridge.defaultLayer),
-    Layer.provide(SessionV2.defaultLayer),
   )
 }
 
@@ -395,24 +376,6 @@ function autocontinue(enabled: boolean) {
       if (name !== "experimental.compaction.autocontinue") return Effect.succeed(output)
       return Effect.sync(() => {
         ;(output as { enabled: boolean }).enabled = enabled
-        return output
-      })
-    },
-    list: () => Effect.succeed([]),
-    init: () => Effect.void,
-  })
-}
-
-function transformFirstUserText(text: string) {
-  return Layer.mock(Plugin.Service)({
-    trigger: <Name extends string, Input, Output>(name: Name, _input: Input, output: Output) => {
-      if (name !== "experimental.chat.messages.transform") return Effect.succeed(output)
-      return Effect.sync(() => {
-        const messages = (output as { messages?: SessionV1.WithParts[] }).messages
-        const firstText = messages
-          ?.find((message) => message.info.role === "user")
-          ?.parts.find((part): part is SessionV1.TextPart => part.type === "text")
-        if (firstText) firstText.text = text
         return output
       })
     },
@@ -1025,99 +988,6 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
-    "publishes Ended include from canonical v2 selection after create",
-    () => {
-      const stub = llm()
-      stub.push(reply("canonical summary"))
-      return Effect.gen(function* () {
-        const ssn = yield* SessionNs.Service
-        const sessions = yield* SessionV2.Service
-        const events = yield* EventV2Bridge.Service
-        const session = yield* ssn.create({})
-        yield* createUserMessageWithCanonicalPrompt(session.id, "first")
-        yield* createUserMessageWithCanonicalPrompt(session.id, "second")
-        yield* createUserMessageWithCanonicalPrompt(session.id, "third")
-
-        let started: { id: string; time: unknown; reason: string } | undefined
-        let endedInclude: string | undefined
-        const unsub = yield* events.listen((evt) => {
-          if ((evt.data as { sessionID?: string }).sessionID !== session.id) return Effect.void
-          if (evt.type === SessionEvent.Compaction.Started.type) {
-            const data = evt.data as typeof SessionEvent.Compaction.Started.data.Type
-            started = { id: data.messageID, time: data.timestamp, reason: data.reason }
-          }
-          if (evt.type === SessionEvent.Compaction.Ended.type) {
-            endedInclude = (evt.data as typeof SessionEvent.Compaction.Ended.data.Type).include
-          }
-          return Effect.void
-        })
-        yield* Effect.addFinalizer(() => unsub)
-
-        yield* createSummaryCompaction(session.id)
-        const canonicalBefore = yield* sessions.messages({ sessionID: session.id, order: "asc" })
-        const canonicalKeep = canonicalBefore.find((message) => message.type === "user" && message.text === "second")
-        expect(canonicalKeep?.type).toBe("user")
-
-        const msgs = yield* ssn.messages({ sessionID: session.id })
-        const parent = msgs.at(-1)?.info.id
-        expect(parent).toBeTruthy()
-        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
-
-        expect(endedInclude).toBe(canonicalKeep?.id)
-        const completed = (yield* sessions.messages({ sessionID: session.id, order: "asc" })).find(
-          (message) => message.type === "compaction" && message.id === started?.id,
-        )
-        expect(completed).toMatchObject({
-          type: "compaction",
-          id: started?.id,
-          reason: started?.reason,
-          summary: "canonical summary",
-          include: canonicalKeep?.id,
-          time: { created: started?.time },
-        })
-      }).pipe(withCompaction({ llm: stub.layer, config: cfg({ tail_turns: 2, preserve_recent_tokens: 10_000 }) }))
-    },
-    { git: true },
-  )
-
-  itCompaction.instance(
-    "publishes Ended include undefined without pending Started instead of legacy tail_start_id",
-    () => {
-      const stub = llm()
-      stub.push(reply("summary"))
-      return Effect.gen(function* () {
-        const ssn = yield* SessionNs.Service
-        const events = yield* EventV2Bridge.Service
-        const session = yield* ssn.create({})
-        yield* createUserMessage(session.id, "first")
-        const keep = yield* createUserMessage(session.id, "second")
-        yield* createUserMessage(session.id, "third")
-        yield* createCompactionMarker(session.id)
-
-        let endedInclude: string | undefined | "unset" = "unset"
-        const unsub = yield* events.listen((evt) => {
-          if (evt.type === SessionEvent.Compaction.Ended.type) {
-            const data = evt.data as typeof SessionEvent.Compaction.Ended.data.Type
-            if (data.sessionID === session.id) endedInclude = data.include
-          }
-          return Effect.void
-        })
-        yield* Effect.addFinalizer(() => unsub)
-
-        const msgs = yield* ssn.messages({ sessionID: session.id })
-        const parent = msgs.at(-1)?.info.id
-        expect(parent).toBeTruthy()
-        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
-
-        const part = yield* readCompactionPart(session.id)
-        expect(part?.tail_start_id).toBe(keep.id)
-        expect(endedInclude).toBeUndefined()
-      }).pipe(withCompaction({ llm: stub.layer, config: cfg({ tail_turns: 2, preserve_recent_tokens: 10_000 }) }))
-    },
-    { git: true },
-  )
-
-  itCompaction.instance(
     "shrinks retained tail to fit preserve token budget",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
@@ -1560,30 +1430,6 @@ describe("session.compaction.process", () => {
         expect(captured).not.toContain("and this one too")
         expect(captured).not.toContain("What did we do so far?")
       }).pipe(withCompaction({ llm: stub.layer }))
-    },
-    { git: true },
-  )
-
-  itCompaction.instance(
-    "applies legacy chat message transform before provider prompt",
-    () => {
-      const stub = llm()
-      let captured = ""
-      stub.push(reply("summary", (input) => (captured = JSON.stringify(input.messages))))
-      return Effect.gen(function* () {
-        const ssn = yield* SessionNs.Service
-        const session = yield* ssn.create({})
-        yield* createUserMessage(session.id, "original legacy text")
-        yield* createCompactionMarker(session.id)
-
-        const msgs = yield* ssn.messages({ sessionID: session.id })
-        const parent = msgs.at(-1)?.info.id
-        expect(parent).toBeTruthy()
-        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
-
-        expect(captured).toContain("transformed legacy text")
-        expect(captured).not.toContain("original legacy text")
-      }).pipe(withCompaction({ llm: stub.layer, plugin: transformFirstUserText("transformed legacy text") }))
     },
     { git: true },
   )

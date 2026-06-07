@@ -1,7 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node"
-import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Database } from "@opencode-ai/core/database/database"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
@@ -178,10 +176,11 @@ const assistant = Effect.fn("TestSession.assistant")(function* (
 
 const status = SessionStatus.layer.pipe(Layer.provideMerge(EventV2Bridge.defaultLayer))
 const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
-const depsWithoutPermission = Layer.mergeAll(
+const deps = Layer.mergeAll(
   Session.defaultLayer,
   Snapshot.defaultLayer,
   AgentSvc.defaultLayer,
+  Permission.defaultLayer,
   Plugin.defaultLayer,
   Config.defaultLayer,
   LLM.defaultLayer,
@@ -190,7 +189,6 @@ const depsWithoutPermission = Layer.mergeAll(
   Database.defaultLayer,
   EventV2Bridge.defaultLayer,
 ).pipe(Layer.provideMerge(infra))
-const deps = Layer.mergeAll(depsWithoutPermission, Permission.defaultLayer)
 const env = Layer.mergeAll(
   TestLLMServer.layer,
   SessionProcessor.layer.pipe(
@@ -201,31 +199,7 @@ const env = Layer.mergeAll(
   ),
 )
 
-const doomLoopRequests: PermissionV1.AskInput[] = []
-const doomLoopPermission = Layer.succeed(
-  Permission.Service,
-  Permission.Service.of({
-    ask: (input) =>
-      Effect.sync(() => {
-        doomLoopRequests.push(input)
-      }),
-    reply: () => Effect.void,
-    list: () => Effect.succeed([]),
-  }),
-)
-const doomLoopEnv = Layer.mergeAll(
-  TestLLMServer.layer,
-  SessionProcessor.layer.pipe(
-    Layer.provide(summary),
-    Layer.provide(Image.defaultLayer),
-    Layer.provide(RuntimeFlags.layer({})),
-    Layer.provide(doomLoopPermission),
-    Layer.provideMerge(depsWithoutPermission),
-  ),
-)
-
 const it = testEffect(env)
-const itDoomLoop = testEffect(doomLoopEnv)
 
 const providerErrorLLM = Layer.succeed(
   LLM.Service,
@@ -814,269 +788,6 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
         expect(call.state.metadata).toEqual({ source: "test" })
         expect(call.state.time.start).toBeDefined()
         expect(call.state.time.end).toBeDefined()
-
-        const messages = yield* SessionV2.Service.use((session) => session.messages({ sessionID: chat.id })).pipe(
-          Effect.provide(SessionV2.defaultLayer),
-        )
-        const v2Assistant = messages.find((message) => message.type === "assistant")
-        expect(v2Assistant?.type).toBe("assistant")
-        if (v2Assistant?.type !== "assistant") return
-        const v2Tool = v2Assistant.content.find((item) => item.type === "tool" && item.id === "call_1")
-        expect(v2Tool?.type).toBe("tool")
-        if (v2Tool?.type !== "tool") return
-        expect(v2Tool.state.status).toBe("completed")
-        if (v2Tool.state.status !== "completed") return
-        expect(v2Tool.state.structured).toEqual({ source: "test" })
-      }),
-    { config: (url) => providerCfg(url) },
-  ),
-)
-
-itDoomLoop.live("session.processor effect tests asks doom-loop permission from local recent tool history", () =>
-  provideTmpdirServer(
-    ({ dir, llm }) =>
-      Effect.gen(function* () {
-        doomLoopRequests.length = 0
-        const { processors, session, provider } = yield* boot()
-
-        yield* llm.tool("lookup", { query: "weather" })
-        yield* llm.tool("lookup", { query: "weather" })
-        yield* llm.tool("lookup", { query: "weather" })
-
-        const chat = yield* session.create({})
-        const parent = yield* user(chat.id, "tool")
-        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-        const handle = yield* processors.create({
-          assistantMessage: msg,
-          sessionID: chat.id,
-          model: mdl,
-        })
-        const input = {
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
-          sessionID: chat.id,
-          model: mdl,
-          agent: agent(),
-          system: [],
-          messages: [{ role: "user", content: "tool" }],
-          tools: {
-            lookup: tool({
-              description: "Look up information",
-              inputSchema: z.object({ query: z.string() }),
-              execute: async (toolInput) => ({
-                title: "Lookup",
-                output: `result:${toolInput.query}`,
-                metadata: {},
-              }),
-            }),
-          },
-        } satisfies LLM.StreamInput
-
-        expect(yield* handle.process(input)).toBe("continue")
-        expect(doomLoopRequests).toHaveLength(0)
-        expect(yield* handle.process(input)).toBe("continue")
-        expect(doomLoopRequests).toHaveLength(0)
-        expect(yield* handle.process(input)).toBe("continue")
-
-        expect(doomLoopRequests).toHaveLength(1)
-        expect(doomLoopRequests[0]).toMatchObject({
-          permission: "doom_loop",
-          patterns: ["lookup"],
-          sessionID: chat.id,
-          metadata: { tool: "lookup", input: { query: "weather" } },
-          always: ["lookup"],
-        })
-      }),
-    { config: (url) => providerCfg(url) },
-  ),
-)
-
-it.live("session.processor effect tests sanitize task tool success structured metadata", () =>
-  provideTmpdirServer(
-    ({ dir, llm }) =>
-      Effect.gen(function* () {
-        const { processors, session, provider } = yield* boot()
-
-        yield* llm.tool("task", { prompt: "check child" })
-
-        const chat = yield* session.create({})
-        const child = yield* session.create({})
-        const parent = yield* user(chat.id, "task")
-        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-        const handle = yield* processors.create({
-          assistantMessage: msg,
-          sessionID: chat.id,
-          model: mdl,
-        })
-
-        const value = yield* handle.process({
-          user: {
-            id: parent.id,
-            sessionID: chat.id,
-            role: "user",
-            time: parent.time,
-            agent: parent.agent,
-            model: { providerID: ref.providerID, modelID: ref.modelID },
-          } satisfies SessionV1.User,
-          sessionID: chat.id,
-          model: mdl,
-          agent: agent(),
-          system: [],
-          messages: [{ role: "user", content: "task" }],
-          tools: {
-            task: tool({
-              description: "Run a child task",
-              inputSchema: z.object({ prompt: z.string() }),
-              execute: async () => ({
-                title: "Task",
-                output: "child done",
-                metadata: {
-                  sessionId: child.id,
-                  parentSessionId: chat.id,
-                  model: "test/test-model",
-                  background: true,
-                  jobId: "job_123",
-                  sourceMessageId: "msg_legacy",
-                  toolCalls: 2,
-                },
-              }),
-            }),
-          },
-        })
-
-        const messages = yield* SessionV2.Service.use((session) => session.messages({ sessionID: chat.id })).pipe(
-          Effect.provide(SessionV2.defaultLayer),
-        )
-        const v2Assistant = messages.find((message) => message.type === "assistant")
-        expect(value).toBe("continue")
-        expect(v2Assistant?.type).toBe("assistant")
-        if (v2Assistant?.type !== "assistant") return
-        const v2Tool = v2Assistant.content.find((item) => item.type === "tool" && item.id === "call_1")
-        expect(v2Tool?.type).toBe("tool")
-        if (v2Tool?.type !== "tool") return
-        expect(v2Tool.state.status).toBe("completed")
-        if (v2Tool.state.status !== "completed") return
-        expect(v2Tool.name).toBe("task")
-        expect(v2Tool.state.structured).toEqual({ task: { sessionID: child.id, toolCalls: 2 } })
-      }),
-    { config: (url) => providerCfg(url) },
-  ),
-)
-
-it.live("session.processor effect tests publish sanitized task tool metadata updates", () =>
-  provideTmpdirServer(
-    ({ dir, llm }) =>
-      Effect.gen(function* () {
-        const database = yield* Database.Service
-        const events = yield* EventV2Bridge.Service
-        const { processors, session, provider } = yield* boot()
-
-        const unblock = defer<void>()
-        yield* llm.tool("task", { prompt: "check child" })
-
-        const chat = yield* session.create({})
-        const child = yield* session.create({})
-        const parent = yield* user(chat.id, "task metadata")
-        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
-        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-        const handle = yield* processors.create({
-          assistantMessage: msg,
-          sessionID: chat.id,
-          model: mdl,
-        })
-        const metadataUpdates: Array<typeof SessionEvent.Tool.MetadataUpdated.Type> = []
-        const off = yield* events.listen((event) => {
-          if (event.type === SessionEvent.Tool.MetadataUpdated.type)
-            metadataUpdates.push(event as typeof SessionEvent.Tool.MetadataUpdated.Type)
-          return Effect.void
-        })
-
-        const run = yield* handle
-          .process({
-            user: {
-              id: parent.id,
-              sessionID: chat.id,
-              role: "user",
-              time: parent.time,
-              agent: parent.agent,
-              model: { providerID: ref.providerID, modelID: ref.modelID },
-            } satisfies SessionV1.User,
-            sessionID: chat.id,
-            model: mdl,
-            agent: agent(),
-            system: [],
-            messages: [{ role: "user", content: "task metadata" }],
-            tools: {
-              task: tool({
-                description: "Run a child task",
-                inputSchema: z.object({ prompt: z.string() }),
-                execute: async () => {
-                  await unblock.promise
-                  return { title: "Task", output: "done", metadata: {} }
-                },
-              }),
-            },
-          })
-          .pipe(Effect.forkChild)
-
-        yield* llm.wait(1)
-        yield* waitFor(
-          MessageV2.parts(msg.id).pipe(
-            Effect.map((parts) =>
-              parts.find(
-                (part): part is SessionV1.ToolPart => part.type === "tool" && part.callID === "call_1" && part.state.status === "running",
-              ),
-            ),
-            Effect.provideService(Database.Service, database),
-          ),
-          "timed out waiting for running task tool part",
-        )
-        yield* handle.updateToolCall("call_1", (part) => {
-          if (part.state.status !== "running") return part
-          return {
-            ...part,
-            state: {
-              ...part.state,
-              metadata: {
-                sessionId: child.id,
-                parentSessionId: chat.id,
-                model: "test/test-model",
-                background: true,
-                jobId: "job_123",
-                sourceMessageId: "msg_legacy",
-                sourcePartId: "prt_legacy",
-                toolCalls: 2,
-                arbitrary: "drop me",
-              },
-            },
-          }
-        })
-        yield* off
-        unblock.resolve()
-        yield* Fiber.await(run)
-
-        expect(metadataUpdates).toHaveLength(1)
-        expect(metadataUpdates[0]?.data).toMatchObject({
-          sessionID: chat.id,
-          callID: "call_1",
-          task: { sessionID: child.id, toolCalls: 2 },
-        })
-        const encoded = JSON.stringify(metadataUpdates[0]?.data)
-        const taskEncoded = JSON.stringify(metadataUpdates[0]?.data.task)
-        expect(encoded).not.toContain("parentSessionId")
-        expect(encoded).not.toContain("job_123")
-        expect(encoded).not.toContain("test-model")
-        expect(taskEncoded).not.toContain("msg_")
-        expect(taskEncoded).not.toContain("prt_")
-        expect(encoded).not.toContain("arbitrary")
       }),
     { config: (url) => providerCfg(url) },
   ),

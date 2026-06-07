@@ -3806,9 +3806,7 @@ export class Session2 extends HeyApiClient {
   /**
    * Delete message
    *
-   * Unsupported legacy transcript mutation route. Use canonical v2 mutation APIs when available.
-   *
-   * @deprecated
+   * Permanently delete a specific message and all of its parts from a session without reverting file changes.
    */
   public deleteMessage<ThrowOnError extends boolean = false>(
     parameters: {
@@ -4340,9 +4338,7 @@ export class Session2 extends HeyApiClient {
 
 export class Part extends HeyApiClient {
   /**
-   * Unsupported legacy transcript mutation route. Use canonical v2 mutation APIs when available.
-   *
-   * @deprecated
+   * Delete a part from a message.
    */
   public delete<ThrowOnError extends boolean = false>(
     parameters: {
@@ -4376,9 +4372,7 @@ export class Part extends HeyApiClient {
   }
 
   /**
-   * Unsupported legacy transcript mutation route. Use canonical v2 mutation APIs when available.
-   *
-   * @deprecated
+   * Update a part in a message.
    */
   public update<ThrowOnError extends boolean = false>(
     parameters: {

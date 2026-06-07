@@ -1,19 +1,17 @@
 import type { Session as SDKSession, Message, Part } from "@opencode-ai/sdk/v2"
-import { SessionMessage } from "@opencode-ai/core/session/message"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Session } from "@/session/session"
-import { TranscriptV2Public } from "@/session/transcript-v2-public"
+import { MessageV2 } from "../../session/message-v2"
 import { CliError, effectCmd } from "../effect-cmd"
 import { Database } from "@opencode-ai/core/database/database"
-import { SessionTable, MessageTable, PartTable, SessionMessageTable } from "@opencode-ai/core/session/sql"
+import { SessionTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
 import { EOL } from "os"
 import path from "path"
 import { FSUtil } from "@opencode-ai/core/fs-util"
-import { DateTime, Effect, Schema } from "effect"
+import { Effect, Schema } from "effect"
 import type { InstanceContext } from "@/project/instance-context"
-import { desc, eq } from "drizzle-orm"
 
 const decodeMessageInfo = Schema.decodeUnknownSync(SessionV1.Info)
 const decodePart = Schema.decodeUnknownSync(SessionV1.Part)
@@ -81,29 +79,6 @@ export function transformShareData(shareData: ShareData[]): {
 }
 
 type ExportData = { info: SDKSession; messages: Array<{ info: Message; parts: Part[] }> }
-type LocalImportData =
-  | { type: "v2"; payload: TranscriptV2Public.Payload }
-  | { type: "legacy"; data: ExportData }
-const encodeMessage = Schema.encodeUnknownSync(SessionMessage.Message)
-
-export function isTranscriptV2ImportPayload(input: unknown) {
-  if (!isVersion2Envelope(input)) return false
-  try {
-    TranscriptV2Public.decode(input)
-    return true
-  } catch {
-    return false
-  }
-}
-
-export function decodeLocalImportData(input: unknown): LocalImportData {
-  if (isVersion2Envelope(input)) return { type: "v2", payload: TranscriptV2Public.decode(input) }
-  return { type: "legacy", data: input as ExportData }
-}
-
-function isVersion2Envelope(input: unknown) {
-  return typeof input === "object" && input !== null && "version" in input && input.version === 2
-}
 
 export const ImportCommand = effectCmd({
   command: "import <file>",
@@ -124,6 +99,9 @@ export const ImportCommand = effectCmd({
 const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: InstanceContext) {
   const share = yield* ShareNext.Service
   const fs = yield* FSUtil.Service
+  const { db } = yield* Database.Service
+
+  let exportData: ExportData | undefined
 
   const isUrl = file.startsWith("http://") || file.startsWith("https://")
 
@@ -174,125 +152,73 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
       return
     }
 
-    yield* importLegacyData(transformed, ctx)
-    process.stdout.write(`Imported session: ${transformed.info.id}`)
+    exportData = transformed
+  } else {
+    exportData = (yield* fs.readJson(file).pipe(Effect.orElseSucceed(() => undefined))) as
+      | NonNullable<typeof exportData>
+      | undefined
+    if (!exportData) {
+      process.stdout.write(`File not found: ${file}`)
+      process.stdout.write(EOL)
+      return
+    }
+  }
+
+  if (!exportData) {
+    process.stdout.write(`Failed to read session data`)
     process.stdout.write(EOL)
     return
   }
 
-  const fileData = yield* fs.readJson(file).pipe(Effect.orElseSucceed(() => undefined))
-  if (!fileData) {
-    process.stdout.write(`File not found: ${file}`)
-    process.stdout.write(EOL)
-    return
-  }
+  const info = Schema.decodeUnknownSync(Session.Info)({
+    ...exportData.info,
+    projectID: ctx.project.id,
+    directory: ctx.directory,
+    path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
+  }) as Session.Info
+  const row = Session.toRow(info)
+  yield* db
+    .insert(SessionTable)
+    .values(row)
+    .onConflictDoUpdate({
+      target: SessionTable.id,
+      set: { project_id: row.project_id, directory: row.directory, path: row.path },
+    })
+    .run()
+    .pipe(Effect.orDie)
 
-  const importData = decodeLocalImportData(fileData)
-  if (importData.type === "v2") {
-    yield* importTranscriptV2(importData.payload, ctx)
-    process.stdout.write(`Imported session: ${importData.payload.info.id}`)
-    process.stdout.write(EOL)
-    return
-  }
-
-  yield* importLegacyData(importData.data, ctx)
-  process.stdout.write(`Imported session: ${importData.data.info.id}`)
-  process.stdout.write(EOL)
-})
-
-function upsertSession(infoInput: unknown, ctx: InstanceContext) {
-  return Effect.gen(function* () {
-    const { db } = yield* Database.Service
-    const input = typeof infoInput === "object" && infoInput !== null ? infoInput : {}
-    const info = Schema.decodeUnknownSync(Session.Info)({
-      ...input,
-      projectID: ctx.project.id,
-      directory: ctx.directory,
-      path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
-    }) as Session.Info
-    const row = Session.toRow(info)
+  for (const msg of exportData.messages) {
+    const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
+    const { id, sessionID: _, ...msgData } = msgInfo
     yield* db
-      .insert(SessionTable)
-      .values(row)
-      .onConflictDoUpdate({
-        target: SessionTable.id,
-        set: { project_id: row.project_id, directory: row.directory, path: row.path },
+      .insert(MessageTable)
+      .values({
+        id,
+        session_id: row.id,
+        time_created: msgInfo.time?.created ?? Date.now(),
+        data: msgData as never,
       })
+      .onConflictDoNothing()
       .run()
       .pipe(Effect.orDie)
-    return row
-  })
-}
 
-export function importTranscriptV2(payload: TranscriptV2Public.Payload, ctx: InstanceContext) {
-  return Effect.gen(function* () {
-    const { db } = yield* Database.Service
-    const row = yield* upsertSession(payload.info, ctx)
-    const current = yield* db
-      .select({ seq: SessionMessageTable.seq })
-      .from(SessionMessageTable)
-      .where(eq(SessionMessageTable.session_id, row.id))
-      .orderBy(desc(SessionMessageTable.seq))
-      .limit(1)
-      .get()
-      .pipe(Effect.orDie)
-    const seqOffset = current?.seq ?? 0
-
-    for (const [index, message] of payload.messages.entries()) {
-      const encoded = encodeMessage(message)
-      const { id, type, ...data } = encoded
+    for (const part of msg.parts) {
+      const partInfo = decodePart(part) as SessionV1.Part
+      const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
       yield* db
-        .insert(SessionMessageTable)
+        .insert(PartTable)
         .values({
-          id: SessionMessage.ID.make(id),
+          id: partId,
+          message_id: messageID,
           session_id: row.id,
-          type,
-          seq: seqOffset + index + 1,
-          time_created: DateTime.toEpochMillis(message.time.created),
-          data: data as (typeof SessionMessageTable.$inferInsert)["data"],
+          data: partData,
         })
         .onConflictDoNothing()
         .run()
         .pipe(Effect.orDie)
     }
-  })
-}
+  }
 
-function importLegacyData(exportData: ExportData, ctx: InstanceContext) {
-  return Effect.gen(function* () {
-    const { db } = yield* Database.Service
-    const row = yield* upsertSession(exportData.info, ctx)
-
-    for (const msg of exportData.messages) {
-      const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
-      const { id, sessionID: _, ...msgData } = msgInfo
-      yield* db
-        .insert(MessageTable)
-        .values({
-          id,
-          session_id: row.id,
-          time_created: msgInfo.time?.created ?? Date.now(),
-          data: msgData as never,
-        })
-        .onConflictDoNothing()
-        .run()
-        .pipe(Effect.orDie)
-
-      for (const part of msg.parts) {
-        const partInfo = decodePart(part) as SessionV1.Part
-        const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
-        yield* db
-          .insert(PartTable)
-          .values({
-            id: partId,
-            message_id: messageID,
-            session_id: row.id,
-            data: partData,
-          })
-          .onConflictDoNothing()
-          .run()
-          .pipe(Effect.orDie)
-      }
-    }
-  })
-}
+  process.stdout.write(`Imported session: ${exportData.info.id}`)
+  process.stdout.write(EOL)
+})

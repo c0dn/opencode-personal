@@ -278,14 +278,9 @@ Hook surface (mutate `output` in place; return `void`):
 - `command.execute.before`
 - `shell.env`
 - `permission.ask`
-- `experimental.chat.system.transform`, `experimental.session.compacting`,
-  `experimental.compaction.autocontinue`, `experimental.text.complete`
-
-Normal v2 provider input no longer applies
-`experimental.chat.messages.transform` after the prompt v2 provider-input
-cutover. Use `experimental.chat.system.transform` for system prompt changes.
-If a v2 provider-input extension point is needed, that surface is TBD; do not
-claim an active replacement exists.
+- `experimental.chat.messages.transform`, `experimental.chat.system.transform`,
+  `experimental.session.compacting`, `experimental.compaction.autocontinue`,
+  `experimental.text.complete`
 
 Special object-shaped (not callbacks): `tool: { my_tool: { ... } }`,
 `auth: { ... }`, `provider: { ... }`.

@@ -31,15 +31,6 @@ export class ConflictError extends Schema.TaggedErrorClass<ConflictError>()(
   { httpApiStatus: 409 },
 ) {}
 
-export class UnsupportedOperationError extends Schema.TaggedErrorClass<UnsupportedOperationError>()(
-  "UnsupportedOperationError",
-  {
-    message: Schema.String,
-    operation: Schema.optional(Schema.String),
-  },
-  { httpApiStatus: 410 },
-) {}
-
 export class UpstreamError extends Schema.TaggedErrorClass<UpstreamError>()(
   "UpstreamError",
   {
@@ -106,23 +97,6 @@ export class SessionNotFoundError extends Schema.TaggedErrorClass<SessionNotFoun
   { httpApiStatus: 404 },
 ) {}
 
-export class SessionMessagesNotReadyError extends Schema.TaggedErrorClass<SessionMessagesNotReadyError>()(
-  "SessionMessagesNotReadyError",
-  {
-    sessionID: Schema.String,
-    status: Schema.Union([
-      Schema.Literal("aborted"),
-      Schema.Literal("upgrade_pending"),
-      Schema.Literal("upgrade_unavailable"),
-      Schema.Literal("failure"),
-    ]),
-    reason: Schema.optional(Schema.String),
-    retryable: Schema.optional(Schema.Boolean),
-    ref: Schema.optional(Schema.String),
-  },
-  { httpApiStatus: 503 },
-) {}
-
 export class MessageNotFoundError extends Schema.TaggedErrorClass<MessageNotFoundError>()(
   "MessageNotFoundError",
   {
@@ -174,6 +148,24 @@ export class McpServerNotFoundError extends Schema.TaggedErrorClass<McpServerNot
   },
   { httpApiStatus: 404 },
 ) {}
+
+export class PtyNotFoundError extends Schema.TaggedErrorClass<PtyNotFoundError>()(
+  "PtyNotFoundError",
+  {
+    ptyID: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
+export class PtyForbiddenError extends Schema.TaggedErrorClass<PtyForbiddenError>()(
+  "PtyForbiddenError",
+  {
+    message: Schema.String,
+  },
+  { httpApiStatus: 403 },
+) {}
+
 export class ProjectNotFoundError extends Schema.TaggedErrorClass<ProjectNotFoundError>()(
   "ProjectNotFoundError",
   {

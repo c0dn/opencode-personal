@@ -1,15 +1,9 @@
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import type { ModelMessage } from "ai"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
-import { Database } from "@opencode-ai/core/database/database"
 import { Session } from "./session"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Provider } from "@/provider/provider"
 import { MessageV2 } from "./message-v2"
-import { MessageV2Compaction } from "./message-v2-compaction"
-import { MessageV2Model } from "./message-v2-model"
-import { MessageV2Readiness } from "./message-v2-readiness"
-import { MessageV2Provider } from "./message-v2-provider"
 import { Token } from "@/util/token"
 import { Log } from "@opencode-ai/core/util/log"
 import { SessionProcessor } from "./processor"
@@ -27,8 +21,6 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
-import { SessionCompactionAnchor } from "@opencode-ai/core/session/compaction-anchor"
-import { SessionV2 } from "@opencode-ai/core/session"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -221,7 +213,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Se
 
 export const use = serviceUse(Service)
 
-const baseLayer = Layer.effect(
+export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
@@ -232,8 +224,6 @@ const baseLayer = Layer.effect(
     const provider = yield* Provider.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
-    const database = yield* Database.Service
-    const sessions = yield* SessionV2.Service
 
     const isOverflow = Effect.fn("SessionCompaction.isOverflow")(function* (input: {
       tokens: SessionV1.Assistant["tokens"]
@@ -306,39 +296,8 @@ const baseLayer = Layer.effect(
       }
     })
 
-    const canonicalInclude = Effect.fn("SessionCompaction.canonicalInclude")(function* (input: {
-      sessionID: SessionID
-      cfg: ConfigV1.Info
-      model: Provider.Model
-    }) {
-      const anchor = yield* SessionCompactionAnchor.findLatestPendingStarted({
-        db: database.db,
-        sessionID: input.sessionID,
-      })
-      if (!anchor) return undefined
-
-      const messages = yield* sessions.messages({ sessionID: input.sessionID, order: "asc" }).pipe(Effect.orDie)
-      const selection = yield* Effect.promise(() =>
-        MessageV2Compaction.select({
-          messages,
-          anchor: { id: anchor.id, time: anchor.time },
-          tailTurns: input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS,
-          preserveRecentTokens: preserveRecentBudget({ cfg: input.cfg, model: input.model }),
-          estimate: async (candidate) => {
-            const modelMessages = await MessageV2Model.toModelMessages(candidate.slice(), {
-              stripMedia: true,
-              toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-            })
-            return Token.estimate(JSON.stringify(modelMessages))
-          },
-        }),
-      )
-      if (selection.type !== "selected") return undefined
-      return selection.include
-    })
-
-    // V2 prune: reads legacy messages for now, publishes Tool.Compacted v2 events
-    // instead of legacy session.updatePart.
+    // goes backwards through parts until there are PRUNE_PROTECT tokens worth of tool
+    // calls, then erases output of older tool calls to free context space
     const prune = Effect.fn("SessionCompaction.prune")(function* (input: { sessionID: SessionID }) {
       const cfg = yield* config.get()
       if (!cfg.compaction?.prune) return
@@ -376,70 +335,12 @@ const baseLayer = Layer.effect(
       log.info("found", { pruned, total })
       if (pruned > PRUNE_MINIMUM) {
         for (const part of toPrune) {
-          ;(part.state as { time?: { compacted?: number } }).time = { compacted: Date.now() }
-          yield* session.updatePart(part)
-          yield* events.publish(SessionEvent.Tool.Compacted, {
-            sessionID: input.sessionID,
-            toolCallID: part.callID,
-            messageID: SessionMessage.ID.make(part.messageID),
-            timestamp: DateTime.makeUnsafe(Date.now()),
-          })
+          if (part.state.status === "completed") {
+            part.state.time.compacted = Date.now()
+            yield* session.updatePart(part)
+          }
         }
         log.info("pruned", { count: toPrune.length })
-      }
-    })
-
-    const selectV2 = Effect.fnUntraced(function* (input: {
-      sessionID: SessionID
-      cfg: ConfigV1.Info
-      model: Provider.Model
-    }) {
-      const anchor = yield* SessionCompactionAnchor.findLatestPendingStarted({
-        db: database.db,
-        sessionID: input.sessionID,
-      })
-      if (!anchor) return yield* Effect.fail(new Error("v2 compaction: no pending compaction anchor"))
-
-      const v2Messages = yield* sessions.messages({ sessionID: input.sessionID, order: "asc" }).pipe(Effect.orDie)
-      const selection = yield* Effect.promise(() =>
-        MessageV2Compaction.select({
-          messages: v2Messages,
-          anchor: { id: anchor.id, time: anchor.time },
-          tailTurns: input.cfg.compaction?.tail_turns ?? DEFAULT_TAIL_TURNS,
-          preserveRecentTokens: preserveRecentBudget({ cfg: input.cfg, model: input.model }),
-          estimate: async (candidate) => {
-            const result = await MessageV2Model.toModelMessages(candidate.slice(), {
-              stripMedia: true,
-              toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-            })
-            return Token.estimate(JSON.stringify(result))
-          },
-        }),
-      )
-
-      if (selection.type === "blocked") {
-        return yield* Effect.fail(new Error(`v2 compaction: ${selection.reason}`))
-      }
-
-      const readiness = MessageV2Readiness.compactionProviderReadiness(selection.messages)
-      if (readiness.type === "blocked") {
-        return yield* Effect.fail(new Error(`v2 compaction readiness: ${readiness.reason}`))
-      }
-
-      const prepared = yield* Effect.promise(() =>
-        MessageV2Provider.prepareCompactionProviderMessages({
-          messages: readiness.messages,
-          options: { stripMedia: true, toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS },
-        }),
-      )
-
-      if (prepared.type !== "ready") {
-        return yield* Effect.fail(new Error("v2 compaction provider prep: not ready"))
-      }
-
-      return {
-        modelMessages: prepared.modelMessages,
-        previousSummary: selection.previousSummary,
       }
     })
 
@@ -496,52 +397,19 @@ const baseLayer = Layer.effect(
         cfg,
         model,
       })
-      const canonicalEndedInclude = yield* canonicalInclude({ sessionID: input.sessionID, cfg, model })
-
-      // V2 provider-input: select, readiness-gate, and convert to model messages.
-      // Only activates when a v2 compaction anchor exists. Falls through to legacy
-      // selection when the compaction was started via the legacy path.
-      let v2ModelMessages: ModelMessage[] | undefined
-      let v2PreviousSummary: string | undefined
-      {
-        const v2Anchor = yield* SessionCompactionAnchor.findLatestPendingStarted({
-          db: database.db,
-          sessionID: input.sessionID,
-        })
-        if (v2Anchor) {
-          const applied = yield* selectV2({ sessionID: input.sessionID, cfg, model }).pipe(
-            Effect.map((result) => ({ type: "ok" as const, ...result })),
-            Effect.catch((cause) =>
-              Effect.sync(() => {
-                log.error("v2 compaction failed, continuing with legacy selection", { sessionID: input.sessionID, cause })
-                return { type: "failed" as const }
-              }),
-            ),
-          )
-          if (applied.type === "ok") {
-            v2ModelMessages = applied.modelMessages
-            v2PreviousSummary = applied.previousSummary
-          }
-        }
-      }
-
-      // Legacy model message conversion (used when v2 selection is unavailable or fails).
-      if (!v2ModelMessages) {
-        const msgs = structuredClone(selected.head)
-        yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-        v2ModelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
-          stripMedia: true,
-          toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
-        })
-      }
-
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
         "experimental.session.compacting",
         { sessionID: input.sessionID },
         { context: [], prompt: undefined },
       )
-      const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary: v2PreviousSummary ?? previousSummary, context: compacting.context })
+      const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
+      const msgs = structuredClone(selected.head)
+      yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+      const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
+        stripMedia: true,
+        toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+      })
       const ctx = yield* InstanceState.context
       const msg: SessionV1.Assistant = {
         id: MessageID.ascending(),
@@ -582,7 +450,7 @@ const baseLayer = Layer.effect(
         tools: {},
         system: [],
         messages: [
-          ...(v2ModelMessages ?? []),
+          ...modelMessages,
           {
             role: "user",
             content: [{ type: "text", text: nextPrompt }],
@@ -707,7 +575,7 @@ const baseLayer = Layer.effect(
           sessionID: input.sessionID,
           timestamp: DateTime.makeUnsafe(Date.now()),
           text: summary ?? "",
-          include: canonicalEndedInclude,
+          include: selected.tail_start_id,
         })
         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
       }
@@ -721,14 +589,13 @@ const baseLayer = Layer.effect(
       auto: boolean
       overflow?: boolean
     }) {
-      const now = Date.now()
       const msg = yield* session.updateMessage({
         id: MessageID.ascending(),
         role: "user",
         model: input.model,
         sessionID: input.sessionID,
         agent: input.agent,
-        time: { created: now },
+        time: { created: Date.now() },
       })
       yield* session.updatePart({
         id: PartID.ascending(),
@@ -741,7 +608,7 @@ const baseLayer = Layer.effect(
       yield* events.publish(SessionEvent.Compaction.Started, {
         sessionID: input.sessionID,
         messageID: SessionMessage.ID.create(),
-        timestamp: DateTime.makeUnsafe(now),
+        timestamp: DateTime.makeUnsafe(Date.now()),
         reason: input.auto ? "auto" : "manual",
       })
     })
@@ -755,8 +622,6 @@ const baseLayer = Layer.effect(
   }),
 )
 
-export const layer = baseLayer.pipe(Layer.provide(SessionV2.defaultLayer))
-
 export const defaultLayer = Layer.suspend(() =>
   layer.pipe(
     Layer.provide(Provider.defaultLayer),
@@ -767,7 +632,6 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Config.defaultLayer),
     Layer.provide(RuntimeFlags.defaultLayer),
     Layer.provide(EventV2Bridge.defaultLayer),
-    Layer.provide(Database.defaultLayer),
   ),
 )
 

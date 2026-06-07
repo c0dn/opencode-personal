@@ -4,8 +4,6 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import os from "os"
 import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
-import { MessageV2Context } from "./message-v2-context"
-import { SessionV2 } from "@opencode-ai/core/session"
 import { Log } from "@opencode-ai/core/util/log"
 import { SessionRevert } from "./revert"
 import { Session } from "./session"
@@ -107,7 +105,6 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const status = yield* SessionStatus.Service
     const sessions = yield* Session.Service
-    const sessionsV2 = yield* SessionV2.Service
     const agents = yield* Agent.Service
     const provider = yield* Provider.Service
     const processor = yield* SessionProcessor.Service
@@ -1260,13 +1257,6 @@ export const layer = Layer.effect(
             Effect.provideService(Database.Service, database),
           )
 
-          // Supplemental v2 read: derive agent/model from canonical messages.
-          // Used alongside legacy data to provide richer context where available.
-          const v2Messages = yield* sessionsV2.messages({ sessionID, order: "asc" }).pipe(
-            Effect.orElseSucceed(() => []),
-          )
-          const v2Ctx = MessageV2Context.promptContext(v2Messages)
-
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
@@ -1652,8 +1642,8 @@ export const layer = Layer.effect(
 
 export const defaultLayer = Layer.suspend(() =>
   layer.pipe(
-    Layer.provide(SessionV2.defaultLayer),
-    Layer.provide([SessionRunState.defaultLayer, SessionStatus.defaultLayer]),
+    Layer.provide(SessionRunState.defaultLayer),
+    Layer.provide(SessionStatus.defaultLayer),
     Layer.provide(SessionCompaction.defaultLayer),
     Layer.provide(SessionProcessor.defaultLayer),
     Layer.provide(Command.defaultLayer),

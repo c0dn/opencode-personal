@@ -1,15 +1,12 @@
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import type { JSONValue, SharedV3ProviderMetadata } from "@ai-sdk/provider"
-import { isMedia } from "@/util/media"
 import { DateTime } from "effect"
 import { convertToModelMessages, type ModelMessage, type UIMessage } from "ai"
 
 const PrunedToolOutput = "[Old tool result content cleared]"
 const InterruptedToolOutput = "[Tool execution was interrupted]"
 
-export type Options = { stripMedia?: boolean; toolOutputMaxChars?: number }
-
-export async function toModelMessages(input: SessionMessage.Message[], options?: Options): Promise<ModelMessage[]> {
+export async function toModelMessages(input: SessionMessage.Message[]): Promise<ModelMessage[]> {
   const toolNames = new Set<string>()
   const messages: UIMessage[] = []
 
@@ -17,21 +14,12 @@ export async function toModelMessages(input: SessionMessage.Message[], options?:
     if (message.type === "user") {
       const parts: UIMessage["parts"] = [
         ...(message.text === "" ? [] : [{ type: "text" as const, text: message.text }]),
-        ...(message.files ?? []).map((file) => {
-          if (options?.stripMedia && isMedia(file.mime)) {
-            return {
-              type: "text" as const,
-              text: `[Attached ${file.mime}: ${file.name ?? "file"}]`,
-            }
-          }
-
-          return {
-            type: "file" as const,
-            url: file.uri,
-            mediaType: file.mime,
-            filename: file.name,
-          }
-        }),
+        ...(message.files ?? []).map((file) => ({
+          type: "file" as const,
+          url: file.uri,
+          mediaType: file.mime,
+          filename: file.name,
+        })),
       ]
       if (parts.length > 0) messages.push({ id: message.id, role: "user", parts })
       continue
@@ -57,7 +45,7 @@ export async function toModelMessages(input: SessionMessage.Message[], options?:
         }
 
         toolNames.add(content.name)
-        parts.push(toolPart(content, options))
+        parts.push(toolPart(content))
       }
       if (parts.length > 0) messages.push({ id: message.id, role: "assistant", parts })
     }
@@ -81,12 +69,16 @@ function chronological(input: SessionMessage.Message[]) {
 
 function isAbortedAssistantWithContent(message: SessionMessage.Assistant) {
   void message
-  // TODO(v2): aborted assistant partial-content replay is intentionally deferred.
-  // Until the v2 error shape can distinguish that case, skip all errored turns.
   return false
 }
 
-function toolPart(content: SessionMessage.AssistantTool, options?: Options): UIMessage["parts"][number] {
+function isMeaningfulAssistantContent(content: SessionMessage.AssistantContent) {
+  if (content.type === "text") return content.text.trim().length > 0
+  if (content.type === "tool") return true
+  return false
+}
+
+function toolPart(content: SessionMessage.AssistantTool): UIMessage["parts"][number] {
   const metadata = providerMetadata(content.provider?.metadata)
   const base = {
     type: `tool-${content.name}` as `tool-${string}`,
@@ -100,7 +92,7 @@ function toolPart(content: SessionMessage.AssistantTool, options?: Options): UIM
     return {
       ...base,
       state: "output-available",
-      output: content.time.pruned ? PrunedToolOutput : toolOutput(content.state.content, options),
+      output: content.time.pruned ? PrunedToolOutput : toolOutput(content.state.content),
     }
   }
 
@@ -140,29 +132,17 @@ function isJSONValue(input: unknown): input is JSONValue {
   return isJSONObject(input)
 }
 
-function toolOutput(content: SessionMessage.ToolStateCompleted["content"], options?: Options) {
-  const text = truncateToolOutput(
-    content
-      .filter((item) => item.type === "text")
-      .map((item) => item.text)
-      .join(""),
-    options?.toolOutputMaxChars,
-  )
-
-  if (options?.stripMedia) return text
-
+function toolOutput(content: SessionMessage.ToolStateCompleted["content"]) {
+  const text = content
+    .filter((item) => item.type === "text")
+    .map((item) => item.text)
+    .join("")
   const attachments = content
     .filter((item) => item.type === "file")
     .map((item) => ({ mime: item.mime, url: fileSourceUrl(item), filename: item.name }))
 
   if (attachments.length === 0) return text
   return { text, attachments }
-}
-
-function truncateToolOutput(text: string, maxChars?: number) {
-  if (typeof maxChars !== "number" || !Number.isFinite(maxChars) || maxChars <= 0 || text.length <= maxChars) return text
-  const omitted = text.length - maxChars
-  return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
 }
 
 function toModelOutput(options: { output: unknown }) {

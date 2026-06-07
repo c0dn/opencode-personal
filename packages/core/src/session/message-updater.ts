@@ -2,7 +2,6 @@ import { castDraft, produce, type WritableDraft } from "immer"
 import { Effect } from "effect"
 import { SessionEvent } from "./event"
 import { SessionMessage } from "./message"
-import { TaskToolMetadata } from "./task-tool-metadata"
 
 export type MemoryState = {
   messages: SessionMessage.Message[]
@@ -107,12 +106,6 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       (item): item is DraftTool => item.type === "tool" && (callID === undefined || item.id === callID),
     )
 
-  const latestTaskToolWithStructuredState = (assistant: DraftAssistant | undefined, callID: string) =>
-    assistant?.content.findLast(
-      (item): item is DraftTool =>
-        item.type === "tool" && item.name === "task" && item.id === callID && supportsStructured(item.state.status),
-    )
-
   const latestText = (assistant: DraftAssistant | undefined, textID: string) =>
     assistant?.content.findLast((item): item is DraftText => item.type === "text" && item.id === textID)
 
@@ -124,33 +117,6 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       const assistant = yield* adapter.getAssistant(messageID)
       if (assistant) yield* adapter.updateAssistant(produce(assistant, recipe))
     })
-
-  const updateTaskToolMetadata = (event: SessionEvent.Tool.MetadataUpdated) => {
-    if (event.data.assistantMessageID) {
-      return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
-        const match = latestTaskToolWithStructuredState(draft, event.data.callID)
-        if (match) mergeTaskMetadata(match, event.data.task)
-      })
-    }
-
-    return Effect.gen(function* () {
-      const assistant = yield* adapter.getCurrentAssistant()
-      if (!assistant) return
-      yield* adapter.updateAssistant(
-        produce(assistant, (draft) => {
-          const candidates = draft.content.filter(
-            (item): item is DraftTool =>
-              item.type === "tool" &&
-              item.name === "task" &&
-              item.id === event.data.callID &&
-              item.state.status === "running",
-          )
-          if (candidates.length !== 1) return
-          mergeTaskMetadata(candidates[0]!, event.data.task)
-        }),
-      )
-    })
-  }
 
   return Effect.gen(function* () {
     yield* SessionEvent.All.match(event, {
@@ -327,12 +293,11 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }
         })
       },
-      "session.next.tool.metadata.updated": updateTaskToolMetadata,
       "session.next.tool.progress": (event) => {
         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
           const match = latestTool(draft, event.data.callID)
           if (match && match.state.status === "running") {
-            match.state.structured = preserveTaskMetadata(match.state.structured, event.data.structured)
+            match.state.structured = event.data.structured
             match.state.content = [...event.data.content]
           }
         })
@@ -351,7 +316,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
               new SessionMessage.ToolStateCompleted({
                 status: "completed",
                 input: match.state.input,
-                structured: preserveTaskMetadata(match.state.structured, event.data.structured),
+                structured: event.data.structured,
                 content: [...event.data.content],
                 result: event.data.result,
               }),
@@ -412,32 +377,45 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
         })
       },
       "session.next.retried": () => Effect.void,
-      "session.next.compaction.started": () => Effect.void,
-      "session.next.compaction.delta": () => Effect.void,
-      "session.next.compaction.ended": () => Effect.void,
-      "session.next.compaction.failed": () => Effect.void,
-      "session.next.tool.compacted": () => Effect.void,
-      "session.message.removed": () => Effect.void,
-      "session.next.patch.created": () => Effect.void,
+      "session.next.compaction.started": (event) => {
+        return adapter.appendMessage(
+          new SessionMessage.Compaction({
+            id: event.data.messageID,
+            type: "compaction",
+            metadata: event.metadata,
+            reason: event.data.reason,
+            summary: "",
+            time: { created: event.data.timestamp },
+          }),
+        )
+      },
+      "session.next.compaction.delta": (event) => {
+        return Effect.gen(function* () {
+          const currentCompaction = yield* adapter.getCurrentCompaction()
+          if (currentCompaction) {
+            yield* adapter.updateCompaction(
+              produce(currentCompaction, (draft) => {
+                draft.summary += event.data.text
+              }),
+            )
+          }
+        })
+      },
+      "session.next.compaction.ended": (event) => {
+        return Effect.gen(function* () {
+          const currentCompaction = yield* adapter.getCurrentCompaction()
+          if (currentCompaction) {
+            yield* adapter.updateCompaction(
+              produce(currentCompaction, (draft) => {
+                draft.summary = event.data.text
+                draft.include = event.data.include
+              }),
+            )
+          }
+        })
+      },
     })
   })
-}
-
-function supportsStructured(status: SessionMessage.ToolState["status"]) {
-  return status === "running" || status === "completed" || status === "error"
-}
-
-function mergeTaskMetadata(tool: WritableDraft<SessionMessage.AssistantTool>, task: TaskToolMetadata.Metadata) {
-  if (tool.state.status === "pending") return
-  tool.state.structured = { ...tool.state.structured, task }
-}
-
-function preserveTaskMetadata(
-  previous: Record<string, unknown>,
-  next: Record<string, unknown>,
-): Record<string, unknown> {
-  if (!("task" in previous) || "task" in next) return next
-  return { ...next, task: previous.task }
 }
 
 export * as SessionMessageUpdater from "./message-updater"

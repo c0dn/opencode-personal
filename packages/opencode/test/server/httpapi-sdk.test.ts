@@ -13,6 +13,7 @@ import { validateSession } from "../../src/cli/cmd/tui/validate-session"
 import { InstanceBootstrap } from "../../src/project/bootstrap-service"
 import { InstanceStore } from "../../src/project/instance-store"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
+import { MessageV2 } from "../../src/session/message-v2"
 
 import type { Config } from "@/config/config"
 import { Session as SessionNs } from "@/session/session"
@@ -665,7 +666,13 @@ describe("HttpApi SDK", () => {
     ),
   )
 
-  serverPathParity("rejects generated SDK legacy part updates without publishing transcript events", (serverPath) =>
+  // Regression: EventV2 must publish on the same ProjectBus the /event handler
+  // subscribes to, AND the /event stream must forward handler ALS/context into the
+  // body-pump fiber. Drives the full SDK → /event → Session.updatePart → sync.run →
+  // bus.publish → SDK subscriber path. Goes red if either the publisher uses a
+  // different bus instance (Bug 2 / pre-#27825) or the stream loses context (Bug 1 /
+  // pre-#27425).
+  serverPathParity("streams sync-backed part updates to /event subscribers", (serverPath) =>
     withStandardProject(serverPath, ({ sdk, directory }) =>
       Effect.gen(function* () {
         const session = yield* capture(() => sdk.session.create({ title: "sync-backed part event" }))
@@ -680,6 +687,7 @@ describe("HttpApi SDK", () => {
         )
 
         const ready = yield* Deferred.make<void>()
+        const received = yield* Deferred.make<unknown>()
 
         yield* call(async () => {
           for await (const event of events.stream) {
@@ -687,6 +695,10 @@ describe("HttpApi SDK", () => {
             const type = record(payload).type
             if (type === "server.connected") {
               Deferred.doneUnsafe(ready, Effect.void)
+              continue
+            }
+            if (type === MessageV2.Event.PartUpdated.type) {
+              Deferred.doneUnsafe(received, Effect.succeed(payload))
               return
             }
           }
@@ -704,9 +716,16 @@ describe("HttpApi SDK", () => {
             >,
           }),
         )
-        expect(updated.status).toBe(410)
-        expect(record(updated.error)).toMatchObject({ _tag: "UnsupportedOperationError" })
-        return { status: updated.status, error: record(updated.error)._tag }
+        expect(updated.status).toBe(200)
+
+        const event = yield* awaitWithTimeout(
+          Deferred.await(received),
+          "timed out waiting for message.part.updated bus payload over /event",
+          "5 seconds",
+        )
+        const properties = record(record(event).properties)
+        expect(record(properties.part)).toMatchObject({ id: seeded.part.id, type: "text" })
+        return { type: record(event).type, partType: record(properties.part).type }
       }),
     ),
   )

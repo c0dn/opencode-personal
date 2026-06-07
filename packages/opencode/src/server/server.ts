@@ -3,7 +3,7 @@ import "./init-projectors"
 import { NodeHttpServer } from "@effect/platform-node"
 import * as Log from "@opencode-ai/core/util/log"
 import { ConfigProvider, Context, Effect, Exit, Layer, Scope } from "effect"
-import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
+import { HttpRouter, HttpServer } from "effect/unstable/http"
 import { OpenApi } from "effect/unstable/httpapi"
 import { createServer } from "node:http"
 import { MDNS } from "./mdns"
@@ -43,7 +43,6 @@ type ListenerState = {
   http: ListenerServer
   websockets: WebSocketTracker.Interface
 }
-type ListenerServices = HttpServer.HttpServer | ListenerServerService | WebSocketTracker.Service
 type EffectListener = Omit<Listener, "stop"> & {
   stop: (close?: boolean) => Effect.Effect<void>
 }
@@ -55,10 +54,6 @@ interface ListenerServer {
 class ListenerServerService extends Context.Service<ListenerServerService, ListenerServer>()(
   "@opencode/ListenerServer",
 ) {}
-
-const listenerDisposeMiddleware = <E, R>(
-  effect: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>,
-): Effect.Effect<HttpServerResponse.HttpServerResponse, E, R | HttpServerRequest.HttpServerRequest> => disposeMiddleware(effect)
 
 export const Default = lazy(() => {
   const handler = HttpApiApp.webHandler().handler
@@ -107,7 +102,7 @@ const listenEffect: (opts: ListenOptions) => Effect.Effect<EffectListener, unkno
 
 function listenerLayer(opts: ListenOptions, port: number) {
   return HttpRouter.serve(HttpApiApp.createRoutes(opts), {
-    middleware: listenerDisposeMiddleware,
+    middleware: disposeMiddleware,
     disableLogger: true,
     disableListenLog: true,
   }).pipe(
@@ -131,8 +126,7 @@ function startWithPortFallback(opts: ListenOptions) {
 
 function startListener(opts: ListenOptions, port: number) {
   const scope = Scope.makeUnsafe()
-  const layer: Layer.Layer<ListenerServices, unknown, unknown> = listenerLayer(opts, port)
-  return Layer.buildWithMemoMap(layer, Layer.makeMemoMapUnsafe(), scope).pipe(
+  return Layer.buildWithMemoMap(listenerLayer(opts, port), Layer.makeMemoMapUnsafe(), scope).pipe(
     Effect.provide(HttpApiApp.context),
     Effect.onError(() => Scope.close(scope, Exit.void).pipe(Effect.ignore)),
     Effect.map(

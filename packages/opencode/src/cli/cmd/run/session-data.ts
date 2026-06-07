@@ -24,7 +24,7 @@
 //   `data.questions`. The footer shows whichever is first. When a reply
 //   event arrives, the queue entry is removed and the footer falls back
 //   to the next pending request or to the prompt view.
-import type { Event, Part, PermissionRequest, QuestionRequest, SessionMessage, ToolPart } from "@opencode-ai/sdk/v2"
+import type { Event, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
 import * as Locale from "@/util/locale"
 import { toolView } from "./tool"
 import type { FooterOutput, FooterPatch, FooterView, StreamCommit } from "./types"
@@ -307,42 +307,8 @@ export function bootstrapSessionData(input: {
   }
 }
 
-export function v2BootstrapSessionData(input: {
-  data: SessionData
-  messages: SessionMessage[]
-  permissions: PermissionRequest[]
-  questions: QuestionRequest[]
-}) {
-  for (const message of input.messages) {
-    if (message.type !== "assistant" || !message.content) {
-      continue
-    }
-
-    for (const item of message.content) {
-      if (item.type !== "tool") {
-        continue
-      }
-
-      input.data.call.set(key(message.id, item.id), DictFromToolInput(item.state.input))
-    }
-  }
-
-  for (const request of input.permissions.slice().sort((a, b) => a.id.localeCompare(b.id))) {
-    upsert(input.data.permissions, enrichPermission(input.data, request))
-  }
-
-  for (const request of input.questions.slice().sort((a, b) => a.id.localeCompare(b.id))) {
-    upsert(input.data.questions, request)
-  }
-}
-
 function key(msg: string, call: string): string {
   return `${msg}:${call}`
-}
-
-function DictFromToolInput(input: string | Record<string, unknown>): Dict {
-  if (typeof input === "string") return {}
-  return input
 }
 
 function enrichPermission(data: SessionData, request: PermissionRequest): PermissionRequest {
@@ -350,13 +316,13 @@ function enrichPermission(data: SessionData, request: PermissionRequest): Permis
     return request
   }
 
-  const meta = request.metadata ?? {}
-  if (Object.hasOwn(meta, "input")) {
+  const input = data.call.get(key(request.tool.messageID, request.tool.callID))
+  if (!input) {
     return request
   }
 
-  const input = data.call.get(key(request.tool.messageID, request.tool.callID))
-  if (!input) {
+  const meta = request.metadata ?? {}
+  if (meta.input === input) {
     return request
   }
 

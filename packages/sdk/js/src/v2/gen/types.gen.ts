@@ -15,11 +15,6 @@ export type Event =
   | EventMessageRemoved
   | EventMessagePartUpdated
   | EventMessagePartRemoved
-  | EventSessionMailboxEnqueued
-  | EventSessionMailboxProcessing
-  | EventSessionMailboxDelivered
-  | EventSessionMailboxFailed
-  | EventSessionMailboxCancelled
   | EventSessionNextAgentSwitched
   | EventSessionNextModelSwitched
   | EventSessionNextMoved
@@ -42,7 +37,6 @@ export type Event =
   | EventSessionNextToolInputDelta
   | EventSessionNextToolInputEnded
   | EventSessionNextToolCalled
-  | EventSessionNextToolMetadataUpdated
   | EventSessionNextToolProgress
   | EventSessionNextToolSuccess
   | EventSessionNextToolFailed
@@ -94,10 +88,10 @@ export type Event =
   | EventWorkspaceReady
   | EventWorkspaceFailed
   | EventWorkspaceStatus
-  | EventUiProjectViewUpdated
-  | EventUiSettingsUpdated
   | EventServerConnected
   | EventGlobalDisposed
+  | EventUiProjectViewUpdated
+  | EventUiSettingsUpdated
   | EventServerInstanceDisposed
 
 export type QuestionReplied = {
@@ -652,6 +646,21 @@ export type Pty = {
   pid: number
 }
 
+export type Todo = {
+  /**
+   * Brief description of the task
+   */
+  content: string
+  /**
+   * Current status of the task: pending, in_progress, completed, cancelled
+   */
+  status: string
+  /**
+   * Priority level of the task: high, medium, low
+   */
+  priority: string
+}
+
 export type QuestionOption = {
   /**
    * Display text (1-5 words, concise)
@@ -791,73 +800,6 @@ export type GlobalEvent = {
           sessionID: string
           messageID: string
           partID: string
-        }
-      }
-    | {
-        id: string
-        type: "session.mailbox.enqueued"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          fromSessionID?: string
-          rootSessionID?: string
-          kind: SessionMailboxKind
-          delivery: SessionMailboxDelivery
-        }
-      }
-    | {
-        id: string
-        type: "session.mailbox.processing"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          fromSessionID?: string
-          rootSessionID?: string
-          kind: SessionMailboxKind
-          delivery: SessionMailboxDelivery
-          claimID?: string
-        }
-      }
-    | {
-        id: string
-        type: "session.mailbox.delivered"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          fromSessionID?: string
-          rootSessionID?: string
-          kind: SessionMailboxKind
-          delivery: SessionMailboxDelivery
-        }
-      }
-    | {
-        id: string
-        type: "session.mailbox.failed"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          fromSessionID?: string
-          rootSessionID?: string
-          kind: SessionMailboxKind
-          delivery: SessionMailboxDelivery
-          error?: string
-        }
-      }
-    | {
-        id: string
-        type: "session.mailbox.cancelled"
-        properties: {
-          timestamp: number
-          sessionID: string
-          messageID: string
-          fromSessionID?: string
-          rootSessionID?: string
-          kind: SessionMailboxKind
-          delivery: SessionMailboxDelivery
         }
       }
     | {
@@ -1136,17 +1078,6 @@ export type GlobalEvent = {
       }
     | {
         id: string
-        type: "session.next.tool.metadata.updated"
-        properties: {
-          timestamp: number
-          sessionID: string
-          assistantMessageID?: string
-          callID: string
-          task: SessionTaskToolMetadata
-        }
-      }
-    | {
-        id: string
         type: "session.next.tool.progress"
         properties: {
           timestamp: number
@@ -1415,7 +1346,7 @@ export type GlobalEvent = {
         type: "todo.updated"
         properties: {
           sessionID: string
-          todos: Array<SessionTodoInfo>
+          todos: Array<Todo>
         }
       }
     | {
@@ -1660,20 +1591,6 @@ export type GlobalEvent = {
       }
     | {
         id: string
-        type: "ui.project_view.updated"
-        properties: {
-          viewID: string
-        }
-      }
-    | {
-        id: string
-        type: "ui.settings.updated"
-        properties: {
-          profileID: string
-        }
-      }
-    | {
-        id: string
         type: "server.connected"
         properties: {
           [key: string]: unknown
@@ -1686,6 +1603,20 @@ export type GlobalEvent = {
           [key: string]: unknown
         }
       }
+    | {
+        id: string
+        type: "ui.project_view.updated"
+        properties: {
+          viewID: string
+        }
+      }
+    | {
+        id: string
+        type: "ui.settings.updated"
+        properties: {
+          profileID: string
+        }
+      }
     | EventServerInstanceDisposed
     | SyncEventSessionCreated
     | SyncEventSessionUpdated
@@ -1694,11 +1625,6 @@ export type GlobalEvent = {
     | SyncEventMessageRemoved
     | SyncEventMessagePartUpdated
     | SyncEventMessagePartRemoved
-    | SyncEventSessionMailboxEnqueued
-    | SyncEventSessionMailboxProcessing
-    | SyncEventSessionMailboxDelivered
-    | SyncEventSessionMailboxFailed
-    | SyncEventSessionMailboxCancelled
     | SyncEventSessionNextAgentSwitched
     | SyncEventSessionNextModelSwitched
     | SyncEventSessionNextMoved
@@ -1718,7 +1644,6 @@ export type GlobalEvent = {
     | SyncEventSessionNextToolInputStarted
     | SyncEventSessionNextToolInputEnded
     | SyncEventSessionNextToolCalled
-    | SyncEventSessionNextToolMetadataUpdated
     | SyncEventSessionNextToolProgress
     | SyncEventSessionNextToolSuccess
     | SyncEventSessionNextToolFailed
@@ -2669,21 +2594,6 @@ export type NotFoundError = {
   }
 }
 
-export type Todo = {
-  /**
-   * Brief description of the task
-   */
-  content: string
-  /**
-   * Current status of the task: pending, in_progress, completed, cancelled
-   */
-  status: string
-  /**
-   * Priority level of the task: high, medium, low
-   */
-  priority: string
-}
-
 export type TextPartInput = {
   id?: string
   type: "text"
@@ -2736,12 +2646,6 @@ export type SessionBusyError = {
   _tag: "SessionBusyError"
   sessionID: string
   message: string
-}
-
-export type UnsupportedOperationError = {
-  _tag: "UnsupportedOperationError"
-  message: string
-  operation?: string
 }
 
 export type EventTuiPromptAppend = {
@@ -3183,10 +3087,6 @@ export type ModelV2Info = {
   }
 }
 
-export type SessionMailboxKind = "user" | "inter_agent" | "control"
-
-export type SessionMailboxDelivery = "async" | "interrupt"
-
 export type LocationRef = {
   directory: string
   workspaceID?: string
@@ -3226,11 +3126,6 @@ export type PromptReferenceAttachment = {
 export type SessionErrorUnknown = {
   type: "unknown"
   message: string
-}
-
-export type SessionTaskToolMetadata = {
-  sessionID: string
-  toolCalls?: number
 }
 
 export type ToolTextContent = {
@@ -3336,21 +3231,6 @@ export type QuestionV2Tool = {
 }
 
 export type QuestionV2Answer = Array<string>
-
-export type SessionTodoInfo = {
-  /**
-   * Brief description of the task
-   */
-  content: string
-  /**
-   * Current status of the task: pending, in_progress, completed, cancelled
-   */
-  status: string
-  /**
-   * Priority level of the task: high, medium, low
-   */
-  priority: string
-}
 
 export type EventServerInstanceDisposed = {
   id: string
@@ -3463,108 +3343,6 @@ export type SyncEventMessagePartRemoved = {
       sessionID: string
       messageID: string
       partID: string
-    }
-  }
-}
-
-export type SyncEventSessionMailboxEnqueued = {
-  type: "sync"
-  id: string
-  syncEvent: {
-    type: "session.mailbox.enqueued.1"
-    id: string
-    seq: number
-    aggregateID: string
-    data: {
-      timestamp: number
-      sessionID: string
-      messageID: string
-      fromSessionID?: string
-      rootSessionID?: string
-      kind: SessionMailboxKind
-      delivery: SessionMailboxDelivery
-    }
-  }
-}
-
-export type SyncEventSessionMailboxProcessing = {
-  type: "sync"
-  id: string
-  syncEvent: {
-    type: "session.mailbox.processing.1"
-    id: string
-    seq: number
-    aggregateID: string
-    data: {
-      timestamp: number
-      sessionID: string
-      messageID: string
-      fromSessionID?: string
-      rootSessionID?: string
-      kind: SessionMailboxKind
-      delivery: SessionMailboxDelivery
-      claimID?: string
-    }
-  }
-}
-
-export type SyncEventSessionMailboxDelivered = {
-  type: "sync"
-  id: string
-  syncEvent: {
-    type: "session.mailbox.delivered.1"
-    id: string
-    seq: number
-    aggregateID: string
-    data: {
-      timestamp: number
-      sessionID: string
-      messageID: string
-      fromSessionID?: string
-      rootSessionID?: string
-      kind: SessionMailboxKind
-      delivery: SessionMailboxDelivery
-    }
-  }
-}
-
-export type SyncEventSessionMailboxFailed = {
-  type: "sync"
-  id: string
-  syncEvent: {
-    type: "session.mailbox.failed.1"
-    id: string
-    seq: number
-    aggregateID: string
-    data: {
-      timestamp: number
-      sessionID: string
-      messageID: string
-      fromSessionID?: string
-      rootSessionID?: string
-      kind: SessionMailboxKind
-      delivery: SessionMailboxDelivery
-      error?: string
-    }
-  }
-}
-
-export type SyncEventSessionMailboxCancelled = {
-  type: "sync"
-  id: string
-  syncEvent: {
-    type: "session.mailbox.cancelled.1"
-    id: string
-    seq: number
-    aggregateID: string
-    data: {
-      timestamp: number
-      sessionID: string
-      messageID: string
-      fromSessionID?: string
-      rootSessionID?: string
-      kind: SessionMailboxKind
-      delivery: SessionMailboxDelivery
     }
   }
 }
@@ -3939,24 +3717,6 @@ export type SyncEventSessionNextToolCalled = {
           }
         }
       }
-    }
-  }
-}
-
-export type SyncEventSessionNextToolMetadataUpdated = {
-  type: "sync"
-  id: string
-  syncEvent: {
-    type: "session.next.tool.metadata.updated.1"
-    id: string
-    seq: number
-    aggregateID: string
-    data: {
-      timestamp: number
-      sessionID: string
-      assistantMessageID?: string
-      callID: string
-      task: SessionTaskToolMetadata
     }
   }
 }
@@ -4703,78 +4463,6 @@ export type EventMessagePartRemoved = {
   }
 }
 
-export type EventSessionMailboxEnqueued = {
-  id: string
-  type: "session.mailbox.enqueued"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    fromSessionID?: string
-    rootSessionID?: string
-    kind: SessionMailboxKind
-    delivery: SessionMailboxDelivery
-  }
-}
-
-export type EventSessionMailboxProcessing = {
-  id: string
-  type: "session.mailbox.processing"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    fromSessionID?: string
-    rootSessionID?: string
-    kind: SessionMailboxKind
-    delivery: SessionMailboxDelivery
-    claimID?: string
-  }
-}
-
-export type EventSessionMailboxDelivered = {
-  id: string
-  type: "session.mailbox.delivered"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    fromSessionID?: string
-    rootSessionID?: string
-    kind: SessionMailboxKind
-    delivery: SessionMailboxDelivery
-  }
-}
-
-export type EventSessionMailboxFailed = {
-  id: string
-  type: "session.mailbox.failed"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    fromSessionID?: string
-    rootSessionID?: string
-    kind: SessionMailboxKind
-    delivery: SessionMailboxDelivery
-    error?: string
-  }
-}
-
-export type EventSessionMailboxCancelled = {
-  id: string
-  type: "session.mailbox.cancelled"
-  properties: {
-    timestamp: number
-    sessionID: string
-    messageID: string
-    fromSessionID?: string
-    rootSessionID?: string
-    kind: SessionMailboxKind
-    delivery: SessionMailboxDelivery
-  }
-}
-
 export type EventSessionNextAgentSwitched = {
   id: string
   type: "session.next.agent.switched"
@@ -5068,18 +4756,6 @@ export type EventSessionNextToolCalled = {
         }
       }
     }
-  }
-}
-
-export type EventSessionNextToolMetadataUpdated = {
-  id: string
-  type: "session.next.tool.metadata.updated"
-  properties: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID?: string
-    callID: string
-    task: SessionTaskToolMetadata
   }
 }
 
@@ -5379,7 +5055,7 @@ export type EventTodoUpdated = {
   type: "todo.updated"
   properties: {
     sessionID: string
-    todos: Array<SessionTodoInfo>
+    todos: Array<Todo>
   }
 }
 
@@ -5592,22 +5268,6 @@ export type EventWorkspaceStatus = {
   }
 }
 
-export type EventUiProjectViewUpdated = {
-  id: string
-  type: "ui.project_view.updated"
-  properties: {
-    viewID: string
-  }
-}
-
-export type EventUiSettingsUpdated = {
-  id: string
-  type: "ui.settings.updated"
-  properties: {
-    profileID: string
-  }
-}
-
 export type EventServerConnected = {
   id: string
   type: "server.connected"
@@ -5621,6 +5281,22 @@ export type EventGlobalDisposed = {
   type: "global.disposed"
   properties: {
     [key: string]: unknown
+  }
+}
+
+export type EventUiProjectViewUpdated = {
+  id: string
+  type: "ui.project_view.updated"
+  properties: {
+    viewID: string
+  }
+}
+
+export type EventUiSettingsUpdated = {
+  id: string
+  type: "ui.settings.updated"
+  properties: {
+    profileID: string
   }
 }
 
@@ -8451,10 +8127,6 @@ export type SessionDeleteMessageErrors = {
    * SessionBusyError
    */
   409: SessionBusyError
-  /**
-   * UnsupportedOperationError
-   */
-  410: UnsupportedOperationError
 }
 
 export type SessionDeleteMessageError = SessionDeleteMessageErrors[keyof SessionDeleteMessageErrors]
@@ -9013,10 +8685,6 @@ export type PartDeleteErrors = {
    * NotFoundError
    */
   404: NotFoundError
-  /**
-   * UnsupportedOperationError
-   */
-  410: UnsupportedOperationError
 }
 
 export type PartDeleteError = PartDeleteErrors[keyof PartDeleteErrors]
@@ -9053,10 +8721,6 @@ export type PartUpdateErrors = {
    * NotFoundError
    */
   404: NotFoundError
-  /**
-   * UnsupportedOperationError
-   */
-  410: UnsupportedOperationError
 }
 
 export type PartUpdateError = PartUpdateErrors[keyof PartUpdateErrors]

@@ -21,14 +21,13 @@ import { makeRuntime } from "@/effect/run-service"
 import {
   blockerStatus,
   bootstrapSessionData,
-  v2BootstrapSessionData,
   createSessionData,
   flushInterrupted,
   pickBlockerView,
   reduceSessionData,
   type SessionData,
 } from "./session-data"
-import { replayActiveText, replayLocalRows, v2ReplayLocalRows, v2ReplaySession } from "./session-replay"
+import { replayActiveText, replayLocalRows, replaySession } from "./session-replay"
 import {
   bootstrapSubagentCalls,
   bootstrapSubagentData,
@@ -600,32 +599,24 @@ function createLayer(input: StreamInput) {
 
         const messages = (sessionID: string, limit?: number) =>
           Effect.promise(() =>
-            input.sdk.v2.session.messages({
+            input.sdk.session.messages({
               sessionID,
-              order: "desc",
               ...(typeof limit === "number" ? { limit } : {}),
             }),
           ).pipe(
-            Effect.map((item) => (item.data?.data ?? []).slice().reverse()),
+            Effect.map((item) => item.data ?? []),
             Effect.orElseSucceed(() => []),
           )
 
         const replayMessages = () =>
           Effect.promise(() =>
-            input.sdk.v2.session.messages({
+            input.sdk.session.messages({
               sessionID: input.sessionID,
-              order: "desc",
               ...(input.replayLimit === undefined
                 ? {}
                 : { limit: Math.max(input.replayLimit, SUBAGENT_BOOTSTRAP_LIMIT) }),
             }),
-          ).pipe(
-            Effect.flatMap((item) =>
-              item.error
-                ? Effect.fail(item.error)
-                : Effect.succeed((item.data?.data ?? []).slice().reverse()),
-            ),
-          )
+          ).pipe(Effect.flatMap((item) => (item.error ? Effect.fail(item.error) : Effect.succeed(item.data ?? []))))
 
         const replayRequests = () =>
           Effect.all(
@@ -664,6 +655,7 @@ function createLayer(input: StreamInput) {
                         sessionID,
                         messages: messagesList,
                         thinking: input.thinking,
+                        limits: input.limits(),
                       })
                     ) {
                       return
@@ -716,9 +708,8 @@ function createLayer(input: StreamInput) {
           const sessionPermissions = permissions.filter((item) => item.sessionID === input.sessionID)
           const sessionQuestions = questions.filter((item) => item.sessionID === input.sessionID)
           const history = input.replay
-            ? v2ReplaySession({
+            ? replaySession({
                 messages: messagesList,
-                sessionID: input.sessionID,
                 permissions: sessionPermissions,
                 questions: sessionQuestions,
                 thinking: input.thinking,
@@ -727,9 +718,8 @@ function createLayer(input: StreamInput) {
             : undefined
           const replay =
             history && input.replayLimit !== undefined && messagesList.length > input.replayLimit
-              ? v2ReplaySession({
+              ? replaySession({
                   messages: messagesList.slice(-input.replayLimit),
-                  sessionID: input.sessionID,
                   permissions: sessionPermissions,
                   questions: sessionQuestions,
                   thinking: input.thinking,
@@ -742,7 +732,7 @@ function createLayer(input: StreamInput) {
           }
 
           if (!history) {
-            v2BootstrapSessionData({
+            bootstrapSessionData({
               data: state.data,
               messages: messagesList,
               permissions: sessionPermissions,
@@ -1030,9 +1020,8 @@ function createLayer(input: StreamInput) {
           const sessionQuestions = questions.filter((item) => item.sessionID === input.sessionID)
           const snapshot = yield* Effect.try({
             try: () => {
-              const history = v2ReplaySession({
+              const history = replaySession({
                 messages: messagesList,
-                sessionID: input.sessionID,
                 permissions: sessionPermissions,
                 questions: sessionQuestions,
                 thinking: input.thinking,
@@ -1048,9 +1037,8 @@ function createLayer(input: StreamInput) {
                     : history.patch,
                 visible:
                   input.replayLimit !== undefined && messagesList.length > input.replayLimit
-                    ? v2ReplaySession({
+                    ? replaySession({
                         messages: messagesList.slice(-input.replayLimit),
-                        sessionID: input.sessionID,
                         permissions: sessionPermissions,
                         questions: sessionQuestions,
                         thinking: input.thinking,
@@ -1098,7 +1086,7 @@ function createLayer(input: StreamInput) {
             seedBlocker(request.id)
           }
 
-          for (const commit of v2ReplayLocalRows(
+          for (const commit of replayLocalRows(
             messagesList,
             [...snapshot.value.visible.commits, ...snapshot.value.activeCommits],
             next.localRows(),

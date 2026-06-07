@@ -10,7 +10,6 @@ import { SessionSchema } from "./schema"
 import { Location } from "../location"
 import { RelativePath } from "../schema"
 import { SessionMessageID } from "./message-id"
-import { TaskToolMetadata } from "./task-tool-metadata"
 
 export { FileAttachment }
 
@@ -408,18 +407,6 @@ export namespace Tool {
   })
   export type Called = typeof Called.Type
 
-  export const MetadataUpdated = EventV2.define({
-    type: "session.next.tool.metadata.updated",
-    ...options,
-    schema: {
-      ...Base,
-      assistantMessageID: SessionMessageID.ID.pipe(Schema.optional),
-      callID: Schema.String,
-      task: TaskToolMetadata.Metadata,
-    },
-  })
-  export type MetadataUpdated = typeof MetadataUpdated.Type
-
   /**
    * Replayable bounded running-tool state. Tools should checkpoint semantic
    * transitions or at a bounded cadence, not persist every stdout/stderr chunk.
@@ -465,16 +452,6 @@ export namespace Tool {
     },
   })
   export type Failed = typeof Failed.Type
-
-  export const Compacted = EventV2.define({
-    type: "session.next.tool.compacted",
-    schema: {
-      ...Base,
-      toolCallID: Schema.String,
-      messageID: SessionMessageID.ID,
-    },
-  })
-  export type Compacted = typeof Compacted.Type
 }
 
 export const RetryError = Schema.Struct({
@@ -532,37 +509,6 @@ export namespace Compaction {
     },
   })
   export type Ended = typeof Ended.Type
-
-  export const Failed = EventV2.define({
-    type: "session.next.compaction.failed",
-    schema: {
-      ...Base,
-      messageID: SessionMessageID.ID,
-      error: Schema.optional(Schema.Unknown),
-    },
-  })
-  export type Failed = typeof Failed.Type
-}
-
-export const MessageRemoved = EventV2.define({
-  type: "session.message.removed",
-  schema: {
-    ...Base,
-    messageID: SessionMessageID.ID,
-  },
-})
-export type MessageRemoved = typeof MessageRemoved.Type
-
-export namespace Patch {
-  export const Created = EventV2.define({
-    type: "session.next.patch.created",
-    schema: {
-      ...Base,
-      messageID: SessionMessageID.ID,
-      patch: Schema.Unknown,
-    },
-  })
-  export type Created = typeof Created.Type
 }
 
 const DurableDefinitions = [
@@ -583,20 +529,15 @@ const DurableDefinitions = [
   Tool.Input.Started,
   Tool.Input.Ended,
   Tool.Called,
-  Tool.MetadataUpdated,
   Tool.Progress,
   Tool.Success,
   Tool.Failed,
-  Tool.Compacted,
   Reasoning.Started,
   Reasoning.Ended,
   Retried,
   Compaction.Started,
   Compaction.Delta,
   Compaction.Ended,
-  Compaction.Failed,
-  MessageRemoved,
-  Patch.Created,
 ] as const
 const EphemeralDefinitions = [Text.Delta, Tool.Input.Delta, Reasoning.Delta] as const
 

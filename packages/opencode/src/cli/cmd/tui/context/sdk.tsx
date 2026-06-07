@@ -1,6 +1,5 @@
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import type { GlobalEvent } from "@opencode-ai/sdk/v2"
-import { createOpencodeWsClient, WsClient } from "@opencode-ai/sdk/v2/ws"
 import { createSimpleContext } from "./helper"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -21,7 +20,6 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
   }) => {
     const abort = new AbortController()
     let sse: AbortController | undefined
-    let ws: WsClient | null = null
 
     function createSDK() {
       return createOpencodeClient({
@@ -51,6 +49,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       queue = []
       timer = undefined
       last = Date.now()
+      // Batch all event emissions so all store updates result in a single render
       batch(() => {
         for (const event of events) {
           emitter.emit("event", event)
@@ -61,7 +60,10 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     const handleEvent = (event: GlobalEvent) => {
       queue.push(event)
       const elapsed = Date.now() - last
+
       if (timer) return
+      // If we just flushed recently (within 16ms), batch this with future events
+      // Otherwise, process immediately to avoid latency
       if (elapsed < 16) {
         timer = setTimeout(flush, 16)
         return
@@ -84,6 +86,8 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
           })
 
           if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
+            // Start syncing workspaces, it's important to do this after
+            // we've started listening to events
             await sdk.sync.start().catch(() => {})
           }
 
@@ -97,44 +101,23 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
           attempt += 1
           if (abort.signal.aborted || ctrl.signal.aborted) break
 
+          // Exponential backoff
           const backoff = Math.min(retryDelay * 2 ** (attempt - 1), maxRetryDelay)
           await new Promise((resolve) => setTimeout(resolve, backoff))
         }
       })().catch(() => {})
     }
 
-    async function startWS() {
-      try {
-        const password = Flag.OPENCODE_SERVER_PASSWORD ?? ""
-        const wsUrl = props.url.replace(/^http/, "ws")
-        const authUrl = new URL(wsUrl)
-        authUrl.searchParams.set("auth_token", btoa(`opencode:${password}`))
-
-        ws = await createOpencodeWsClient({
-          url: authUrl.toString(),
-          authToken: btoa(`opencode:${password}`),
-        })
-
-        ws.onEvent((event) => {
-          handleEvent(event as unknown as GlobalEvent)
-        })
-      } catch {
-        // WS failed, fall back to SSE
-        ws = null
-        startSSE()
-      }
-    }
-
     onMount(async () => {
       if (props.events) {
         const unsub = await props.events.subscribe(handleEvent)
         onCleanup(unsub)
+
         if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
+          // Start syncing workspaces, it's important to do this after
+          // we've started listening to events
           await sdk.sync.start().catch(() => {})
         }
-      } else if (Flag.OPENCODE_SERVER_PASSWORD) {
-        // Running against a server — prefer WS, fall back to SSE
-        await startWS()
       } else {
         startSSE()
       }
@@ -143,16 +126,12 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     onCleanup(() => {
       abort.abort()
       sse?.abort()
-      ws?.close()
       if (timer) clearTimeout(timer)
     })
 
     return {
       get client() {
         return sdk
-      },
-      get ws() {
-        return ws
       },
       directory: props.directory,
       event: emitter,

@@ -15,6 +15,7 @@ import { PermissionApi } from "./groups/permission"
 import { ProjectApi } from "./groups/project"
 import { ProjectCopyApi } from "./groups/project-copy"
 import { ProviderApi } from "./groups/provider"
+import { PtyApi, PtyConnectApi } from "./groups/pty"
 import { QuestionApi } from "./groups/question"
 import { SessionApi } from "./groups/session"
 import { SyncApi } from "./groups/sync"
@@ -56,6 +57,7 @@ export const InstanceHttpApi = HttpApi.make("opencode-instance")
   .addHttpApi(McpApi)
   .addHttpApi(ProjectApi)
   .addHttpApi(ProjectCopyApi)
+  .addHttpApi(PtyApi)
   .addHttpApi(QuestionApi)
   .addHttpApi(PermissionApi)
   .addHttpApi(ProviderApi)
@@ -71,6 +73,7 @@ export const OpenCodeHttpApi = HttpApi.make("opencode")
   .addHttpApi(EventApi)
   .addHttpApi(InstanceHttpApi)
   .addHttpApi(V2Api)
+  .addHttpApi(PtyConnectApi)
   .annotate(HttpApi.AdditionalSchemas, [EventSchema, Question.Replied, Question.Rejected])
 
 export type RootHttpApiType = typeof RootHttpApi

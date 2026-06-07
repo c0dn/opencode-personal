@@ -1,13 +1,14 @@
 import { afterEach, describe, expect } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
-import { Cause, Effect, Exit, Fiber, Layer } from "effect"
+import { Effect, Exit, Fiber, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Config } from "@/config/config"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Session } from "@/session/session"
+import { MessageV2 } from "../../src/session/message-v2"
 import type { SessionPrompt } from "../../src/session/prompt"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionRunState } from "@/session/run-state"
@@ -86,11 +87,7 @@ const seed = Effect.fn("TaskToolTest.seed")(function* (title = "Pinned") {
     time: { created: Date.now() },
   }
   yield* session.updateMessage(assistant)
-  const messages = [
-    { info: user, parts: [] },
-    { info: assistant, parts: [] },
-  ] satisfies SessionV1.WithParts[]
-  return { chat, user, assistant, messages }
+  return { chat, assistant }
 })
 
 function stubOps(opts?: { onPrompt?: (input: SessionPrompt.PromptInput) => void; text?: string }): TaskPromptOps {
@@ -216,7 +213,7 @@ describe("tool.task", () => {
   it.instance("execute resumes an existing task session from task_id", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const child = yield* sessions.create({ parentID: chat.id, title: "Existing child" })
       const tool = yield* TaskTool
       const def = yield* tool.init()
@@ -236,7 +233,7 @@ describe("tool.task", () => {
           agent: "build",
           abort: new AbortController().signal,
           extra: { promptOps },
-          messages,
+          messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
         },
@@ -254,7 +251,7 @@ describe("tool.task", () => {
 
   it.instance("execute asks by default and skips checks when bypassed", () =>
     Effect.gen(function* () {
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
       const calls: unknown[] = []
@@ -273,7 +270,7 @@ describe("tool.task", () => {
             agent: "build",
             abort: new AbortController().signal,
             extra: { promptOps, ...extra },
-            messages,
+            messages: [],
             metadata: () => Effect.void,
             ask: (input) =>
               Effect.sync(() => {
@@ -298,45 +295,9 @@ describe("tool.task", () => {
     }),
   )
 
-  it.instance("rejects missing or non-assistant parent messages from context history", () =>
-    Effect.gen(function* () {
-      const { chat, user } = yield* seed()
-      const tool = yield* TaskTool
-      const def = yield* tool.init()
-      const execute = (messageID: MessageID, messages: SessionV1.WithParts[]) =>
-        def
-          .execute(
-            {
-              description: "inspect bug",
-              prompt: "look into the cache key path",
-              subagent_type: "general",
-            },
-            {
-              sessionID: chat.id,
-              messageID,
-              agent: "build",
-              abort: new AbortController().signal,
-              extra: { promptOps: stubOps() },
-              messages,
-              metadata: () => Effect.void,
-              ask: () => Effect.void,
-            },
-          )
-          .pipe(Effect.exit)
-
-      const missing = yield* execute(MessageID.ascending(), [])
-      const nonAssistant = yield* execute(user.id, [{ info: user, parts: [] }])
-
-      expect(Exit.isFailure(missing)).toBe(true)
-      if (Exit.isFailure(missing)) expect(Cause.pretty(missing.cause)).toContain("Not an assistant message")
-      expect(Exit.isFailure(nonAssistant)).toBe(true)
-      if (Exit.isFailure(nonAssistant)) expect(Cause.pretty(nonAssistant.cause)).toContain("Not an assistant message")
-    }),
-  )
-
   it.instance("execute cancels child session when abort signal fires", () =>
     Effect.gen(function* () {
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
       const ready = defer<SessionPrompt.PromptInput>()
@@ -368,7 +329,7 @@ describe("tool.task", () => {
             agent: "build",
             abort: abort.signal,
             extra: { promptOps },
-            messages,
+            messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
           },
@@ -387,7 +348,7 @@ describe("tool.task", () => {
   it.instance("execute creates a child when task_id does not exist", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
       let seen: SessionPrompt.PromptInput | undefined
@@ -406,7 +367,7 @@ describe("tool.task", () => {
           agent: "build",
           abort: new AbortController().signal,
           extra: { promptOps },
-          messages,
+          messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
         },
@@ -426,7 +387,7 @@ describe("tool.task", () => {
     () =>
       Effect.gen(function* () {
         const sessions = yield* Session.Service
-        const { chat, assistant, messages } = yield* seed()
+        const { chat, assistant } = yield* seed()
         const tool = yield* TaskTool
         const def = yield* tool.init()
         let seen: SessionPrompt.PromptInput | undefined
@@ -444,7 +405,7 @@ describe("tool.task", () => {
             agent: "build",
             abort: new AbortController().signal,
             extra: { promptOps },
-            messages,
+            messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
           },
@@ -495,7 +456,7 @@ describe("tool.task", () => {
 
   it.instance("rejects background execution when the experiment is disabled", () =>
     Effect.gen(function* () {
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
 
@@ -513,7 +474,7 @@ describe("tool.task", () => {
             agent: "build",
             abort: new AbortController().signal,
             extra: { promptOps: stubOps() },
-            messages,
+            messages: [],
             metadata: () => Effect.void,
             ask: () => Effect.void,
           },
@@ -527,7 +488,7 @@ describe("tool.task", () => {
   background.instance("execute launches background tasks without waiting for completion", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
 
@@ -549,7 +510,7 @@ describe("tool.task", () => {
               prompt: () => Effect.never,
             } satisfies TaskPromptOps,
           },
-          messages,
+          messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
         },
@@ -565,7 +526,7 @@ describe("tool.task", () => {
   background.instance("background task completion waits for running updates", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
       const first = defer<void>()
@@ -592,7 +553,7 @@ describe("tool.task", () => {
         agent: "build",
         abort: new AbortController().signal,
         extra: { promptOps },
-        messages,
+        messages: [],
         metadata: () => Effect.void,
         ask: () => Effect.void,
       }
@@ -640,7 +601,7 @@ describe("tool.task", () => {
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
       const database = yield* Database.Service
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
 
@@ -657,7 +618,7 @@ describe("tool.task", () => {
           agent: "build",
           abort: new AbortController().signal,
           extra: { promptOps: stubOps({ text: "background done" }) },
-          messages,
+          messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
         },
@@ -676,7 +637,7 @@ describe("tool.task", () => {
   background.instance("background task completion synthesizes a parent notification prompt", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
       let parentPrompts = 0
@@ -705,7 +666,7 @@ describe("tool.task", () => {
                   : Effect.succeed(reply(input, "background done")),
             } satisfies TaskPromptOps,
           },
-          messages,
+          messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
         },
@@ -722,7 +683,7 @@ describe("tool.task", () => {
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
       const database = yield* Database.Service
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
       const cancelled: SessionID[] = []
@@ -749,7 +710,7 @@ describe("tool.task", () => {
               prompt: () => Effect.never,
             } satisfies TaskPromptOps,
           },
-          messages,
+          messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
         },
@@ -768,7 +729,7 @@ describe("tool.task", () => {
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
       const sessions = yield* Session.Service
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
 
@@ -790,7 +751,7 @@ describe("tool.task", () => {
               prompt: () => Effect.never,
             } satisfies TaskPromptOps,
           },
-          messages,
+          messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
         },
@@ -807,7 +768,7 @@ describe("tool.task", () => {
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
       const sessions = yield* Session.Service
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
 
@@ -829,7 +790,7 @@ describe("tool.task", () => {
               prompt: () => Effect.never,
             } satisfies TaskPromptOps,
           },
-          messages,
+          messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
         },
@@ -846,7 +807,7 @@ describe("tool.task", () => {
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
       const runState = yield* SessionRunState.Service
-      const { chat, assistant, messages } = yield* seed()
+      const { chat, assistant } = yield* seed()
       const tool = yield* TaskTool
       const def = yield* tool.init()
 
@@ -868,7 +829,7 @@ describe("tool.task", () => {
               prompt: () => Effect.never,
             } satisfies TaskPromptOps,
           },
-          messages,
+          messages: [],
           metadata: () => Effect.void,
           ask: () => Effect.void,
         },
