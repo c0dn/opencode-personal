@@ -45,6 +45,32 @@ describe("resolveAttachUrl", () => {
   })
 })
 
+// Mirror of resolveAttachDirectory's pure decision (without the chdir side
+// effect) so we can assert local-vs-remote default behavior in isolation.
+function resolveDirChoice(args: { dir?: string; url?: string }, cwd: string): string | undefined {
+  if (args.dir) return args.dir
+  if (!args.url) return cwd
+  return undefined
+}
+
+describe("attach directory resolution", () => {
+  test("explicit --dir is used", () => {
+    expect(resolveDirChoice({ dir: "/work/project" }, "/home/me")).toBe("/work/project")
+  })
+
+  test("local attach (no url, no dir) defaults to cwd", () => {
+    expect(resolveDirChoice({}, "/home/me/project")).toBe("/home/me/project")
+  })
+
+  test("remote attach (explicit url, no dir) leaves directory unset", () => {
+    expect(resolveDirChoice({ url: "http://remote:4096" }, "/home/me")).toBeUndefined()
+  })
+
+  test("explicit --dir wins even with a remote url", () => {
+    expect(resolveDirChoice({ url: "http://remote:4096", dir: "/srv/app" }, "/home/me")).toBe("/srv/app")
+  })
+})
+
 describe("probeAttach error classification", () => {
   test("ECONNREFUSED is detected in error messages", () => {
     const econnrefused = "fetch failed: ECONNREFUSED"

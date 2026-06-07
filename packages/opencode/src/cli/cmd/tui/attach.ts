@@ -23,6 +23,29 @@ function resolveAttachUrl(args: { url?: string; port?: number; hostname?: string
   return `http://${network.hostname}:${port}`
 }
 
+/**
+ * Resolve which project directory the attached TUI should open.
+ *
+ * - `--dir` wins: chdir into it locally, or pass it through for a remote attach
+ *   where the path may not exist on this machine.
+ * - No `--dir` on a local attach: default to the directory `opencode attach` was
+ *   invoked from, so the TUI lands on the caller's project instead of `~`.
+ * - No `--dir` on an explicit remote URL: leave it undefined so the server
+ *   chooses its own default directory.
+ */
+function resolveAttachDirectory(args: { dir?: string; url?: string }): string | undefined {
+  if (args.dir) {
+    try {
+      process.chdir(args.dir)
+      return process.cwd()
+    } catch {
+      return args.dir
+    }
+  }
+  if (!args.url) return process.cwd()
+  return undefined
+}
+
 // ── Connection probe ─────────────────────────────────────────────────
 
 async function probeAttach(
@@ -121,16 +144,7 @@ export const AttachCommand = cmd({
         }
       }
 
-      const directory = (() => {
-        if (!args.dir) return undefined
-        try {
-          process.chdir(args.dir)
-          return process.cwd()
-        } catch {
-          // If the directory doesn't exist locally (remote attach), pass it through.
-          return args.dir
-        }
-      })()
+      const directory = resolveAttachDirectory(args)
       const headers = ServerAuth.headers({ password: args.password, username: args.username })
       const config = await TuiConfig.get()
 
