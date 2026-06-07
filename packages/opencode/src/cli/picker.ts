@@ -32,6 +32,15 @@ export async function pick(options: PickOption[], query?: string): Promise<PickO
   return pickTty(options, query)
 }
 
+/** Multi-select picker. Returns selected items (empty array = cancelled). */
+export async function pickMulti(options: PickOption[], query?: string): Promise<PickOption[]> {
+  if (options.length === 0) throw new PickerCancelledError()
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return pickMultiNonTty(options, query)
+  }
+  return pickMultiTty(options, query)
+}
+
 // ── TTY (raw-mode) picker ────────────────────────────────────────────
 
 function pickTty(options: PickOption[], initialQuery?: string): Promise<PickOption> {
@@ -291,6 +300,282 @@ async function pickNonTty(options: PickOption[], initialQuery?: string): Promise
     }
 
     // Treat as new search query
+    query = answer
+    filtered = query.length > 0 ? fuzzyFilter(query, options) : options.slice()
+  }
+}
+
+// ── Multi-select TTY picker ──────────────────────────────────────────
+
+interface MultiPickOption extends PickOption {
+  selected: boolean
+}
+
+function pickMultiTty(options: PickOption[], initialQuery?: string): Promise<PickOption[]> {
+  return new Promise((resolve, reject) => {
+    const items: MultiPickOption[] = options.map((o) => ({ ...o, selected: false }))
+
+    const wasRaw = process.stdin.isRaw
+    const listeners: Array<{ stream: NodeJS.EventEmitter; event: string; handler: (...args: any[]) => void }> = []
+    let resolved = false
+
+    const addListener = (stream: NodeJS.EventEmitter, event: string, handler: (...args: any[]) => void) => {
+      stream.on(event, handler)
+      listeners.push({ stream, event, handler })
+    }
+
+    const cleanup = () => {
+      process.stdin.setRawMode(wasRaw ?? false)
+      process.stdin.pause()
+      for (const entry of listeners) {
+        entry.stream.removeListener(entry.event, entry.handler)
+      }
+      process.stdout.write("\x1b[?25h")
+      process.stdout.write("\x1b[0m")
+    }
+
+    const cancel = () => {
+      if (resolved) return
+      resolved = true
+      cleanup()
+      clearLines(visibleLines)
+      reject(new PickerCancelledError())
+    }
+
+    let query = initialQuery ?? ""
+    let cursorIndex = 0
+    let scrollOffset = 0
+    let visibleLines = 0
+
+    const applyFilter = (q: string, opts: MultiPickOption[]): MultiPickOption[] => {
+      if (q.trim().length === 0) return opts.slice()
+      return fuzzyFilter(q, opts)
+    }
+
+    let filtered = applyFilter(query, items)
+
+    const selectedCount = () => items.filter((i) => i.selected).length
+    const selectedItems = (): PickOption[] => items.filter((i) => i.selected)
+
+    const redraw = () => {
+      const termHeight = process.stdout.rows ?? 24
+      const termWidth = process.stdout.columns ?? 80
+      const maxVisible = Math.max(1, termHeight - 2)
+
+      if (filtered.length === 0) cursorIndex = 0
+      else if (cursorIndex >= filtered.length) cursorIndex = filtered.length - 1
+      else if (cursorIndex < 0) cursorIndex = 0
+
+      if (cursorIndex < scrollOffset) scrollOffset = cursorIndex
+      else if (cursorIndex >= scrollOffset + maxVisible) scrollOffset = cursorIndex - maxVisible + 1
+
+      const end = Math.min(scrollOffset + maxVisible, filtered.length)
+
+      clearLines(visibleLines)
+      visibleLines = 0
+
+      const header = filtered.length === 0
+        ? "\x1b[2mNo sessions match — type to search\x1b[0m"
+        : `\x1b[1mSelect sessions to delete\x1b[0m  \x1b[2m(space: toggle, \u2191\u2193: move, Enter: confirm, Esc: cancel)\x1b[0m`
+      process.stdout.write(header + "\n")
+      visibleLines++
+
+      for (let i = scrollOffset; i < end; i++) {
+        const opt = filtered[i]
+        if (!opt) continue
+        const line = formatMultiLine(opt, termWidth, i === cursorIndex)
+        process.stdout.write(line + "\n")
+        visibleLines++
+      }
+
+      if (filtered.length === 0) {
+        visibleLines++
+      }
+
+      const count = selectedCount()
+      const footer = count > 0
+        ? `\x1b[2m>\x1b[0m ${query}\x1b[5m \x1b[0m  \x1b[33m${count} selected\x1b[0m`
+        : `\x1b[2m>\x1b[0m ${query}\x1b[5m \x1b[0m  \x1b[2mtype to search...\x1b[0m`
+      process.stdout.write(footer + "\n")
+      visibleLines++
+    }
+
+    addListener(process.stdin, "data", (buf: Buffer) => {
+      if (resolved) return
+
+      const str = buf.toString()
+
+      if (str === "\x1b") {
+        cancel()
+        return
+      }
+      if (str === "\x03") {
+        cancel()
+        return
+      }
+      if (str === "\x1b[A") {
+        if (cursorIndex > 0) cursorIndex--
+        redraw()
+        return
+      }
+      if (str === "\x1b[B") {
+        if (cursorIndex < filtered.length - 1) cursorIndex++
+        redraw()
+        return
+      }
+
+      // Space: toggle selection
+      if (str === " ") {
+        if (filtered.length === 0) return
+        const current = filtered[cursorIndex]
+        if (current) {
+          const original = items.find((i) => i.id === current.id)
+          if (original) original.selected = !original.selected
+          redraw()
+        }
+        return
+      }
+
+      if (str === "\r" || str === "\n") {
+        const sel = selectedItems()
+        if (sel.length === 0) return // require at least one selection
+        resolved = true
+        cleanup()
+        clearLines(visibleLines)
+        resolve(sel)
+        return
+      }
+
+      if (str === "\x7f" || str === "\b" || str === "\x08") {
+        if (query.length > 0) {
+          query = [...query].slice(0, -1).join("")
+          filtered = applyFilter(query, items)
+          cursorIndex = 0
+          scrollOffset = 0
+          redraw()
+        }
+        return
+      }
+
+      if (str.length === 1 && str.charCodeAt(0) >= 32 && str.charCodeAt(0) < 127) {
+        query += str
+        filtered = applyFilter(query, items)
+        cursorIndex = 0
+        scrollOffset = 0
+        redraw()
+        return
+      }
+    })
+
+    addListener(process.stdout, "resize", () => {
+      if (resolved) return
+      redraw()
+    })
+
+    const sigintHandler = () => {
+      cancel()
+      process.exit(130)
+    }
+    addListener(process, "SIGINT", sigintHandler)
+
+    process.stdin.setRawMode(true)
+    process.stdin.resume()
+    process.stdout.write("\x1b[?25l")
+
+    redraw()
+  })
+}
+
+function formatMultiLine(opt: MultiPickOption, width: number, isCursor: boolean): string {
+  const checkbox = opt.selected ? "\x1b[32m\u25cf\x1b[0m" : "\u25cb"
+  const prefix = isCursor ? "\x1b[7m" : ""
+  const suffix = isCursor ? "\x1b[0m" : ""
+
+  if (width >= 80) {
+    const subtitle = opt.subtitle ?? ""
+    const detail = opt.detail ?? ""
+    const titleCol = Math.floor(width * 0.40)
+    const subtitleCol = Math.floor(width * 0.25)
+    const title = truncate(opt.title, titleCol - 2)
+    const proj = truncate(subtitle, subtitleCol - 2)
+    return `${prefix} ${checkbox} ${padRight(title, titleCol)}${padRight(proj, subtitleCol)}${detail}${suffix}`
+  }
+
+  if (width >= 50) {
+    const detail = opt.detail ?? ""
+    const titleCol = width - detail.length - 6
+    const title = truncate(opt.title, titleCol - 2)
+    return `${prefix} ${checkbox} ${padRight(title, titleCol)}${detail}${suffix}`
+  }
+
+  return `${prefix} ${checkbox} ${truncate(opt.title, width - 6)}${suffix}`
+}
+
+// ── Multi-select non-TTY picker ───────────────────────────────────────
+
+async function pickMultiNonTty(options: PickOption[], initialQuery?: string): Promise<PickOption[]> {
+  let query = initialQuery ?? ""
+  let filtered = query.length > 0 ? fuzzyFilter(query, options) : options.slice()
+
+  const rl = createInterface({ input: process.stdin, output: process.stderr })
+
+  const prompt = (): Promise<string> =>
+    new Promise((resolve) => {
+      rl.question("Enter numbers (comma-separated) or refine search, Enter to cancel: ", (answer) => {
+        resolve(answer.trim())
+      })
+    })
+
+  const printList = (items: PickOption[]) => {
+    const toPrint = items.slice(0, MAX_PRINTED)
+    process.stderr.write("\n")
+    for (let i = 0; i < toPrint.length; i++) {
+      const opt = toPrint[i]
+      if (!opt) continue
+      const title = opt.title
+      const subtitle = opt.subtitle ?? ""
+      process.stderr.write(`  ${(i + 1).toString().padStart(2)}. ${title}`)
+      if (subtitle) process.stderr.write(`  \x1b[2m${subtitle}\x1b[0m`)
+      process.stderr.write("\n")
+    }
+    if (items.length > MAX_PRINTED) {
+      process.stderr.write(`  \x1b[2m... and ${items.length - MAX_PRINTED} more\x1b[0m\n`)
+    }
+    process.stderr.write("\n")
+  }
+
+  while (true) {
+    if (filtered.length === 0) {
+      process.stderr.write(`\nNo sessions match "${query}"\n`)
+      query = ""
+      filtered = options.slice()
+      printList(filtered)
+    } else {
+      printList(filtered)
+    }
+
+    const answer = await prompt()
+
+    if (answer === "") {
+      rl.close()
+      return []
+    }
+
+    // Comma-separated numbers
+    const parts = answer.split(",").map((p) => p.trim()).filter(Boolean)
+    const allNums = parts.every((p) => /^\d+$/.test(p))
+    if (allNums) {
+      const indices = parts.map((p) => parseInt(p, 10))
+      const valid = indices.every((n) => n >= 1 && n <= filtered.length)
+      if (valid && indices.length > 0) {
+        rl.close()
+        return indices.map((n) => filtered[n - 1]!)
+      }
+      process.stderr.write(`  Invalid selection: ${answer}\n`)
+      continue
+    }
+
+    // Refine search
     query = answer
     filtered = query.length > 0 ? fuzzyFilter(query, options) : options.slice()
   }
