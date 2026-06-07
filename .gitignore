@@ -35,3 +35,4 @@ logs/
 tsconfig.tsbuildinfo
 specs/
 home/
+config.json
