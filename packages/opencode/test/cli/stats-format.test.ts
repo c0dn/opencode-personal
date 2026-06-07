@@ -38,6 +38,17 @@ describe("fmt", () => {
   test("millions with one decimal", () => {
     expect(fmt(1_000_000)).toBe("1.0M")
     expect(fmt(2_500_000)).toBe("2.5M")
+    expect(fmt(999_999_999)).toBe("1000.0M")
+  })
+
+  test("billions with one decimal", () => {
+    expect(fmt(1_000_000_000)).toBe("1.0B")
+    expect(fmt(16_563_200_000)).toBe("16.6B")
+  })
+
+  test("trillions with one decimal", () => {
+    expect(fmt(1_000_000_000_000)).toBe("1.0T")
+    expect(fmt(2_500_000_000_000)).toBe("2.5T")
   })
 
   test("negative stays raw (below 1000 threshold)", () => {
