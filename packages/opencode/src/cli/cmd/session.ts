@@ -52,6 +52,7 @@ export const SessionCommand = cmd({
 
 export const SessionDeleteCommand = effectCmd({
   command: "delete [sessionID]",
+  aliases: ["rm", "del", "remove"],
   describe: "delete sessions interactively or by ID/title",
   builder: (yargs) =>
     yargs

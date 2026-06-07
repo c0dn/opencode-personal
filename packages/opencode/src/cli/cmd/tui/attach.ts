@@ -51,6 +51,7 @@ async function probeAttach(
 
 export const AttachCommand = cmd({
   command: "attach [url]",
+  aliases: ["connect"],
   describe: "attach to a running opencode server",
   builder: (yargs) =>
     yargs

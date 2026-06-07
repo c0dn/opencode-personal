@@ -13,6 +13,7 @@ import { Locale } from "@/util/locale"
 
 export const ResumeCommand = effectCmd({
   command: "resume [session]",
+  aliases: ["res"],
   describe: "interactively search and resume a session",
   instance: false,
   builder: (yargs: Argv) =>
