@@ -684,6 +684,32 @@ it.instance(
 )
 
 it.instance(
+  "ask - accepts v2 event tool message IDs in pending request",
+  () =>
+    Effect.gen(function* () {
+      const fiber = yield* ask({
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: {},
+        always: ["ls"],
+        tool: {
+          messageID: "evt_permission_tool_ref",
+          callID: "call_test",
+        },
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      const items = yield* waitForPending(1)
+      expect(items[0].tool).toEqual({ messageID: "evt_permission_tool_ref", callID: "call_test" })
+
+      yield* rejectAll()
+      yield* Fiber.await(fiber)
+    }),
+  { git: true },
+)
+
+it.instance(
   "ask - normalizes other array metadata",
   () =>
     Effect.gen(function* () {
@@ -744,6 +770,53 @@ it.instance(
         sessionID: SessionID.make("session_test"),
         permission: "bash",
         patterns: ["ls"],
+      })
+
+      yield* rejectAll()
+      yield* Fiber.await(fiber)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - publishes asked event with v2 event tool message ID",
+  () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2Bridge.Service
+      const seen = yield* Deferred.make<PermissionV1.Request>()
+      const unsub = yield* events.listen((event) => {
+        if (event.type === Permission.Event.Asked.type)
+          Deferred.doneUnsafe(seen, Effect.succeed(event.data as PermissionV1.Request))
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsub)
+
+      const fiber = yield* ask({
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["ls"],
+        metadata: { cmd: "ls" },
+        always: ["ls"],
+        tool: {
+          messageID: "evt_permission_tool_ref",
+          callID: "call_test",
+        },
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      expect(yield* waitForPending(1)).toHaveLength(1)
+      expect(
+        yield* Deferred.await(seen).pipe(
+          Effect.timeoutOrElse({
+            duration: "1 second",
+            orElse: () => Effect.fail(new Error("timed out waiting for permission asked event")),
+          }),
+        ),
+      ).toMatchObject({
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["ls"],
+        tool: { messageID: "evt_permission_tool_ref", callID: "call_test" },
       })
 
       yield* rejectAll()

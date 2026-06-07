@@ -1,9 +1,10 @@
 import { NodeHttpServer } from "@effect/platform-node"
+import { Database } from "@opencode-ai/core/database/database"
+import { createRoutes } from "@opencode-ai/server/routes"
 import { Context, Layer, Option } from "effect"
 import * as Effect from "effect/Effect"
 import { HttpRouter, HttpServer } from "effect/unstable/http"
 import { createServer } from "node:http"
-import { createRoutes } from "@opencode-ai/server/routes"
 import { Commands } from "../commands"
 import { Runtime } from "../../framework/runtime"
 import { Daemon } from "../../services/daemon"
@@ -35,5 +36,8 @@ function bind(hostname: string, port: number, password: string) {
     HttpRouter.serve(createRoutes(password), { disableListenLog: true, disableLogger: true }).pipe(
       Layer.provideMerge(NodeHttpServer.layer(() => createServer(), { port, host: hostname })),
     ),
-  ).pipe(Effect.map((context) => Context.get(context, HttpServer.HttpServer).address))
+  ).pipe(
+    Effect.provide(Database.defaultLayer),
+    Effect.map((context) => Context.get(context, HttpServer.HttpServer).address),
+  )
 }

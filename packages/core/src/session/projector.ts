@@ -13,12 +13,12 @@ import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { MessageTable, PartTable, SessionMessageTable, SessionTable } from "./sql"
 import type { DeepMutable } from "../schema"
+import { SessionCompactionAnchor } from "./compaction-anchor"
 
 type DatabaseService = Database.Interface["db"]
 
 const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Message)
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
-
 class PromptAlreadyProjected extends Error {}
 export class SessionAlreadyProjected extends Error {}
 
@@ -209,6 +209,15 @@ function run(db: DatabaseService, event: SessionEvent.Event) {
 
 function insertMessage(db: DatabaseService, event: SessionEvent.Event, message: SessionMessage.Message) {
   if (event.seq === undefined) return Effect.die("Synchronized Session event is missing aggregate sequence")
+  return insertMessageWithSeq(db, event, message, event.seq)
+}
+
+function insertMessageWithSeq(
+  db: DatabaseService,
+  event: SessionEvent.Event,
+  message: SessionMessage.Message,
+  seq: number,
+) {
   const encoded = encodeMessage(message)
   const { id, type, ...data } = encoded
   return db
@@ -217,12 +226,63 @@ function insertMessage(db: DatabaseService, event: SessionEvent.Event, message: 
       id: SessionMessage.ID.make(id),
       session_id: event.data.sessionID,
       type,
-      seq: event.seq,
+      seq,
       time_created: DateTime.toEpochMillis(message.time.created),
       data,
     })
     .run()
     .pipe(Effect.orDie)
+}
+
+function projectCompactionEnded(db: DatabaseService, event: SessionEvent.Compaction.Ended) {
+  if (event.seq === undefined) return Effect.die("Synchronized Session event is missing aggregate sequence")
+  return Effect.gen(function* () {
+    const anchor = yield* SessionCompactionAnchor.findLatestPendingStarted({
+      db,
+      sessionID: event.data.sessionID,
+      beforeSeq: event.seq,
+    })
+    if (!anchor) return
+
+    const compaction = new SessionMessage.Compaction({
+      id: anchor.id,
+      type: "compaction",
+      reason: anchor.reason,
+      summary: event.data.text,
+      include: event.data.include,
+      time: { created: anchor.time },
+    })
+    yield* upsertCompletedCompaction(db, event, compaction, anchor.seq)
+  })
+}
+
+function upsertCompletedCompaction(
+  db: DatabaseService,
+  event: SessionEvent.Compaction.Ended,
+  compaction: SessionMessage.Compaction,
+  seq: number,
+) {
+  return Effect.gen(function* () {
+    const existing = yield* db
+      .select()
+      .from(SessionMessageTable)
+      .where(eq(SessionMessageTable.id, compaction.id))
+      .get()
+      .pipe(Effect.orDie)
+    if (!existing) return yield* insertMessageWithSeq(db, event, compaction, seq)
+    if (existing.session_id !== event.data.sessionID || existing.type !== "compaction") {
+      return yield* Effect.die(`Compaction projection conflicts with existing non-compaction message ${compaction.id}`)
+    }
+
+    const encoded = encodeMessage(compaction)
+    const { id: _, type, ...data } = encoded
+    yield* db
+      .update(SessionMessageTable)
+      .set({ type, seq, time_created: DateTime.toEpochMillis(compaction.time.created), data })
+      .where(and(eq(SessionMessageTable.id, compaction.id), eq(SessionMessageTable.session_id, event.data.sessionID)))
+      .run()
+      .pipe(Effect.orDie)
+  })
 }
 
 export const layer = Layer.effectDiscard(
@@ -424,15 +484,20 @@ export const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Tool.Input.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Tool.Input.Ended, (event) => run(db, event))
     yield* events.project(SessionEvent.Tool.Called, (event) => run(db, event))
+    yield* events.project(SessionEvent.Tool.MetadataUpdated, (event) => run(db, event))
     yield* events.project(SessionEvent.Tool.Progress, (event) => run(db, event))
     yield* events.project(SessionEvent.Tool.Success, (event) => run(db, event))
     yield* events.project(SessionEvent.Tool.Failed, (event) => run(db, event))
     yield* events.project(SessionEvent.Reasoning.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Reasoning.Ended, (event) => run(db, event))
     // yield* events.project(SessionEvent.Retried, (event) => run(db, event))
-    yield* events.project(SessionEvent.Compaction.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Compaction.Delta, (event) => run(db, event))
-    yield* events.project(SessionEvent.Compaction.Ended, (event) => run(db, event))
+    yield* events.project(SessionEvent.Compaction.Started, () => Effect.void)
+    yield* events.project(SessionEvent.Compaction.Delta, () => Effect.void)
+    yield* events.project(SessionEvent.Compaction.Ended, (event) => projectCompactionEnded(db, event))
+    yield* events.project(SessionEvent.Compaction.Failed, () => Effect.void)
+    yield* events.project(SessionEvent.Tool.Compacted, () => Effect.void)
+    yield* events.project(SessionEvent.MessageRemoved, () => Effect.void)
+    yield* events.project(SessionEvent.Patch.Created, () => Effect.void)
   }),
 )
 

@@ -23,9 +23,9 @@ import { errorMessage } from "@/util/error"
 import { Log } from "@opencode-ai/core/util/log"
 import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { Database } from "@opencode-ai/core/database/database"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionMessage } from "@opencode-ai/core/session/message"
+import { TaskToolMetadata } from "@opencode-ai/core/session/task-tool-metadata"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import * as DateTime from "effect/DateTime"
@@ -35,6 +35,17 @@ import { ToolOutput } from "@opencode-ai/core/tool-output"
 
 const DOOM_LOOP_THRESHOLD = 3
 const log = Log.create({ service: "session.processor" })
+
+function toolSuccessStructured(toolName: string, metadata: Record<string, unknown>) {
+  if (toolName !== "task") return metadata
+  return TaskToolMetadata.mergeIntoStructured({}, metadata)
+}
+
+function taskToolMetadata(part: SessionV1.ToolPart) {
+  if (part.tool !== "task") return undefined
+  const stateMetadata = "metadata" in part.state ? part.state.metadata : undefined
+  return TaskToolMetadata.sanitize(stateMetadata ?? part.metadata)
+}
 
 export type Result = "compact" | "stop" | "continue"
 
@@ -76,8 +87,16 @@ type ToolCall = {
   raw: string
 }
 
+type RecentToolCall = {
+  partID: SessionV1.ToolPart["id"]
+  tool: string
+  input: unknown
+  status: SessionV1.ToolPart["state"]["status"]
+}
+
 interface ProcessorContext extends Input {
   toolcalls: Record<string, ToolCall>
+  recentToolCalls: RecentToolCall[]
   shouldBreak: boolean
   snapshot: string | undefined
   blocked: boolean
@@ -108,7 +127,6 @@ export const layer = Layer.effect(
     const image = yield* Image.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
-    const database = yield* Database.Service
 
     const create = Effect.fn("SessionProcessor.create")(function* (input: Input) {
       // Pre-capture snapshot before the LLM stream starts. The AI SDK
@@ -120,6 +138,7 @@ export const layer = Layer.effect(
         sessionID: input.sessionID,
         model: input.model,
         toolcalls: {},
+        recentToolCalls: [],
         shouldBreak: false,
         snapshot: initialSnapshot,
         blocked: false,
@@ -188,6 +207,33 @@ export const layer = Layer.effect(
         return { call, part }
       })
 
+      const recordRecentToolCall = (part: SessionV1.ToolPart) => {
+        if (part.state.status === "pending") return
+        const recent: RecentToolCall = {
+          partID: part.id,
+          tool: part.tool,
+          input: part.state.input,
+          status: part.state.status,
+        }
+        const index = ctx.recentToolCalls.findIndex((item) => item.partID === part.id)
+        const next =
+          index === -1
+            ? [...ctx.recentToolCalls, recent]
+            : ctx.recentToolCalls.map((item, itemIndex) => (itemIndex === index ? recent : item))
+        ctx.recentToolCalls = next.slice(-DOOM_LOOP_THRESHOLD)
+      }
+
+      const shouldAskDoomLoop = (tool: string, input: unknown) => {
+        const recent = ctx.recentToolCalls.slice(-DOOM_LOOP_THRESHOLD)
+        if (recent.length !== DOOM_LOOP_THRESHOLD) return false
+        return recent.every(
+          (part) =>
+            part.tool === tool &&
+            part.status !== "pending" &&
+            JSON.stringify(part.input) === JSON.stringify(input),
+        )
+      }
+
       const updateToolCall = Effect.fn("SessionProcessor.updateToolCall")(function* (
         toolCallID: string,
         update: (part: SessionV1.ToolPart) => SessionV1.ToolPart,
@@ -200,6 +246,16 @@ export const layer = Layer.effect(
           partID: part.id,
           messageID: part.messageID,
           sessionID: part.sessionID,
+        }
+        const task = taskToolMetadata(part)
+        if (task && match.call.assistantMessageID) {
+          yield* events.publish(SessionEvent.Tool.MetadataUpdated, {
+            sessionID: ctx.sessionID,
+            assistantMessageID: match.call.assistantMessageID,
+            callID: toolCallID,
+            task,
+            timestamp: DateTime.makeUnsafe(Date.now()),
+          })
         }
         return part
       })
@@ -504,7 +560,7 @@ export const layer = Layer.effect(
                 timestamp: DateTime.makeUnsafe(Date.now()),
               })
             }
-            yield* updateToolCall(value.id, (match) => ({
+            const updated = yield* updateToolCall(value.id, (match) => ({
               ...match,
               tool: value.name,
               state:
@@ -519,24 +575,9 @@ export const layer = Layer.effect(
                 ? { ...value.providerMetadata, providerExecuted: true }
                 : value.providerMetadata,
             }))
-
-            const parts = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
-              Effect.provideService(Database.Service, database),
-            )
-            const recentParts = parts.slice(-DOOM_LOOP_THRESHOLD)
-
-            if (
-              recentParts.length !== DOOM_LOOP_THRESHOLD ||
-              !recentParts.every(
-                (part) =>
-                  part.type === "tool" &&
-                  part.tool === value.name &&
-                  part.state.status !== "pending" &&
-                  JSON.stringify(part.state.input) === JSON.stringify(input),
-              )
-            ) {
-              return
-            }
+            if (!updated) return
+            recordRecentToolCall(updated)
+            if (!shouldAskDoomLoop(value.name, input)) return
 
             const agent = yield* agents.get(ctx.assistantMessage.agent)
             yield* permission.ask({
@@ -635,7 +676,7 @@ export const layer = Layer.effect(
                   sessionID: ctx.sessionID,
                   assistantMessageID,
                   callID: value.id,
-                  structured: output.metadata,
+                  structured: toolSuccessStructured(value.name, output.metadata),
                   content,
                   result: value.result,
                   provider: {
@@ -1055,7 +1096,6 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Image.defaultLayer),
     Layer.provide(Config.defaultLayer),
     Layer.provide(RuntimeFlags.defaultLayer),
-    Layer.provide(Database.defaultLayer),
     Layer.provide(EventV2Bridge.defaultLayer),
   ),
 )

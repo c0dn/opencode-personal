@@ -26,13 +26,17 @@ const sessionNextTypes = [
   "session.next.tool.input.delta",
   "session.next.tool.input.ended",
   "session.next.tool.called",
+  "session.next.tool.metadata.updated",
   "session.next.tool.progress",
   "session.next.tool.success",
   "session.next.tool.failed",
+  "session.next.tool.compacted",
   "session.next.retried",
   "session.next.compaction.started",
   "session.next.compaction.delta",
   "session.next.compaction.ended",
+  "session.next.compaction.failed",
+  "session.next.patch.created",
 ] as const
 
 const syncVersions = {
@@ -44,6 +48,9 @@ const ephemeralTypes = new Set<string>([
   "session.next.text.delta",
   "session.next.reasoning.delta",
   "session.next.tool.input.delta",
+  "session.next.tool.compacted",
+  "session.next.compaction.failed",
+  "session.next.patch.created",
 ])
 
 describe("EventV2 registry", () => {

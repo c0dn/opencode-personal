@@ -8,6 +8,15 @@ function fn<T extends z.ZodType, Result>(schema: T, cb: (input: z.infer<T>) => R
 }
 
 export namespace Share {
+  const PublicTranscriptV2Payload = z
+    .object({
+      kind: z.literal("opencode.transcript"),
+      version: z.literal(2),
+      session: z.object({ id: z.string(), title: z.string().optional() }).passthrough(),
+      messages: z.array(z.object({ type: z.string(), id: z.string() }).passthrough()),
+    })
+    .passthrough()
+
   export const Info = z.object({
     id: z.string(),
     secret: z.string(),
@@ -36,6 +45,10 @@ export namespace Share {
       type: z.literal("model"),
       data: z.custom<Model[]>(),
     }),
+    z.object({
+      type: z.literal("public_transcript_v2"),
+      payload: PublicTranscriptV2Payload,
+    }),
   ])
   export type Data = z.infer<typeof Data>
 
@@ -60,10 +73,15 @@ export namespace Share {
         return "session_diff"
       case "model":
         return "model"
+      case "public_transcript_v2":
+        return "public_transcript_v2"
     }
   }
 
   function merge(...items: Data[][]) {
+    const v2Items = items.flatMap((list) => list.filter((item) => item.type === "public_transcript_v2"))
+    if (v2Items.length > 0) return [v2Items.at(-1)!]
+
     const map = new Map<string, Data>()
     for (const list of items) {
       for (const item of list) {
@@ -197,6 +215,9 @@ export namespace Share {
                 break
               case "model":
                 await Storage.write(["share_data", input.share.id, "model"], item.data)
+                break
+              case "public_transcript_v2":
+                await Storage.write(["share_data", input.share.id, "public_transcript_v2"], item.payload)
                 break
             }
           }),

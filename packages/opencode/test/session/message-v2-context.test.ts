@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { SessionMessage } from "@opencode-ai/core/session/message"
+import { AgentAttachment } from "@opencode-ai/core/session/prompt"
 import { DateTime } from "effect"
 import { MessageV2Context } from "../../src/session/message-v2-context"
 
@@ -17,6 +18,14 @@ function id(suffix: string) {
 
 function ids(messages: SessionMessage.Message[]) {
   return messages.map((message) => message.id)
+}
+
+function agent(name: string) {
+  return new AgentAttachment({ name })
+}
+
+function taskIDs(tasks: MessageV2Context.Task[]) {
+  return tasks.map((task) => task.id)
 }
 
 function user(suffix: string, time: number, input?: Partial<SessionMessage.User>): SessionMessage.User {
@@ -161,6 +170,94 @@ describe("session.message-v2-context", () => {
     expect(MessageV2Context.latest([nonterminal, completed, finished]).assistant).toBe(nonterminal)
     expect(MessageV2Context.latest([nonterminal, completed, finished]).finishedAssistant).toBe(finished)
     expect(MessageV2Context.latest([errored, nonterminal, completed, finished]).finishedAssistant).toBe(errored)
+  })
+
+  test("latestWithTasks matches latest state and has no pending tasks before unfinished work", () => {
+    const firstUser = user("first_user", 1, { agents: [agent("reviewer")] })
+    const finished = assistant("finished", 2, { finish: "stop" })
+    const nextUser = user("next_user", 3)
+    const running = assistant("running", 4)
+
+    const state = MessageV2Context.latestWithTasks([running, firstUser, nextUser, finished])
+
+    expect(state.user).toBe(nextUser)
+    expect(state.assistant).toBe(running)
+    expect(state.finishedAssistant).toBe(finished)
+    expect(state.tasks).toStrictEqual([])
+  })
+
+  test("latestWithTasks returns pending user agent tasks after latest finished assistant", () => {
+    const before = user("before", 1, { agents: [agent("old")] })
+    const finished = assistant("finished", 2, { finish: "stop" })
+    const firstPending = user("first_pending", 3, { agents: [agent("reviewer"), agent("tester")] })
+    const secondPending = user("second_pending", 4, { agents: [agent("builder")] })
+
+    const state = MessageV2Context.latestWithTasks([secondPending, before, firstPending, finished])
+
+    expect(taskIDs(state.tasks)).toStrictEqual([
+      `${firstPending.id}/agent/0`,
+      `${firstPending.id}/agent/1`,
+      `${secondPending.id}/agent/0`,
+    ])
+    expect(state.tasks.at(-1)).toMatchObject({ type: "subtask", message: secondPending, index: 0 })
+  })
+
+  test("latestWithTasks returns all task requests when no assistant has finished yet", () => {
+    const first = user("first", 1, { agents: [agent("reviewer")] })
+    const second = user("second", 2, { agents: [agent("tester")] })
+    const running = assistant("running", 3)
+
+    const state = MessageV2Context.latestWithTasks([running, second, first])
+
+    expect(taskIDs(state.tasks)).toStrictEqual([`${first.id}/agent/0`, `${second.id}/agent/0`])
+  })
+
+  test("latestWithTasks orders pending compaction and agent tasks by canonical chronology", () => {
+    const finished = assistant("finished", 1, { finish: "stop" })
+    const first = user("first", 2, { agents: [agent("reviewer")] })
+    const autoCompaction = compaction("auto_compaction", 3, { reason: "auto", summary: "" })
+    const manualCompaction = compaction("manual_compaction", 4, { summary: "" })
+    const second = user("second", 5, { agents: [agent("tester")] })
+
+    const state = MessageV2Context.latestWithTasks([second, manualCompaction, autoCompaction, first, finished])
+
+    expect(state.tasks.map((task) => task.type)).toStrictEqual(["subtask", "compaction", "compaction", "subtask"])
+    expect(taskIDs(state.tasks)).toStrictEqual([
+      `${first.id}/agent/0`,
+      autoCompaction.id,
+      manualCompaction.id,
+      `${second.id}/agent/0`,
+    ])
+    expect(state.tasks[1]).toMatchObject({ type: "compaction", auto: true })
+    expect(state.tasks[2]).toMatchObject({ type: "compaction", auto: false })
+  })
+
+  test("latestWithTasks excludes completed compaction anchors from pending tasks", () => {
+    const finished = assistant("finished", 1, { finish: "stop" })
+    const pending = compaction("pending", 2, { summary: "" })
+    const completed = compaction("completed", 3, { summary: "done", include: id("tail") })
+
+    const state = MessageV2Context.latestWithTasks([completed, pending, finished])
+    expect(taskIDs(state.tasks)).toStrictEqual([pending.id])
+  })
+
+  test("latestWithTasks handles same-timestamp task ordering by binary ID order", () => {
+    const finished = assistant("finished", 1, { finish: "stop" })
+    const sameB = user("same_b", 2, { agents: [agent("b")] })
+    const sameA = user("same_a", 2, { agents: [agent("a")] })
+
+    const state = MessageV2Context.latestWithTasks([sameB, finished, sameA])
+    expect(taskIDs(state.tasks)).toStrictEqual([`${sameA.id}/agent/0`, `${sameB.id}/agent/0`])
+  })
+
+  test("latestWithTasks uses terminal errored assistant as pending task boundary", () => {
+    const before = user("before_error", 1, { agents: [agent("old")] })
+    const errored = assistant("errored", 2, { error: { type: "unknown", message: "failed" } })
+    const after = user("after_error", 3, { agents: [agent("new")] })
+
+    const state = MessageV2Context.latestWithTasks([after, before, errored])
+    expect(state.finishedAssistant).toBe(errored)
+    expect(taskIDs(state.tasks)).toStrictEqual([`${after.id}/agent/0`])
   })
 
   test("implementation is pure and has no database dependency", async () => {

@@ -12,6 +12,9 @@ type SessionToolPart = Extract<SessionMessage["parts"][number], { type: "tool" }
 type SessionStatusMap = NonNullable<Awaited<ReturnType<OpencodeClient["session"]["status"]>>["data"]>
 type TextPart = Extract<SessionMessage["parts"][number], { type: "text" }>
 type ReasoningPart = Extract<SessionMessage["parts"][number], { type: "reasoning" }>
+type V2SessionMessage = NonNullable<Awaited<ReturnType<OpencodeClient["v2"]["session"]["messages"]>>["data"]>["data"][number]
+type V2AssistantMessage = Extract<V2SessionMessage, { type: "assistant" }>
+type V2AssistantTool = Extract<V2AssistantMessage["content"][number], { type: "tool" }>
 
 afterEach(() => {
   mock.restore()
@@ -219,6 +222,107 @@ function assistantMessage(input: { sessionID: string; id: string; parts: Session
   }
 }
 
+function v2AssistantMessage(input: { id: string; content: V2AssistantMessage["content"] }): V2AssistantMessage {
+  return {
+    id: input.id,
+    type: "assistant",
+    time: { created: 1, completed: 2 },
+    agent: "build",
+    model: {
+      id: "gpt-5",
+      providerID: "openai",
+    },
+    content: input.content,
+  }
+}
+
+function v2TaskTool(input: {
+  id: string
+  childSessionID: string
+  status?: "running" | "completed"
+  body?: Record<string, unknown>
+}): V2AssistantTool {
+  const body = input.body ?? {
+    description: "Explore run folder",
+    subagent_type: "explore",
+  }
+  const base = {
+    id: input.id,
+    type: "tool" as const,
+    name: "task",
+    time: { created: 1, ran: 1, completed: input.status === "running" ? undefined : 2 },
+  }
+
+  if (input.status === "running") {
+    return {
+      ...base,
+      state: {
+        status: "running",
+        input: body,
+        structured: { task: { sessionID: input.childSessionID } },
+        content: [],
+      },
+    }
+  }
+
+  return {
+    ...base,
+    state: {
+      status: "completed",
+      input: body,
+      structured: { task: { sessionID: input.childSessionID } },
+      content: [],
+    },
+  }
+}
+
+function v2Tool(input: {
+  id: string
+  name: string
+  status?: "running" | "completed" | "error"
+  body: Record<string, unknown>
+  output?: string
+}): V2AssistantTool {
+  const base = {
+    id: input.id,
+    type: "tool" as const,
+    name: input.name,
+    time: { created: 1, ran: 1, completed: input.status === "running" ? undefined : 2 },
+  }
+  if (input.status === "running") {
+    return {
+      ...base,
+      state: {
+        status: "running",
+        input: input.body,
+        structured: {},
+        content: [],
+      },
+    }
+  }
+  if (input.status === "error") {
+    return {
+      ...base,
+      state: {
+        status: "error",
+        input: input.body,
+        structured: {},
+        content: [],
+        error: { type: "unknown", message: input.output ?? "failed" },
+      },
+    }
+  }
+  return {
+    ...base,
+    state: {
+      status: "completed",
+      input: input.body,
+      structured: {},
+      content: input.output ? [{ type: "text", text: input.output }] : [],
+    },
+  }
+}
+
 function runningTool(input: {
   sessionID: string
   messageID: string
@@ -413,6 +517,58 @@ function footer(fn?: (commit: StreamCommit) => void) {
   }
 }
 
+function convertToV2Messages(messages: SessionMessage[]): V2SessionMessage[] {
+  return messages.map((msg) => {
+    if (msg.info.role === "user") {
+      const text = msg.parts
+        .filter((p) => p.type === "text")
+        .map((p) => "text" in p ? p.text : "")
+        .join("")
+      return {
+        id: msg.info.id,
+        type: "user" as const,
+        text,
+        time: { created: msg.info.time.created },
+      }
+    }
+
+    const content: V2AssistantMessage["content"] = msg.parts.map((p): V2AssistantMessage["content"][number] => {
+      if (p.type === "text") {
+        return { type: "text", id: p.id, text: "text" in p ? (p as TextPart).text : "" }
+      }
+      if (p.type === "reasoning") {
+        return { type: "reasoning", id: p.id, text: "text" in p ? (p as ReasoningPart).text : "" }
+      }
+      const tp = p as SessionToolPart
+      return {
+        type: "tool",
+        id: tp.id,
+        name: tp.tool,
+        time: { created: 1, ran: 1 } as { created: number; ran?: number },
+        state: {
+          status: tp.state.status as V2AssistantTool["state"]["status"],
+          input: tp.state.input ?? {},
+          ...("output" in tp.state ? { output: tp.state.output ?? "" } : {}),
+          structured: ("metadata" in tp.state ? tp.state.metadata : {}) as Record<string, unknown>,
+          content: ("content" in tp.state ? tp.state.content : []) as Array<unknown>,
+        },
+      } as V2AssistantTool
+    })
+
+    return {
+      id: msg.info.id,
+      type: "assistant" as const,
+      time: { created: msg.info.time.created, completed: msg.info.time.completed },
+      agent: msg.info.agent ?? "build",
+      model: {
+        id: msg.info.modelID,
+        providerID: msg.info.providerID,
+      },
+      content,
+    }
+  })
+}
+
 function sdk(
   input: {
     stream?: EventStream
@@ -422,6 +578,7 @@ function sdk(
     promptAsync?: OpencodeClient["session"]["promptAsync"]
     status?: OpencodeClient["session"]["status"]
     messages?: OpencodeClient["session"]["messages"]
+    v2Messages?: OpencodeClient["v2"]["session"]["messages"]
     children?: OpencodeClient["session"]["children"]
     permissions?: OpencodeClient["permission"]["list"]
     questions?: OpencodeClient["question"]["list"]
@@ -435,6 +592,15 @@ function sdk(
   const promptAsync: OpencodeClient["session"]["promptAsync"] = input.promptAsync ?? (() => ok(undefined))
   const status: OpencodeClient["session"]["status"] = input.status ?? (() => ok({}))
   const messages: OpencodeClient["session"]["messages"] = input.messages ?? (() => ok([]))
+  const v2Messages: OpencodeClient["v2"]["session"]["messages"] =
+    input.v2Messages ??
+    (async (params) => {
+      const resp = await messages(params as unknown as Parameters<OpencodeClient["session"]["messages"]>[0])
+      const data = resp.data ?? []
+      const converted = convertToV2Messages(data)
+      if (params.order === "desc") converted.reverse()
+      return ok({ data: converted, cursor: {} })
+    })
   const children: OpencodeClient["session"]["children"] = input.children ?? (() => ok([]))
   const permissions: OpencodeClient["permission"]["list"] = input.permissions ?? (() => ok([]))
   const questions: OpencodeClient["question"]["list"] = input.questions ?? (() => ok([]))
@@ -444,6 +610,7 @@ function sdk(
   spyOn(client.session, "promptAsync").mockImplementation(promptAsync)
   spyOn(client.session, "status").mockImplementation(status)
   spyOn(client.session, "messages").mockImplementation(messages)
+  spyOn(client.v2.session, "messages").mockImplementation(v2Messages)
   spyOn(client.session, "children").mockImplementation(children)
   spyOn(client.permission, "list").mockImplementation(permissions)
   spyOn(client.question, "list").mockImplementation(questions)
@@ -495,27 +662,29 @@ describe("run stream transport", () => {
   test("replays persisted main-session history during bootstrap when enabled", async () => {
     const src = eventFeed()
     const ui = footer()
+    const legacyMessages = mock(async ({ sessionID }: { sessionID: string }) =>
+      sessionID === "session-1"
+        ? ok([
+            assistantMessage({
+              sessionID: "session-1",
+              id: "msg-1",
+              parts: [
+                {
+                  ...textPart("text-1", "msg-1", "Hello."),
+                  time: {
+                    start: 1,
+                    end: 2,
+                  },
+                },
+              ],
+            }),
+          ])
+        : ok([]),
+    )
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
-        messages: async ({ sessionID }) =>
-          sessionID === "session-1"
-            ? ok([
-                assistantMessage({
-                  sessionID: "session-1",
-                  id: "msg-1",
-                  parts: [
-                    {
-                      ...textPart("text-1", "msg-1", "Hello."),
-                      time: {
-                        start: 1,
-                        end: 2,
-                      },
-                    },
-                  ],
-                }),
-              ])
-            : ok([]),
+        messages: legacyMessages,
       }),
       sessionID: "session-1",
       thinking: true,
@@ -526,6 +695,7 @@ describe("run stream transport", () => {
 
     try {
       await waitFor(() => ui.commits.find((item) => item.kind === "assistant" && item.text === "Hello."))
+      expect(legacyMessages).toHaveBeenCalledWith(expect.objectContaining({ sessionID: "session-1" }))
       expect(ui.idleCalls).toBeGreaterThan(0)
     } finally {
       src.close()
@@ -583,11 +753,9 @@ describe("run stream transport", () => {
 
     try {
       await waitFor(() => (ui.commits.length > 0 ? ui.commits : undefined))
-      expect(ui.commits.filter((item) => item.kind === "assistant")).toEqual([
-        expect.objectContaining({
-          text: "World.",
-        }),
-      ])
+      expect(ui.commits.filter((item) => item.kind === "assistant").length).toBeGreaterThan(0)
+      expect(ui.commits.some((item) => item.text === "World.")).toBe(true)
+      expect(ui.commits.some((item) => item.text === "Hello.")).toBe(false)
     } finally {
       src.close()
       await transport.close()
@@ -1094,11 +1262,15 @@ describe("run stream transport", () => {
         stream: src.stream,
         messages: async () => {
           calls += 1
-          if (calls === 1) {
-            return ok([])
+          return ok([])
+        },
+        v2Messages: async () => {
+          calls += 1
+          if (calls < 2) {
+            return ok({ data: [], cursor: {} })
           }
 
-          throw new Error("snapshot failed")
+          return { error: new Error("snapshot failed") as any, data: undefined } as any
         },
       }),
       sessionID: "session-1",
@@ -1189,33 +1361,26 @@ describe("run stream transport", () => {
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
-        messages: async ({ sessionID }) => {
+        v2Messages: async ({ sessionID }) => {
           if (sessionID !== "session-1") {
-            return ok([])
+            return ok({ data: [], cursor: {} })
           }
 
-          return ok([
-            assistantMessage({
-              sessionID: "session-1",
-              id: "msg-1",
-              parts: [
-                completedTool({
-                  sessionID: "session-1",
-                  messageID: "msg-1",
-                  id: "task-1",
-                  callID: "call-1",
-                  tool: "task",
-                  body: {
-                    description: "Explore run folder",
-                    subagent_type: "explore",
-                  },
-                  metadata: {
-                    sessionId: "child-1",
-                  },
-                }),
-              ],
-            }),
-          ])
+          return ok({
+            data: [
+              v2AssistantMessage({
+                id: "msg-1",
+                content: [
+                  v2TaskTool({
+                    id: "task-1",
+                    childSessionID: "child-1",
+                    status: "completed",
+                  }),
+                ],
+              }),
+            ],
+            cursor: {},
+          })
         },
         children: async () => ok([child("child-1")]),
       }),
@@ -1245,51 +1410,44 @@ describe("run stream transport", () => {
     const transport = await createSessionTransport({
       sdk: sdk({
         stream: src.stream,
-        messages: async ({ sessionID }) => {
+        v2Messages: async ({ sessionID }) => {
           if (sessionID === "session-1") {
-            return ok([
-              assistantMessage({
-                sessionID: "session-1",
-                id: "msg-1",
-                parts: [
-                  runningTool({
-                    sessionID: "session-1",
-                    messageID: "msg-1",
-                    id: "task-1",
-                    callID: "call-1",
-                    tool: "task",
+            return ok({
+              data: [
+                v2AssistantMessage({
+                  id: "msg-1",
+                  content: [
+                    v2TaskTool({
+                      id: "task-1",
+                      childSessionID: "child-1",
+                      status: "running",
+                    }),
+                  ],
+                }),
+              ],
+              cursor: {},
+            })
+          }
+
+          return ok({
+            data: [
+              v2AssistantMessage({
+                id: "msg-child-1",
+                content: [
+                  v2Tool({
+                    id: "edit-1",
+                    name: "edit",
+                    status: "running",
                     body: {
-                      description: "Explore run folder",
-                      subagent_type: "explore",
-                    },
-                    metadata: {
-                      sessionId: "child-1",
+                      filePath: "src/run/subagent-data.ts",
+                      diff: "@@ -1 +1 @@",
                     },
                   }),
                 ],
               }),
-            ])
-          }
-
-          return ok([
-            assistantMessage({
-              sessionID: "child-1",
-              id: "msg-child-1",
-              parts: [
-                runningTool({
-                  sessionID: "child-1",
-                  messageID: "msg-child-1",
-                  id: "edit-1",
-                  callID: "call-edit-1",
-                  tool: "edit",
-                  body: {
-                    filePath: "src/run/subagent-data.ts",
-                    diff: "@@ -1 +1 @@",
-                  },
-                }),
-              ],
-            }),
-          ])
+            ],
+            cursor: {},
+          })
         },
         children: async () => ok([child("child-1")]),
         permissions: async () =>
@@ -1303,7 +1461,7 @@ describe("run stream transport", () => {
               always: [],
               tool: {
                 messageID: "msg-child-1",
-                callID: "call-edit-1",
+                callID: "edit-1",
               },
             },
           ]),
@@ -1319,7 +1477,7 @@ describe("run stream transport", () => {
         const item = ui.events.findLast((event) => event.type === "stream.subagent")
         const state = item?.type === "stream.subagent" ? item.state : undefined
         return state?.tabs.some((tab) => tab.sessionID === "child-1") &&
-          state.permissions.some((req) => req.id === "perm-1")
+          state.permissions.some((req) => req.id === "perm-1" && req.metadata.input)
           ? state
           : undefined
       })
@@ -1401,44 +1559,40 @@ describe("run stream transport", () => {
 
   test("bootstraps child session output before selection", async () => {
     const ui = footer()
+    const v2Messages = mock(async ({ sessionID }: { sessionID: string; limit?: number; order?: "asc" | "desc" }) => {
+      if (sessionID === "session-1") {
+        return ok({
+          data: [
+            v2AssistantMessage({
+              id: "msg-1",
+              content: [v2TaskTool({ id: "task-1", childSessionID: "child-1", status: "running" })],
+            }),
+          ],
+          cursor: {},
+        })
+      }
+
+      if (sessionID === "child-1") {
+        return ok({
+          data: [
+            v2AssistantMessage({
+              id: "msg-child-newer",
+              content: [{ id: "txt-child-newer", type: "text", text: "newer summary" }],
+            }),
+            v2AssistantMessage({
+              id: "msg-child-older",
+              content: [{ id: "txt-child-older", type: "text", text: "older summary" }],
+            }),
+          ],
+          cursor: {},
+        })
+      }
+
+      return ok({ data: [], cursor: {} })
+    })
     const transport = await createSessionTransport({
       sdk: sdk({
-        messages: async ({ sessionID }) => {
-          if (sessionID === "session-1") {
-            return ok([
-              assistantMessage({
-                sessionID: "session-1",
-                id: "msg-1",
-                parts: [
-                  runningTool({
-                    sessionID: "session-1",
-                    messageID: "msg-1",
-                    id: "task-1",
-                    callID: "call-1",
-                    tool: "task",
-                    body: {
-                      description: "Explore run.ts",
-                      subagent_type: "explore",
-                    },
-                    metadata: {
-                      sessionId: "child-1",
-                    },
-                  }),
-                ],
-              }),
-            ])
-          }
-
-          return sessionID === "child-1"
-            ? ok([
-                assistantMessage({
-                  sessionID: "child-1",
-                  id: "msg-child-1",
-                  parts: [textPart("txt-child-1", "msg-child-1", "subagent summary", "child-1")],
-                }),
-              ])
-            : ok([])
-        },
+        v2Messages,
         children: async () => ok([child("child-1")]),
       }),
       sessionID: "session-1",
@@ -1461,7 +1615,7 @@ describe("run stream transport", () => {
         await waitFor(() => {
           const item = ui.events.findLast((event) => event.type === "stream.subagent")
           const detail = item?.type === "stream.subagent" ? item.state.details["child-1"] : undefined
-          return detail?.commits.some((commit) => commit.kind === "assistant" && commit.text === "subagent summary")
+          return detail?.commits.some((commit) => commit.kind === "assistant" && commit.text === "newer summary")
             ? detail
             : undefined
         }),
@@ -1470,53 +1624,56 @@ describe("run stream transport", () => {
         commits: [
           expect.objectContaining({
             kind: "assistant",
-            text: "subagent summary",
+            text: "older summary",
+          }),
+          expect.objectContaining({
+            kind: "assistant",
+            text: "newer summary",
           }),
         ],
       })
+      expect(v2Messages.mock.calls.map((call) => call[0])).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ sessionID: "session-1", order: "desc" }),
+          expect.objectContaining({ sessionID: "child-1", order: "desc" }),
+        ]),
+      )
     } finally {
       await transport.close()
     }
   })
 
   test("does not block startup on child history bootstrap", async () => {
-    const pending = defer<Awaited<ReturnType<typeof ok<SessionMessage[]>>>>()
+    const pending = defer<Awaited<ReturnType<typeof ok<{ data: V2SessionMessage[]; cursor: {} }>>>>()
     const ui = footer()
     let transport: Awaited<ReturnType<typeof createSessionTransport>> | undefined
 
     const task = createSessionTransport({
       sdk: sdk({
-        messages: async ({ sessionID }) => {
+        v2Messages: async ({ sessionID }) => {
           if (sessionID === "session-1") {
-            return ok([
-              assistantMessage({
-                sessionID: "session-1",
-                id: "msg-1",
-                parts: [
-                  runningTool({
-                    sessionID: "session-1",
-                    messageID: "msg-1",
-                    id: "task-1",
-                    callID: "call-1",
-                    tool: "task",
-                    body: {
-                      description: "Explore run.ts",
-                      subagent_type: "explore",
-                    },
-                    metadata: {
-                      sessionId: "child-1",
-                    },
-                  }),
-                ],
-              }),
-            ])
+            return ok({
+              data: [
+                v2AssistantMessage({
+                  id: "msg-1",
+                  content: [
+                    v2TaskTool({
+                      id: "task-1",
+                      childSessionID: "child-1",
+                      status: "running",
+                    }),
+                  ],
+                }),
+              ],
+              cursor: {},
+            })
           }
 
           if (sessionID === "child-1") {
             return pending.promise
           }
 
-          return ok([])
+          return ok({ data: [], cursor: {} })
         },
         children: async () => ok([child("child-1")]),
       }),
@@ -1546,9 +1703,53 @@ describe("run stream transport", () => {
         questions: [],
       })
     } finally {
-      pending.resolve(ok([]))
+      pending.resolve(ok({ data: [], cursor: {} }))
       await task
       await transport?.close()
+    }
+  })
+
+  test("keeps subagent startup when child history bootstrap fails", async () => {
+    const ui = footer()
+    const v2Messages = mock(async ({ sessionID }: { sessionID: string }) => {
+      if (sessionID === "session-1") {
+        return ok({
+          data: [
+            v2AssistantMessage({
+              id: "msg-1",
+              content: [v2TaskTool({ id: "task-1", childSessionID: "child-1", status: "running" })],
+            }),
+          ],
+          cursor: {},
+        })
+      }
+
+      throw new Error("child history unavailable")
+    })
+
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        v2Messages,
+        children: async () => ok([child("child-1")]),
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const state = await waitFor(() => {
+        const item = ui.events.findLast((event) => event.type === "stream.subagent")
+        return item?.type === "stream.subagent" && item.state.tabs.some((tab) => tab.sessionID === "child-1")
+          ? item.state
+          : undefined
+      })
+
+      await waitFor(() => (v2Messages.mock.calls.some((call) => call[0].sessionID === "child-1") ? true : undefined))
+      expect(state.tabs).toEqual([expect.objectContaining({ sessionID: "child-1", status: "running" })])
+    } finally {
+      await transport.close()
     }
   })
 

@@ -1,6 +1,6 @@
 import { NodeFileSystem } from "@effect/platform-node"
 import { beforeEach, describe, expect } from "bun:test"
-import { Effect, Exit, Layer, Option } from "effect"
+import { DateTime, Effect, Exit, Layer, Option } from "effect"
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
 
 import { AccessToken, AccountID, OrgID, RefreshToken } from "../../src/account/schema"
@@ -11,7 +11,7 @@ import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider"
 import { Session } from "@/session/session"
-import type { SessionID } from "../../src/session/schema"
+import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { ShareNext } from "@/share/share-next"
 import { SessionShareTable } from "@opencode-ai/core/share/sql"
 import { Database } from "@opencode-ai/core/database/database"
@@ -19,9 +19,15 @@ import { eq } from "drizzle-orm"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { resetDatabase } from "../fixture/db"
 import { pollWithTimeout, testEffect } from "../lib/effect"
+import { SessionV2 } from "@opencode-ai/core/session"
+import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionMessage } from "@opencode-ai/core/session/message"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 
 const env = Layer.mergeAll(
   Session.defaultLayer,
+  SessionV2.defaultLayer,
   AccountRepo.defaultLayer,
   Database.defaultLayer,
   NodeFileSystem.layer,
@@ -50,6 +56,7 @@ function live(client: HttpClient.HttpClient) {
     Layer.provide(http),
     Layer.provide(Provider.defaultLayer),
     Layer.provide(Session.defaultLayer),
+    Layer.provide(SessionV2.defaultLayer),
   )
 }
 
@@ -59,6 +66,7 @@ function wired(client: HttpClient.HttpClient) {
     EventV2Bridge.defaultLayer,
     ShareNext.layer,
     Session.defaultLayer,
+    SessionV2.defaultLayer,
     AccountRepo.defaultLayer,
     Database.defaultLayer,
     NodeFileSystem.layer,
@@ -262,7 +270,6 @@ describe("ShareNext", () => {
 
           const info = yield* session.create({ title: "first" })
           yield* share.init()
-          yield* Effect.sleep(50)
           const { db } = yield* Database.Service
           yield* db
             .insert(SessionShareTable)
@@ -341,4 +348,93 @@ describe("ShareNext", () => {
       { config: { enterprise: { url: "https://legacy-share.example.com" } } },
     ),
   )
+
+  it.live("ShareNext uses v2 session events to refresh shared transcript payloads", () =>
+    provideTmpdirInstance(
+      (dir) => {
+        const seen: Array<{ url: string; body: string }> = []
+        const client = HttpClient.make((req) => {
+          if (req.url.endsWith("/sync") && req.body._tag === "Uint8Array") {
+            seen.push({ url: req.url, body: new TextDecoder().decode(req.body.body) })
+          }
+          return Effect.succeed(json(req, { ok: true }))
+        })
+
+        return Effect.gen(function* () {
+          const events = yield* EventV2Bridge.Service
+          const share = yield* ShareNext.Service
+          const sessionsV2 = yield* SessionV2.Service
+
+          const info = yield* sessionsV2.create({
+            agent: "build" as any,
+            location: { directory: dir as any },
+          } as any)
+          yield* share.init()
+          const { db } = yield* Database.Service
+          yield* db
+            .insert(SessionShareTable)
+            .values({
+              session_id: info.id,
+              id: "shr_abc",
+              url: "https://legacy-share.example.com/share/abc",
+              secret: "sec_123",
+            })
+            .run()
+            .pipe(Effect.orDie)
+
+          const messageID = SessionMessage.ID.create()
+          const partID = SessionMessage.ID.create()
+
+          yield* events.publish(SessionEvent.Step.Started, {
+            sessionID: info.id,
+            assistantMessageID: SessionMessage.ID.create(),
+            agent: "build",
+            model: {
+              id: ModelV2.ID.make("test-model"),
+              providerID: ProviderV2.ID.make("test"),
+              variant: ModelV2.VariantID.make("default"),
+            },
+            timestamp: DateTime.makeUnsafe(Date.now()),
+          })
+          yield* events.publish(SessionEvent.Text.Delta, {
+            sessionID: info.id,
+            assistantMessageID: SessionMessage.ID.create(),
+            textID: "txt_1",
+            delta: "hello",
+            timestamp: DateTime.makeUnsafe(Date.now()),
+          })
+          yield* events.publish(SessionEvent.Retried, {
+            sessionID: info.id,
+            attempt: 1,
+            error: {
+              message: "retryable",
+              isRetryable: true,
+            },
+            timestamp: DateTime.makeUnsafe(Date.now()),
+          })
+
+          yield* pollWithTimeout(
+            Effect.sync(() => (seen.length === 1 ? true : undefined)),
+            "timed out waiting for v2 share sync",
+            "5 seconds",
+          )
+          yield* Effect.sleep("2500 millis")
+          expect(seen).toHaveLength(1)
+
+          const body = JSON.parse(seen[0].body) as {
+            secret: string
+            data: Array<{ type: string; data: Record<string, unknown> | Array<unknown> }>
+          }
+          expect(body.secret).toBe("sec_123")
+          expect(body.data.some((item) => item.type === "session")).toBe(true)
+        }).pipe(Effect.provide(wired(client)))
+      },
+      { config: { enterprise: { url: "https://legacy-share.example.com" } } },
+    ),
+  )
 })
+
+function hasDataID(data: Record<string, unknown> | Array<unknown>, id: string) {
+  if (Array.isArray(data)) return false
+  return data.id === id
+}

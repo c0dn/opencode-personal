@@ -997,6 +997,82 @@ describe("ACP service sessions", () => {
     expect(usageUpdates).toEqual([session.sessionId])
   })
 
+  it("normal text prompt without injected usage sends usage update from v2 messages only", async () => {
+    const updates: SessionNotification[] = []
+    const calls: unknown[] = []
+    const sdk = {
+      config: {
+        providers: () => Promise.resolve({ data: { providers: [provider], default: { test: modelID } } }),
+        get: () => Promise.resolve({ data: {} }),
+      },
+      app: {
+        agents: () => Promise.resolve({ data: [{ name: "build", mode: "primary", permission: [], options: {} }] }),
+        skills: () => Promise.resolve({ data: [] }),
+      },
+      command: {
+        list: () => Promise.resolve({ data: [] }),
+      },
+      session: {
+        create: () => Promise.resolve({ data: { id: "ses_v2_usage" } }),
+        list: () => Promise.resolve({ data: [] }),
+        prompt: () => Promise.resolve({ data: { info: assistantInfo({ input: 2, output: 3, reasoning: 0, cache: { read: 5, write: 0 } }) } }),
+        messages: () => {
+          throw new Error("legacy messages should not be used for ACP usage updates")
+        },
+      },
+      v2: {
+        session: {
+          messages: (input: unknown) => {
+            calls.push(input)
+            return Promise.resolve({
+              data: {
+                items: [
+                  {
+                    id: "msg_1",
+                    type: "assistant",
+                    agent: "build",
+                    model: { providerID: "test", id: "test-model" },
+                    time: { created: 1 },
+                    content: [],
+                    cost: 0.25,
+                    tokens: { input: 2, output: 3, reasoning: 0, cache: { read: 5, write: 0 } },
+                  },
+                ],
+                cursor: {},
+              },
+            })
+          },
+        },
+      },
+      mcp: {
+        add: () => Promise.resolve({ data: {} }),
+      },
+    } as unknown as OpencodeClient
+    const service = ACPService.make({
+      sdk,
+      connection: {
+        sessionUpdate: (update) => {
+          updates.push(update)
+          return Promise.resolve()
+        },
+      },
+    })
+    const session = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+
+    await Effect.runPromise(service.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "hello" }] }))
+
+    expect(calls).toEqual([{ sessionID: session.sessionId, directory: "/workspace", limit: 200, order: "asc" }])
+    expect(updates).toContainEqual({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: "usage_update",
+        used: 7,
+        size: 128000,
+        cost: { amount: 0.25, currency: "USD" },
+      },
+    })
+  })
+
   it("prompt maps assistant and user audience annotations", async () => {
     const { service, prompts } = makeService()
     const session = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))

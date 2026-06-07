@@ -1,4 +1,4 @@
-import { Config as EffectConfig, Context, Effect, Layer } from "effect"
+import { Config as EffectConfig, ConfigProvider, Context, Effect, Layer } from "effect"
 import { HttpApiBuilder, OpenApi } from "effect/unstable/httpapi"
 import {
   FetchHttpClient,
@@ -32,7 +32,6 @@ import { MoveSession } from "@opencode-ai/core/control-plane/move-session"
 import { ProviderAuth } from "@/provider/auth"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { Provider } from "@/provider/provider"
-import { PtyTicket } from "@opencode-ai/core/pty/ticket"
 import { Question } from "@/question"
 import { Session } from "@/session/session"
 import { SessionCompaction } from "@/session/compaction"
@@ -66,11 +65,9 @@ import { PublicApi } from "./public"
 import {
   authorizationLayer,
   authorizationRouterMiddleware,
-  ptyConnectAuthorizationLayer,
   v2AuthorizationLayer,
 } from "./middleware/authorization"
 import { EventApi } from "./groups/event"
-import { PtyConnectApi } from "./groups/pty"
 import { eventHandlers } from "./handlers/event"
 import { configHandlers } from "./handlers/config"
 import { controlHandlers } from "./handlers/control"
@@ -84,7 +81,6 @@ import { permissionHandlers } from "./handlers/permission"
 import { projectHandlers } from "./handlers/project"
 import { projectCopyHandlers } from "./handlers/project-copy"
 import { providerHandlers } from "./handlers/provider"
-import { ptyConnectHandlers, ptyHandlers } from "./handlers/pty"
 import { questionHandlers } from "./handlers/question"
 import { sessionHandlers } from "./handlers/session"
 import { syncHandlers } from "./handlers/sync"
@@ -102,6 +98,12 @@ import { corsVaryFix } from "./middleware/cors-vary"
 import { errorLayer } from "./middleware/error"
 import { fenceLayer } from "./middleware/fence"
 import { schemaErrorLayer } from "./middleware/schema-error"
+import { layer as wsLayer } from "@/server/ws/transport"
+
+const wsRoute = wsLayer.pipe(
+  Layer.provide(ServerAuth.Config.defaultLayer),
+  Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv())),
+)
 
 export const context = Context.makeUnsafe<unknown>(new Map())
 
@@ -117,12 +119,11 @@ const cors = (corsOptions?: CorsOptions) =>
 // Route tree:
 // - rootApiRoutes: typed /global/* and control routes; auth is declared by RootHttpApi.
 // - eventApiRoutes: typed SSE route with instance routing context and its existing API contract.
-// - ptyConnectApiRoutes: typed WebSocket upgrade route with ticket-aware auth.
 // - instanceApiRoutes: remaining typed instance routes.
+// - wsLayer: WebSocket binary protocol upgrade at /ws.
 // - uiRoute: raw catch-all fallback; auth is router middleware so public static assets can bypass it.
 const authOnlyRouterLayer = authorizationRouterMiddleware.layer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
 const httpApiAuthLayer = authorizationLayer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
-const ptyConnectHttpApiAuthLayer = ptyConnectAuthorizationLayer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
 const v2HttpApiAuthLayer = v2AuthorizationLayer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
 const workspaceRoutingLive = workspaceRoutingLayer.pipe(Layer.provide(Socket.layerWebSocketConstructorGlobal))
 const rootApiRoutes = HttpApiBuilder.layer(RootHttpApi).pipe(
@@ -134,10 +135,6 @@ const eventApiRoutes = HttpApiBuilder.layer(EventApi).pipe(
   Layer.provide(eventHandlers),
   Layer.provide([httpApiAuthLayer, workspaceRoutingLive, instanceContextLayer]),
 )
-const ptyConnectApiRoutes = HttpApiBuilder.layer(PtyConnectApi).pipe(
-  Layer.provide(ptyConnectHandlers),
-  Layer.provide([ptyConnectHttpApiAuthLayer, workspaceRoutingLive, instanceContextLayer]),
-)
 const instanceApiRoutes = HttpApiBuilder.layer(InstanceHttpApi).pipe(
   Layer.provide([
     configHandlers,
@@ -147,7 +144,6 @@ const instanceApiRoutes = HttpApiBuilder.layer(InstanceHttpApi).pipe(
     mcpHandlers,
     projectHandlers,
     projectCopyHandlers,
-    ptyHandlers,
     questionHandlers,
     permissionHandlers,
     providerHandlers,
@@ -200,9 +196,9 @@ export function createRoutes(corsOptions?: CorsOptions) {
   return Layer.mergeAll(
     rootApiRoutes,
     eventApiRoutes,
-    ptyConnectApiRoutes,
     instanceRoutes,
     v2Routes,
+    wsRoute,
     docRoute,
     uiRoute,
   ).pipe(
@@ -232,7 +228,6 @@ export function createRoutes(corsOptions?: CorsOptions) {
       MoveSession.defaultLayer,
       ProviderAuth.defaultLayer,
       Provider.defaultLayer,
-      PtyTicket.defaultLayer,
       Question.defaultLayer,
       Ripgrep.defaultLayer,
       RuntimeFlags.defaultLayer,

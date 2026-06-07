@@ -32,6 +32,12 @@ families incrementally.
   practical.
 - Canonical v2 transcript identity uses `evt_*` IDs for event-created entities.
   Legacy `msg_*` and `prt_*` IDs are temporary adapter concerns only.
+- Public transcript exchange and local display/replay are separate v2 outputs:
+  versioned/redacted `PublicTranscriptPayloadV2` payloads require an explicit
+  kind/version envelope, while `DisplayTranscriptV2` is an ordered local
+  render/replay shape. Shared helpers may cover only canonical ordering and
+  exhaustiveness; they must not preserve legacy wire, cursors, parts, or define
+  a v2-to-legacy adapter.
 - User messages are created by runner-dequeued events, not by queue insertion.
 - Event definitions have explicit registry ordering for SDK/OpenAPI generation
   and schema snapshot validation.

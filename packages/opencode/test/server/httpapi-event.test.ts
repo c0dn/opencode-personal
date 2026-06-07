@@ -55,7 +55,9 @@ afterEach(async () => {
   await resetDatabase()
 })
 
-const it = testEffect(Layer.mergeAll(httpApiLayer, EventV2Bridge.defaultLayer, Database.defaultLayer, Session.defaultLayer))
+const it = testEffect(
+  Layer.mergeAll(httpApiLayer, EventV2Bridge.defaultLayer, Database.defaultLayer, Session.defaultLayer),
+)
 
 const sessionNextData = (sessionID: SessionSchema.ID, timestamp = 1234) => ({
   sessionID,

@@ -123,6 +123,36 @@ const connection = (updates: SessionNotification[]) => ({
   },
 })
 
+const v2Assistant = (input: {
+  readonly providerID?: string
+  readonly modelID?: string
+  readonly cost?: number
+  readonly tokens?: UsageService.AssistantTokenCost["tokens"]
+}) => ({
+  id: crypto.randomUUID(),
+  type: "assistant",
+  agent: "build",
+  model: {
+    providerID: input.providerID ?? "anthropic",
+    id: input.modelID ?? "claude-sonnet",
+  },
+  time: { created: Date.now() },
+  content: [],
+  ...(typeof input.cost === "number" ? { cost: input.cost } : {}),
+  ...(input.tokens
+    ? { tokens: input.tokens }
+    : {
+        tokens: {
+          input: 10,
+          output: 20,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
+      }),
+})
+
+const v2Page = (items: readonly unknown[], cursor: { readonly next?: string } = {}) => ({ data: { items, cursor } })
+
 describe("acp usage", () => {
   test("builds ACP Usage from assistant token shape", () => {
     expect(
@@ -171,6 +201,159 @@ describe("acp usage", () => {
 
   test("calculates total session cost from assistant messages", () => {
     expect(UsageService.totalSessionCost([assistant({ cost: 1.25 }), user(), assistant({ cost: 2.5 })])).toBe(3.75)
+  })
+
+  test("loads usage messages from paginated v2 messages and never legacy messages", async () => {
+    const calls: unknown[] = []
+    const loader = UsageService.messageLoaderFromSDK({
+      v2: {
+        session: {
+          messages: (input) => {
+            calls.push(input)
+            if ("cursor" in input) {
+              return Promise.resolve(v2Page([v2Assistant({ cost: 2 })]))
+            }
+            return Promise.resolve(v2Page([v2Assistant({ cost: 1 })], { next: "cursor_1" }))
+          },
+        },
+      },
+      session: {
+        messages: () => {
+          throw new Error("legacy messages should not be called")
+        },
+      },
+    })
+
+    const messages = await Effect.runPromise(loader.messages({ sessionID: "ses_1", directory: "/workspace" }))
+
+    expect(calls).toEqual([
+      { sessionID: "ses_1", directory: "/workspace", limit: 200, order: "asc" },
+      { sessionID: "ses_1", directory: "/workspace", limit: 200, cursor: "cursor_1" },
+    ])
+    expect(UsageService.latestAssistantMessage(messages)).toMatchObject({ cost: 2 })
+    expect(UsageService.totalSessionCost(messages)).toBe(3)
+  })
+
+  test("maps complete v2 assistant usage fields and ignores non-assistant rows", async () => {
+    const loader = UsageService.messageLoaderFromSDK({
+      v2: {
+        session: {
+          messages: () =>
+            Promise.resolve(
+              v2Page([
+                { type: "user", id: "user_1" },
+                { type: "model-switched", id: "model_1" },
+                v2Assistant({
+                  providerID: "anthropic",
+                  modelID: "claude-opus",
+                  cost: 0.42,
+                  tokens: { input: 7, output: 11, reasoning: 13, cache: { read: 17, write: 19 } },
+                }),
+                { type: "compaction", id: "compact_1" },
+              ]),
+            ),
+        },
+      },
+    })
+
+    const messages = await Effect.runPromise(loader.messages({ sessionID: "ses_1", directory: "/workspace" }))
+
+    expect(messages).toEqual([
+      {
+        info: {
+          role: "assistant",
+          providerID: "anthropic",
+          modelID: "claude-opus",
+          cost: 0.42,
+          tokens: { input: 7, output: 11, reasoning: 13, cache: { read: 17, write: 19 } },
+        },
+      },
+    ])
+  })
+
+  it.effect("skips usage update when latest raw v2 assistant is missing usage", () => {
+    const updates: SessionNotification[] = []
+    const loader = UsageService.messageLoaderFromSDK({
+      v2: {
+        session: {
+          messages: () =>
+            Promise.resolve(
+              v2Page([
+                v2Assistant({ cost: 1 }),
+                {
+                  id: "msg_incomplete",
+                  type: "assistant",
+                  agent: "build",
+                  model: { providerID: "anthropic", id: "claude-sonnet" },
+                  time: { created: 2 },
+                  content: [],
+                },
+              ]),
+            ),
+        },
+      },
+    })
+    return Effect.gen(function* () {
+      const usage = yield* UsageService.Service
+      yield* usage.sendUpdate({ connection: connection(updates), sessionID: "ses_1", directory: "/workspace" })
+
+      expect(updates).toEqual([])
+    }).pipe(
+      Effect.provide(
+        fakeLayer({
+          messages: loader.messages({ sessionID: "ses_1", directory: "/workspace" }),
+        }),
+      ),
+    )
+  })
+
+  it.effect("skips usage update when first v2 messages page is missing data", () => {
+    const updates: SessionNotification[] = []
+    const loader = UsageService.messageLoaderFromSDK({
+      v2: {
+        session: {
+          messages: () => Promise.resolve({}),
+        },
+      },
+    })
+    return Effect.gen(function* () {
+      const usage = yield* UsageService.Service
+      yield* usage.sendUpdate({ connection: connection(updates), sessionID: "ses_1", directory: "/workspace" })
+
+      expect(updates).toEqual([])
+    }).pipe(
+      Effect.provide(
+        fakeLayer({
+          messages: loader.messages({ sessionID: "ses_1", directory: "/workspace" }),
+        }),
+      ),
+    )
+  })
+
+  it.effect("skips usage update when v2 message loading fails on any page or malformed data", () => {
+    const updates: SessionNotification[] = []
+    const loader = UsageService.messageLoaderFromSDK({
+      v2: {
+        session: {
+          messages: (input) => {
+            if ("cursor" in input) return Promise.reject(new Error("later page failed"))
+            return Promise.resolve(v2Page([v2Assistant({ cost: 1 })], { next: "cursor_1" }))
+          },
+        },
+      },
+    })
+    return Effect.gen(function* () {
+      const usage = yield* UsageService.Service
+      yield* usage.sendUpdate({ connection: connection(updates), sessionID: "ses_1", directory: "/workspace" })
+
+      expect(updates).toEqual([])
+    }).pipe(
+      Effect.provide(
+        fakeLayer({
+          messages: loader.messages({ sessionID: "ses_1", directory: "/workspace" }),
+        }),
+      ),
+    )
   })
 
   it.effect("loads context limits from providers and caches by directory/provider/model", () => {

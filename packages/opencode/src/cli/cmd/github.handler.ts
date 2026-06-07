@@ -24,16 +24,14 @@ import { Session } from "@/session/session"
 import type { SessionID } from "../../session/schema"
 import { MessageID, PartID } from "../../session/schema"
 import { Provider } from "@/provider/provider"
-import { MessageV2 } from "../../session/message-v2"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { EventV2 } from "@opencode-ai/core/event"
 import { SessionPrompt } from "@/session/prompt"
 import { Git } from "@/git"
 import { setTimeout as sleep } from "node:timers/promises"
 import { Process } from "@/util/process"
 import { parseGitHubRemote } from "@/util/repository"
 import { Effect } from "effect"
-import { extractResponseText, formatPromptTooLargeError } from "./github.shared"
+import { createGitHubSessionEventDisplay, extractResponseText, formatPromptTooLargeError } from "./github.shared"
 
 type GitHubAuthor = {
   login: string
@@ -819,18 +817,6 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
     }
 
     async function subscribeSessionEvents() {
-      const TOOL: Record<string, [string, string]> = {
-        todowrite: ["Todo", UI.Style.TEXT_WARNING_BOLD],
-        bash: ["Shell", UI.Style.TEXT_DANGER_BOLD],
-        edit: ["Edit", UI.Style.TEXT_SUCCESS_BOLD],
-        glob: ["Glob", UI.Style.TEXT_INFO_BOLD],
-        grep: ["Grep", UI.Style.TEXT_INFO_BOLD],
-        list: ["List", UI.Style.TEXT_INFO_BOLD],
-        read: ["Read", UI.Style.TEXT_HIGHLIGHT_BOLD],
-        write: ["Write", UI.Style.TEXT_SUCCESS_BOLD],
-        websearch: ["Search", UI.Style.TEXT_DIM_BOLD],
-      }
-
       function printEvent(color: string, type: string, title: string) {
         UI.println(
           color + `|`,
@@ -840,36 +826,21 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
         )
       }
 
-      let text = ""
+      const display = createGitHubSessionEventDisplay(session.id)
       await runLocalEffect(
         events.listen((evt) => {
-          if (evt.type !== MessageV2.Event.PartUpdated.type) return Effect.void
-          const data = evt.data as EventV2.Data<typeof MessageV2.Event.PartUpdated>
-          if (data.part.sessionID !== session.id) return Effect.void
-          //if (evt.properties.part.messageID === messageID) return
-          const part = data.part
+          const action = display(evt)
+          if (!action) return Effect.void
 
-          if (part.type === "tool" && part.state.status === "completed") {
-            const [tool, color] = TOOL[part.tool] ?? [part.tool, UI.Style.TEXT_INFO_BOLD]
-            const title =
-              part.state.title || Object.keys(part.state.input).length > 0
-                ? JSON.stringify(part.state.input)
-                : "Unknown"
+          if (action.type === "tool") {
             console.log()
-            printEvent(color, tool, title)
+            printEvent(action.color, action.tool, action.title)
+            return Effect.void
           }
 
-          if (part.type === "text") {
-            text = part.text
-
-            if (part.time?.end) {
-              UI.empty()
-              UI.println(UI.markdown(text))
-              UI.empty()
-              text = ""
-              return Effect.void
-            }
-          }
+          UI.empty()
+          UI.println(UI.markdown(action.text))
+          UI.empty()
           return Effect.void
         }),
       )

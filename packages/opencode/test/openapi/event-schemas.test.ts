@@ -40,15 +40,15 @@ describe("OpenAPI EventV2 schemas", () => {
         variant: ModelV2.VariantID.make("default"),
       },
       content: [
-        new SessionMessage.AssistantText({ type: "text", id: "txt_1", text: "hello" }),
+        new SessionMessage.AssistantText({ type: "text", id: "evt_text", text: "hello" }),
         new SessionMessage.AssistantReasoning({
           type: "reasoning",
-          id: "rsn_1",
+          id: "evt_reasoning",
           text: "thinking",
         }),
         new SessionMessage.AssistantTool({
           type: "tool",
-          id: "call_1",
+          id: "evt_tool",
           name: "read",
           state: new SessionMessage.ToolStatePending({ status: "pending", input: "{}" }),
           time: { created: DateTime.makeUnsafe(1234) },
@@ -60,11 +60,11 @@ describe("OpenAPI EventV2 schemas", () => {
     expect(encoded).toMatchObject({ id: "msg_assistant", type: "assistant" })
     expect(encoded).not.toHaveProperty("parts")
     expect(encoded.content).toEqual([
-      { type: "text", id: "txt_1", text: "hello" },
-      { type: "reasoning", id: "rsn_1", text: "thinking" },
+      { type: "text", id: "evt_text", text: "hello" },
+      { type: "reasoning", id: "evt_reasoning", text: "thinking" },
       {
         type: "tool",
-        id: "call_1",
+        id: "evt_tool",
         name: "read",
         state: { status: "pending", input: "{}" },
         time: { created: 1234 },

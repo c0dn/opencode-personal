@@ -1,5 +1,6 @@
 export * from "./client.js"
 export * from "./server.js"
+export * from "./ws/index.js"
 
 import { createOpencodeClient } from "./client.js"
 import { createOpencodeServer } from "./server.js"

@@ -282,6 +282,60 @@ describe("run session data", () => {
     })
   })
 
+  test("uses permission metadata input when v2 tool ref does not match legacy tool part key", () => {
+    let data = createSessionData()
+    data = reduce(
+      data,
+      tool({
+        id: "tool-1",
+        messageID: "msg-legacy-1",
+        callID: "call-1",
+        tool: "bash",
+        state: {
+          status: "running",
+          input: {
+            command: "legacy-keyed input",
+          },
+        },
+      }),
+    ).data
+
+    const out = reduce(data, {
+      type: "permission.asked",
+      properties: {
+        id: "perm-1",
+        sessionID: "session-1",
+        permission: "bash",
+        patterns: ["src/**/*.ts"],
+        metadata: {
+          input: {
+            command: "canonical v2 input",
+          },
+        },
+        always: [],
+        tool: {
+          messageID: "evt-step-1",
+          callID: "call-1",
+        },
+      },
+    })
+
+    expect(out.footer).toEqual({
+      patch: { status: "awaiting permission" },
+      view: {
+        type: "permission",
+        request: expect.objectContaining({
+          id: "perm-1",
+          metadata: {
+            input: {
+              command: "canonical v2 input",
+            },
+          },
+        }),
+      },
+    })
+  })
+
   test("strips bash echo only from the first assistant flush", () => {
     let data = createSessionData()
     data = reduce(data, assistant("msg-1")).data

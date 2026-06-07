@@ -55,31 +55,82 @@ class SessionDataMissingError extends NamedError {
   }
 }
 
+type PublicTranscriptPayloadV2 = {
+  kind: "opencode.transcript"
+  version: 2
+  session: {
+    id: string
+    title: string
+    version: string
+    model?: { id?: string; modelID?: string }
+    time: { created: number; updated: number }
+  }
+  messages: PublicTranscriptMessage[]
+}
+
+type PublicTranscriptMessage =
+  | { type: "user"; id: string; text: string; time: { created: number; completed?: number } }
+  | {
+      type: "assistant"
+      id: string
+      agent: string
+      content: PublicAssistantContent[]
+      time: { created: number; completed?: number }
+    }
+  | { type: "compaction"; id: string; reason: string; summary: string; time: { created: number; completed?: number } }
+
+type PublicAssistantContent =
+  | { type: "text"; id: string; text: string }
+  | { type: "patch"; id: string; hash: string; files: string[] }
+  | { type: "tool"; id: string; callID: string; name: string; state: { status: string } }
+
+type PublicTranscriptV2Data = {
+  kind: "public_transcript_v2"
+  shareID: string
+  sessionID: string
+  payload: PublicTranscriptPayloadV2
+}
+
+type LegacyShareData = {
+  kind: "legacy"
+  sessionID: string
+  shareID: string
+  session: Session[]
+  session_diff: {
+    [sessionID: string]: SnapshotFileDiff[]
+  }
+  session_status: {
+    [sessionID: string]: SessionStatus
+  }
+  message: {
+    [sessionID: string]: Message[]
+  }
+  part: {
+    [messageID: string]: Part[]
+  }
+  model: {
+    [sessionID: string]: Model[]
+  }
+}
+
+type SharePageData = LegacyShareData | PublicTranscriptV2Data
+
 const getData = query(async (shareID) => {
   "use server"
   const share = await Share.get(shareID)
   if (!share) throw new SessionDataMissingError({ sessionID: shareID })
   const data = await Share.data(shareID)
-  const result: {
-    sessionID: string
-    shareID: string
-    session: Session[]
-    session_diff: {
-      [sessionID: string]: SnapshotFileDiff[]
+  const v2 = data.find((item) => item.type === "public_transcript_v2")
+  if (v2) {
+    return {
+      kind: "public_transcript_v2" as const,
+      shareID,
+      sessionID: v2.payload.session.id,
+      payload: v2.payload as PublicTranscriptPayloadV2,
     }
-    session_status: {
-      [sessionID: string]: SessionStatus
-    }
-    message: {
-      [sessionID: string]: Message[]
-    }
-    part: {
-      [messageID: string]: Part[]
-    }
-    model: {
-      [sessionID: string]: Model[]
-    }
-  } = {
+  }
+  const result: LegacyShareData = {
+    kind: "legacy",
     sessionID: share.sessionID,
     shareID,
     session: [],
@@ -113,6 +164,8 @@ const getData = query(async (shareID) => {
         break
       case "model":
         result.model[share.sessionID] = item.data
+        break
+      case "public_transcript_v2":
         break
     }
   }
@@ -155,12 +208,15 @@ export default function () {
       <Meta name="robots" content="noindex, nofollow" />
       <Show when={data()}>
         {(data) => {
-          const match = createMemo(() => Binary.search(data().session, data().sessionID, (s) => s.id))
-          if (!match().found) throw new Error(`Session ${data().sessionID} not found`)
-          const info = createMemo(() => data().session[match().index])
+          const current = data()
+          if (current.kind === "public_transcript_v2") return <PublicTranscriptV2View data={current} />
+          const legacy = () => data() as LegacyShareData
+          const match = createMemo(() => Binary.search(legacy().session, legacy().sessionID, (s) => s.id))
+          if (!match().found) throw new Error(`Session ${legacy().sessionID} not found`)
+          const info = createMemo(() => legacy().session[match().index])
           const ogImage = createMemo(() => {
             const models = new Set<string>()
-            const messages = data().message[data().sessionID] ?? []
+            const messages = legacy().message[legacy().sessionID] ?? []
             for (const msg of messages) {
               if (msg.role === "assistant" && msg.modelID) {
                 models.add(msg.modelID)
@@ -179,7 +235,7 @@ export default function () {
               modelParam = "unknown"
             }
             const version = `v${info().version}`
-            return `https://social-cards.sst.dev/opencode-share/${encodedTitle}.png?model=${modelParam}&version=${version}&id=${data().shareID}`
+            return `https://social-cards.sst.dev/opencode-share/${encodedTitle}.png?model=${modelParam}&version=${version}&id=${legacy().shareID}`
           })
 
           return (
@@ -192,14 +248,14 @@ export default function () {
               <Meta name="twitter:image" content={ogImage()} />
               <ClientOnlyWorkerPoolProvider>
                 <FileComponentProvider component={FileSSR}>
-                  <DataProvider data={data()} directory={info().directory}>
+                  <DataProvider data={legacy()} directory={info().directory}>
                     {iife(() => {
                       const [store, setStore] = createStore({
                         messageId: undefined as string | undefined,
                       })
                       const messages = createMemo(() =>
-                        data().sessionID
-                          ? (data().message[data().sessionID]?.filter((m) => m.role === "user") ?? []).sort(
+                        legacy().sessionID
+                          ? (legacy().message[legacy().sessionID]?.filter((m) => m.role === "user") ?? []).sort(
                               (a, b) => a.time.created - b.time.created,
                             )
                           : [],
@@ -217,8 +273,8 @@ export default function () {
                       }
                       const provider = createMemo(() => activeMessage()?.model?.providerID)
                       const modelID = createMemo(() => activeMessage()?.model?.modelID)
-                      const model = createMemo(() => data().model[data().sessionID]?.find((m) => m.id === modelID()))
-                      const diffs = createMemo(() => data().session_diff[data().sessionID] ?? [])
+                      const model = createMemo(() => legacy().model[legacy().sessionID]?.find((m) => m.id === modelID()))
+                      const diffs = createMemo(() => legacy().session_diff[legacy().sessionID] ?? [])
                       const [diffStyle, setDiffStyle] = createSignal<"unified" | "split">("unified")
 
                       const title = () => (
@@ -251,7 +307,7 @@ export default function () {
                             <For each={messages()}>
                               {(message) => (
                                 <SessionTurn
-                                  sessionID={data().sessionID}
+                                  sessionID={legacy().sessionID}
                                   messageID={message.id}
                                   classes={{
                                     root: "min-w-0 w-full relative",
@@ -324,7 +380,7 @@ export default function () {
                                       size="compact"
                                       onMessageSelect={setActiveMessage}
                                       getLabel={(message) =>
-                                        data()
+                                        legacy()
                                           .part[message.id]?.find((part) => part.type === "text")
                                           ?.text.trim()
                                           .split("\n")[0]
@@ -332,7 +388,7 @@ export default function () {
                                     />
                                   </Show>
                                   <SessionTurn
-                                    sessionID={data().sessionID}
+                                    sessionID={legacy().sessionID}
                                     messageID={store.messageId ?? firstUserMessage()!.id!}
                                     classes={{
                                       root: "grow",
@@ -413,5 +469,110 @@ export default function () {
         }}
       </Show>
     </ErrorBoundary>
+  )
+}
+
+function PublicTranscriptV2View(props: { data: PublicTranscriptV2Data }) {
+  const payload = () => props.data.payload
+  const info = () => payload().session
+  const modelLabel = () => info().model?.id ?? info().model?.modelID ?? "unknown"
+  const ogImage = createMemo(() => {
+    const encodedTitle = encodeURIComponent(Base64.encode(encodeURIComponent((info().title ?? "OpenCode share").substring(0, 700))))
+    return `https://social-cards.sst.dev/opencode-share/${encodedTitle}.png?model=${encodeURIComponent(modelLabel())}&version=v${info().version}&id=${props.data.shareID}`
+  })
+
+  return (
+    <>
+      <Show when={info().title}>
+        <Title>{info().title} | OpenCode</Title>
+      </Show>
+      <Meta name="description" content="opencode - The AI coding agent built for the terminal." />
+      <Meta property="og:image" content={ogImage()} />
+      <Meta name="twitter:image" content={ogImage()} />
+      <div class="relative bg-background-stronger w-screen min-h-screen overflow-y-auto flex flex-col text-text-base">
+        <header class="h-12 px-6 py-2 flex items-center justify-between self-stretch bg-background-base border-b border-border-weak-base sticky top-0 z-10">
+          <a href="https://opencode.ai" aria-label="OpenCode">
+            <Mark />
+          </a>
+          <div class="flex gap-3 items-center">
+            <IconButton as={"a"} href="https://github.com/anomalyco/opencode" target="_blank" icon="github" variant="ghost" />
+            <IconButton as={"a"} href="https://opencode.ai/discord" target="_blank" icon="discord" variant="ghost" />
+          </div>
+        </header>
+        <main class="w-full max-w-220 mx-auto px-4 sm:px-6 py-8 flex flex-col gap-8">
+          <section class="flex flex-col gap-3 bg-background-base border border-border-weak-base rounded-lg p-5">
+            <div class="flex flex-wrap gap-4 items-center text-12-regular text-text-weaker">
+              <span class="pl-[2.5px] pr-2 flex items-center gap-1.75 bg-surface-strong shadow-xs-border-base w-fit text-text-base">
+                <Mark class="shrink-0 w-3 my-0.5" />v{info().version}
+              </span>
+              <span>{modelLabel()}</span>
+              <span>{DateTime.fromMillis(info().time.created).toFormat("dd MMM yyyy, HH:mm")}</span>
+            </div>
+            <h1 class="text-20-medium text-text-strong">{info().title}</h1>
+          </section>
+          <div class="flex flex-col gap-5">
+            <For each={payload().messages}>{(message) => <PublicTranscriptMessageView message={message} />}</For>
+          </div>
+          <div class="px-4 flex items-center justify-center pt-12 pb-8 shrink-0">
+            <Logo class="w-58.5 opacity-12" />
+          </div>
+        </main>
+      </div>
+    </>
+  )
+}
+
+function PublicTranscriptMessageView(props: { message: PublicTranscriptPayloadV2["messages"][number] }) {
+  const message = () => props.message
+  return (
+    <article class="bg-background-base border border-border-weak-base rounded-lg p-5 flex flex-col gap-4">
+      <div class="flex items-center justify-between gap-4 text-12-regular text-text-weaker">
+        <span class="uppercase tracking-wide">{message().type}</span>
+        <span>{DateTime.fromMillis(message().time.created).toFormat("HH:mm:ss")}</span>
+      </div>
+      {iife(() => {
+        const current = message()
+        switch (current.type) {
+          case "user":
+            return <p class="text-14-regular whitespace-pre-wrap text-text-base">{current.text}</p>
+          case "assistant":
+            return (
+              <div class="flex flex-col gap-3">
+                <For each={current.content}>{(content) => <PublicAssistantContentView content={content} />}</For>
+              </div>
+            )
+          case "compaction":
+            return (
+              <div class="text-14-regular text-text-base">
+                Compaction summary: <span class="text-text-weaker">{current.summary}</span>
+              </div>
+            )
+        }
+      })}
+    </article>
+  )
+}
+
+function PublicAssistantContentView(props: { content: Extract<PublicTranscriptPayloadV2["messages"][number], { type: "assistant" }>["content"][number] }) {
+  const content = () => props.content
+  return (
+    <>
+      {iife(() => {
+        const current = content()
+        switch (current.type) {
+          case "text":
+            return <p class="text-14-regular whitespace-pre-wrap text-text-base">{current.text}</p>
+          case "patch":
+            return <div class="text-13-regular text-text-weaker bg-background-strong rounded-md p-3">Patch: {current.files.join(", ")}</div>
+          case "tool":
+            return (
+              <div class="text-13-regular text-text-weaker bg-background-strong rounded-md p-3 flex flex-col gap-1">
+                <div>Tool: {current.name}</div>
+                <div>Status: {current.state.status}</div>
+              </div>
+            )
+        }
+      })}
+    </>
   )
 }
