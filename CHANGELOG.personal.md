@@ -11,6 +11,10 @@ Versioning note: automated upstream mirrors are published as
 
 ## Unreleased
 
+- No unreleased personal changes.
+
+## v1.16.2-c0dn.4 - 2026-06-07
+
 ### Added
 - **Unified WebSocket transport** (`GET /ws`): Replaces the multi-transport
   architecture (HTTP REST + SSE + separate PTY WS) with a single multiplexed
