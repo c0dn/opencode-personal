@@ -16,6 +16,8 @@ export interface Connection {
   /** Check/store idempotent request response. Returns cached response or undefined. */
   readonly idempotentGet: (id: string) => unknown | undefined
   readonly idempotentSet: (id: string, response: unknown) => void
+  /** Sessions this connection is subscribed to for event pre-fetch. Empty set = receive all. */
+  readonly subscribed: Set<string>
 }
 
 interface ConnectionState {
@@ -32,6 +34,7 @@ export function create(socket: Socket.Socket, scope: Scope.Scope): Effect.Effect
     const outbound = yield* Queue.bounded<Uint8Array>(OUTBOUND_QUEUE_CAPACITY)
     const state = yield* Ref.make<ConnectionState>({ closed: false })
     const idempotencyCache = new Map<string, { response: unknown; timestamp: number }>()
+    const subscribed = new Set<string>()
 
     // Background: drain outbound queue → socket writer
     yield* Effect.forkIn(
@@ -101,7 +104,7 @@ export function create(socket: Socket.Socket, scope: Scope.Scope): Effect.Effect
       idempotencyCache.set(id, { response, timestamp: Date.now() })
     }
 
-    return { push, close, isOpen, idempotentGet, idempotentSet } as Connection
+    return { push, close, isOpen, idempotentGet, idempotentSet, subscribed } as Connection
   })
 }
 

@@ -32,6 +32,7 @@ export function createServerWsContext(server: ServerConnection.Any) {
 
   let ws: WsClient | null = null
   let started = false
+  const subscribedSessions = new Set<string>()
 
   const start = async () => {
     if (started) return
@@ -188,16 +189,44 @@ export function createServerWsContext(server: ServerConnection.Any) {
     },
     store,
     /**
-     * Load messages for a session. Returns cached if available, otherwise fetches via WS.
+     * Load messages for a session. Auto-subscribes to events for this session.
+     * Returns cached if available, otherwise fetches via WS.
      */
     async loadMessages(sessionID: string): Promise<unknown> {
       if (!ws) throw new Error("WS not connected")
+      if (!subscribedSessions.has(sessionID)) {
+        subscribedSessions.add(sessionID)
+        ws.send("session.subscribe", { sessionIDs: [sessionID] }).catch(() => {})
+      }
       return ws.request("session.messages", { sessionID, limit: 100 })
+    },
+    /**
+     * Activate a session tab — subscribes and unsubscribes from the previous.
+     * Call this when the user switches to a different session.
+     */
+    activate(sessionID: string | null): void {
+      if (!ws) return
+      // Unsubscribe from all currently subscribed sessions
+      const toRemove = [...subscribedSessions]
+      if (sessionID) {
+        // Keep only the active session
+        const idx = toRemove.indexOf(sessionID)
+        if (idx >= 0) toRemove.splice(idx, 1)
+        if (!subscribedSessions.has(sessionID)) {
+          subscribedSessions.add(sessionID)
+          ws.send("session.subscribe", { sessionIDs: [sessionID] }).catch(() => {})
+        }
+      }
+      if (toRemove.length > 0) {
+        for (const id of toRemove) subscribedSessions.delete(id)
+        ws.send("session.unsubscribe", { sessionIDs: toRemove }).catch(() => {})
+      }
     },
     /**
      * Subscribe to a session for pre-fetch of live events.
      */
     subscribe(sessionIDs: string[]): void {
+      for (const id of sessionIDs) subscribedSessions.add(id)
       ws?.send("session.subscribe", { sessionIDs }).catch(() => {})
     },
     /**

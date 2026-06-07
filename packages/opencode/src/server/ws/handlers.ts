@@ -14,9 +14,6 @@ import { SessionShare } from "@/share/session"
 import type { Connection } from "./connection"
 import { WsMultiplex } from "./multiplex"
 
-/** Track which sessions each connection has subscribed to for pre-fetch. */
-const subscribedSessions = new WeakMap<Connection, Set<string>>()
-
 /**
  * Register all WS message handlers.
  */
@@ -125,13 +122,8 @@ function handleSessionTodo(msg: Record<string, unknown>, _conn: Connection) {
 function handleSessionSubscribe(msg: Record<string, unknown>, conn: Connection) {
   return Effect.gen(function* () {
     const sessionIDs = Array.isArray(msg.sessionIDs) ? msg.sessionIDs.filter((id): id is string => typeof id === "string") : []
-    let set = subscribedSessions.get(conn)
-    if (!set) {
-      set = new Set()
-      subscribedSessions.set(conn, set)
-    }
     for (const id of sessionIDs) {
-      set.add(id)
+      conn.subscribed.add(id)
     }
     return { subscribed: sessionIDs.length }
   })
@@ -140,11 +132,8 @@ function handleSessionSubscribe(msg: Record<string, unknown>, conn: Connection) 
 function handleSessionUnsubscribe(msg: Record<string, unknown>, conn: Connection) {
   return Effect.gen(function* () {
     const sessionIDs = Array.isArray(msg.sessionIDs) ? msg.sessionIDs.filter((id): id is string => typeof id === "string") : []
-    const set = subscribedSessions.get(conn)
-    if (set) {
-      for (const id of sessionIDs) {
-        set.delete(id)
-      }
+    for (const id of sessionIDs) {
+      conn.subscribed.delete(id)
     }
     return { unsubscribed: sessionIDs.length }
   })

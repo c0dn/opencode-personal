@@ -53,6 +53,8 @@ function extractMetaPatch(eventType: string, data: Record<string, unknown>): Met
  * Wire EventV2 events to a WS connection as batched push.batch or push.event frames.
  * Accumulates events and flushes them every 16ms instead of pushing each event individually.
  * Simultaneously accumulates session metadata patches and flushes them as push.meta frames.
+ * When the connection has active subscriptions (conn.subscribed is non-empty), only events
+ * for subscribed sessions (or global events with no aggregateID) are pushed.
  * Returns a scoped effect that manages the subscription and flusher lifecycle.
  */
 export function bridge(conn: Connection, scope: Scope.Scope) {
@@ -61,10 +63,20 @@ export function bridge(conn: Connection, scope: Scope.Scope) {
     const batch = yield* Ref.make<BatchedEvent[]>([])
     const metas = yield* Ref.make<MetaPatch[]>([])
 
+    function isSubscribed(payloadData: Record<string, unknown>): boolean {
+      // Empty subscription set = receive all (bootstrapping / backward compat)
+      if (conn.subscribed.size === 0) return true
+      const sessionID = payloadData.sessionID as string | undefined
+      // Global events (no sessionID in data) are always pushed
+      if (sessionID === undefined) return true
+      return conn.subscribed.has(sessionID)
+    }
+
     const unsubscribe = yield* events.listen((event) =>
       Effect.gen(function* () {
         const payload = EventV2.encodeKnownPayloadForFanout(event)
         if (!payload) return
+        if (!isSubscribed(payload.data)) return
         const ctx = yield* InstanceRef
         const workspaceID = (yield* WorkspaceRef) ?? event.location?.workspaceID
         yield* Ref.update(batch, (arr) => [
