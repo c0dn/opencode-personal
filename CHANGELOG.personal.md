@@ -96,6 +96,38 @@ Versioning note: automated upstream mirrors are published as
   disconnect and replayed after successful reconnect, instead of being
   rejected.
 
+## v1.16.2-c0dn.3 - 2026-06-06
+
+### Fixed
+- **LLM native fetch for WS**: Thread per-request fetch calls through the native
+  transport layer so WebSocket connections can proxy LLM provider requests.
+  Prevents "fetch is not defined" errors when running under the WS protocol
+  without a polyfilled global fetch.
+
+## v1.16.2-c0dn.2 - 2026-06-06
+
+### Changed
+- **CI**: Removed inherited upstream workflows that are not relevant to the
+  personal fork.
+
+### Fixed
+- Re-applied project directory preservation fix for canonical project views.
+
+## v1.16.2-c0dn.1 - 2026-06-05
+
+### Changed
+- Ported upstream v1.16.2 fixes.
+
+### Fixed
+- **App (v2 UI)**: Restored project sync so opened project directories persist
+  across sessions.
+- **App (v2 UI)**: Deduplicated project view opens to prevent duplicate tabs.
+- **App (v2 UI)**: Handled canonical project view aliases so navigation to the
+  same project by different route forms reuses the existing view.
+- **App (v2 UI)**: Showed canonical project titles instead of raw directory names
+  in the project list.
+- **App (v2 UI)**: Preserved opened project directories across app restarts.
+
 ## v1.16.0-c0dn.1 - 2026-06-05
 
 ### Changed
