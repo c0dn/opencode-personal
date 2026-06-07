@@ -4,16 +4,67 @@ import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
 import { errorMessage } from "@/util/error"
 import { validateSession } from "./validate-session"
 import { ServerAuth } from "@/server/auth"
+import { resolveNetworkOptionsNoConfig } from "@/cli/network"
+
+// ── URL resolution ───────────────────────────────────────────────────
+
+function resolveAttachUrl(args: { url?: string; port?: number; hostname?: string }): string {
+  if (args.url) return args.url
+
+  const network = resolveNetworkOptionsNoConfig({
+    port: args.port ?? 0,
+    hostname: args.hostname ?? "127.0.0.1",
+    mdns: false,
+    "mdns-domain": "opencode.local",
+    cors: [],
+  })
+
+  const port = network.port === 0 ? 4096 : network.port
+  return `http://${network.hostname}:${port}`
+}
+
+// ── Connection probe ─────────────────────────────────────────────────
+
+async function probeAttach(
+  url: string,
+  headers: Record<string, string>,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  try {
+    const res = await fetch(`${url}/session`, {
+      signal: AbortSignal.timeout(2000),
+      headers,
+    })
+    if (res.ok || res.status === 401) return { ok: true }
+    if (res.status === 403) return { ok: false, reason: "Server rejected authentication." }
+    return { ok: true }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes("ECONNREFUSED") || msg.includes("fetch failed"))
+      return { ok: false, reason: `No opencode server listening at ${url}` }
+    if (msg.includes("ETIMEDOUT") || msg.includes("timeout"))
+      return { ok: false, reason: `Connection to ${url} timed out` }
+    return { ok: false, reason: `Could not connect to ${url}: ${msg}` }
+  }
+}
+
+// ── Command ──────────────────────────────────────────────────────────
 
 export const AttachCommand = cmd({
-  command: "attach <url>",
+  command: "attach [url]",
   describe: "attach to a running opencode server",
   builder: (yargs) =>
     yargs
       .positional("url", {
         type: "string",
-        describe: "http://localhost:4096",
-        demandOption: true,
+        describe: "server URL (default: auto-resolved via config / 127.0.0.1:4096)",
+      })
+      .option("hostname", {
+        type: "string",
+        describe: "server hostname (default: 127.0.0.1, respects global config)",
+      })
+      .option("port", {
+        type: "number",
+        describe: "server port (default: 4096, respects global config)",
       })
       .option("dir", {
         type: "string",
@@ -55,6 +106,20 @@ export const AttachCommand = cmd({
         return
       }
 
+      const url = resolveAttachUrl(args)
+
+      // When URL is auto-resolved, probe the server before launching TUI
+      if (!args.url) {
+        const probeHeaders = ServerAuth.headers({ password: args.password, username: args.username })
+        const probe = await probeAttach(url, probeHeaders)
+        if (!probe.ok) {
+          UI.error(probe.reason)
+          UI.error(`Is \`opencode serve\` running? Use --port to specify a different port.`)
+          process.exitCode = 1
+          return
+        }
+      }
+
       const directory = (() => {
         if (!args.dir) return undefined
         try {
@@ -70,7 +135,7 @@ export const AttachCommand = cmd({
 
       try {
         await validateSession({
-          url: args.url,
+          url,
           sessionID: args.session,
           directory,
           headers,
@@ -84,7 +149,7 @@ export const AttachCommand = cmd({
       const { createTuiRenderer, tui } = await import("./app")
       const renderer = await createTuiRenderer(config)
       const handle = tui({
-        url: args.url,
+        url,
         config,
         renderer,
         args: {
