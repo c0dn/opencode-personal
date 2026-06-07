@@ -153,10 +153,39 @@ function handleMcpStatus(_msg: Record<string, unknown>, _conn: Connection) {
 
 // ---- Reconnect catchup ----
 
-function handleSyncCatchup(_msg: Record<string, unknown>, conn: Connection) {
+function handleSyncCatchup(msg: Record<string, unknown>, conn: Connection) {
   return Effect.gen(function* () {
-    // Push fresh session snapshot to reconcile client state after reconnect.
-    // EventV2 cursors not yet available — pushes full snapshot for now.
+    // Compute static data version to avoid redundant push.static on reconnect.
+    // Client sends its last known staticHash to skip if unchanged.
+    const clientHash = typeof msg.staticHash === "string" ? msg.staticHash : undefined
+
+    const configSvc = yield* Config.Service
+    const mcpSvc = yield* MCP.Service
+    const providerSvc = yield* Provider.Service
+    const projectSvc = yield* Project.Service
+
+    const [config, mcpStatus, providers, projects] = yield* Effect.all([
+      configSvc.get(),
+      mcpSvc.status(),
+      providerSvc.list(),
+      projectSvc.list(),
+    ])
+
+    const staticData = JSON.stringify({ config, mcp: mcpStatus, providers, projects })
+    const staticHash = djb2Hash(staticData)
+
+    // Push static data only when version differs from client's cached version
+    if (staticHash !== clientHash) {
+      yield* conn.push({
+        type: "push.static",
+        config,
+        mcp: mcpStatus,
+        providers,
+        projects,
+      }).pipe(Effect.catch(() => Effect.void))
+    }
+
+    // Push fresh session snapshot for state reconciliation.
     const sessionsSvc = yield* Session.Service
     const sessions = yield* sessionsSvc.list()
     const pageSize = 10
@@ -186,8 +215,17 @@ function handleSyncCatchup(_msg: Record<string, unknown>, conn: Connection) {
       }).pipe(Effect.catch(() => Effect.void))
     }
 
-    return { caughtUp: true }
+    return { caughtUp: true, staticHash }
   })
+}
+
+/** Simple DJB2 string hash — fast, deterministic, good enough for version tracking. */
+function djb2Hash(str: string): string {
+  let h = 0
+  for (let i = 0; i < str.length; i++) {
+    h = ((h << 5) - h + str.charCodeAt(i)) | 0
+  }
+  return h.toString(36)
 }
 
 // ---- Config ----

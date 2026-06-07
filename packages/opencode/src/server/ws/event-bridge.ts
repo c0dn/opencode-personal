@@ -1,17 +1,20 @@
-import { Effect, Queue, Ref, Scope } from "effect"
+import { Effect, Scope } from "effect"
 import { GlobalBus, type GlobalEvent } from "@/bus/global"
 import type { Connection } from "./connection"
 
 /**
  * Wire GlobalBus events to a WS connection as batched push.batch / push.event frames.
- * Events are accumulated and flushed every 16ms.
+ * Events accumulate synchronously in a native array and are drained every 16ms
+ * via setTimeout — avoiding O(N²) Ref array copying and per-event fiber overhead.
+ *
  * When the connection has active subscriptions, only events for subscribed sessions
  * (or global events with no sessionID) are pushed.
- * Returns a scoped effect that manages the subscription lifecycle.
  */
 export function bridge(conn: Connection, scope: Scope.Scope) {
   return Effect.gen(function* () {
-    const batch = yield* Ref.make<GlobalEvent[]>([])
+    const BATCH_MS = 16
+    let pending: GlobalEvent[] = []
+    let flushTimer: ReturnType<typeof setTimeout> | undefined
 
     function isSubscribed(event: GlobalEvent): boolean {
       if (conn.subscribed.size === 0) return true
@@ -21,35 +24,33 @@ export function bridge(conn: Connection, scope: Scope.Scope) {
       return conn.subscribed.has(sessionID)
     }
 
+    function flush() {
+      const batch = pending
+      pending = []
+      flushTimer = undefined
+      if (batch.length === 0) return
+
+      const payload = batch.length === 1
+        ? { type: "push.event", ...batch[0] }
+        : { type: "push.batch", events: batch }
+
+      Effect.runPromise(conn.push(payload)).catch(() => {})
+    }
+
+    // Listener runs in native EventEmitter context on the main thread.
+    // Synchronous array push is O(1) and safe because Node.js is single-threaded.
     const listener = (event: GlobalEvent) => {
       if (!isSubscribed(event)) return
-      // Fire-and-forget: append to batch outside Effect fiber
-      Effect.runPromise(
-        Ref.update(batch, (arr) => [...arr, event]),
-      ).catch(() => {})
+      pending.push(event)
+      if (!flushTimer) flushTimer = setTimeout(flush, BATCH_MS)
     }
 
     GlobalBus.on("event", listener)
 
-    // Flusher: drain batch every 16ms
-    yield* Effect.forkIn(
-      Effect.gen(function* () {
-        while (true) {
-          yield* Effect.sleep(16)
-          const items = yield* Ref.getAndSet(batch, [])
-          if (items.length === 0) continue
-          if (items.length === 1) {
-            yield* conn.push({ type: "push.event", ...items[0] }).pipe(Effect.catch(() => Effect.void))
-          } else {
-            yield* conn.push({ type: "push.batch", events: items }).pipe(Effect.catch(() => Effect.void))
-          }
-        }
-      }),
-      scope,
-    )
-
+    // Clean up on scope close: remove listener and cancel pending timer
     yield* Scope.addFinalizer(scope, Effect.sync(() => {
       GlobalBus.off("event", listener)
+      if (flushTimer) clearTimeout(flushTimer)
     }))
 
     yield* Effect.logInfo("WS event bridge started")

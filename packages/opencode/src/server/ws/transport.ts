@@ -11,11 +11,6 @@ import { registerAll } from "./handlers"
 import { registerRemaining } from "./extra-handlers"
 import { CorsConfig, isAllowedRequestOrigin } from "@/server/cors"
 import { handlerRuntime } from "./runtime"
-import { pushSnapshot } from "./snapshot"
-import { Config } from "@/config/config"
-import { MCP } from "@/mcp"
-import { Provider } from "@/provider/provider"
-import { Project } from "@/project/project"
 
 const AUTH_TOKEN_QUERY = "auth_token"
 registerAll()
@@ -72,38 +67,6 @@ export const layer = HttpRouter.use((router) =>
       yield* conn.push({ type: "hello", serverVersion: "1.0.0", protocolVersion: 2 }).pipe(
         Effect.catch(() => Effect.void),
       )
-
-      // Push static data (config, MCP, providers, projects) once per connect.
-      // Uses handlerRuntime because transport's Effect scope only has auth/cors services.
-      yield* Effect.promise(() =>
-        handlerRuntime.runPromise(
-          Effect.gen(function* () {
-            const configSvc = yield* Config.Service
-            const mcpSvc = yield* MCP.Service
-            const providerSvc = yield* Provider.Service
-            const projectSvc = yield* Project.Service
-            const config = yield* configSvc.get()
-            const mcpStatus = yield* mcpSvc.status()
-            const providers = yield* providerSvc.list()
-            const projects = yield* projectSvc.list()
-            yield* conn.push({
-              type: "push.static",
-              config,
-              mcp: mcpStatus,
-              providers,
-              projects,
-            })
-          }).pipe(Effect.catch(() => Effect.void)) as Effect.Effect<any>,
-        ),
-      ).pipe(Effect.catch(() => Effect.void))
-
-      // Push session snapshot on every connect (initial + reconnect).
-      // Ensures client state is reconciled after any disconnect.
-      yield* Effect.promise(() =>
-        handlerRuntime.runPromise(
-          pushSnapshot(conn).pipe(Effect.catch(() => Effect.void)) as Effect.Effect<any>,
-        ),
-      ).pipe(Effect.catch(() => Effect.void))
 
       // socket.runRaw callbacks run outside the Effect fiber context,
       // so we dispatch through a pre-built runtime that has all services.

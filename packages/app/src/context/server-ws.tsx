@@ -32,7 +32,6 @@ export function createServerWsContext(server: ServerConnection.Any) {
 
   let ws: WsClient | null = null
   let started = false
-  const subscribedSessions = new Set<string>()
 
   const start = async () => {
     if (started) return
@@ -194,8 +193,7 @@ export function createServerWsContext(server: ServerConnection.Any) {
      */
     async loadMessages(sessionID: string): Promise<unknown> {
       if (!ws) throw new Error("WS not connected")
-      if (!subscribedSessions.has(sessionID)) {
-        subscribedSessions.add(sessionID)
+      if (!ws.subscribed.has(sessionID)) {
         ws.subscribe([sessionID]).catch(() => {})
       }
       return ws.request("session.messages", { sessionID, limit: 100 })
@@ -206,34 +204,23 @@ export function createServerWsContext(server: ServerConnection.Any) {
      */
     activate(sessionID: string | null): void {
       if (!ws) return
-      // Unsubscribe from all currently subscribed sessions
-      const toRemove = [...subscribedSessions]
+      const toRemove = [...ws.subscribed]
       if (sessionID) {
-        // Keep only the active session
         const idx = toRemove.indexOf(sessionID)
         if (idx >= 0) toRemove.splice(idx, 1)
-        if (!subscribedSessions.has(sessionID)) {
-          subscribedSessions.add(sessionID)
+        if (!ws.subscribed.has(sessionID)) {
           ws.subscribe([sessionID]).catch(() => {})
         }
       }
       if (toRemove.length > 0) {
-        for (const id of toRemove) subscribedSessions.delete(id)
         ws.unsubscribe(toRemove).catch(() => {})
       }
     },
-    /**
-     * Subscribe to a session for pre-fetch of live events.
-     */
     subscribe(sessionIDs: string[]): void {
-      for (const id of sessionIDs) subscribedSessions.add(id)
       ws?.subscribe(sessionIDs).catch(() => {})
     },
-    /**
-     * Unsubscribe from session pre-fetch.
-     */
     unsubscribe(sessionIDs: string[]): void {
-      ws?.send("session.unsubscribe", { sessionIDs }).catch(() => {})
+      ws?.unsubscribe(sessionIDs).catch(() => {})
     },
     /**
      * Send a command/prompt to a session.

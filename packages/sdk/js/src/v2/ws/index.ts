@@ -21,6 +21,7 @@ export class WsClient {
   private ws: WebSocket | null = null
   private state: ConnectionState = "disconnected"
   private pending = new Map<string, PendingRequest>()
+  private retryQueue: PendingRequest[] = []
   private requestCounter = 0n
   private eventHandlers: EventHandler[] = []
   private snapshotHandlers: SnapshotHandler[] = []
@@ -34,6 +35,7 @@ export class WsClient {
   private reconnectAttempts = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined
   private reconnectState: ReconnectState = { cursors: new Map(), trackedSessions: new Set() }
+  private lastStaticHash: string | undefined
   private url: string
   private authToken: string
   private brotliPromise: Promise<{ compress(b: Uint8Array, o?: { quality?: number }): Uint8Array; decompress(b: Uint8Array): Uint8Array }> | undefined
@@ -45,6 +47,11 @@ export class WsClient {
 
   get connectionState(): ConnectionState {
     return this.state
+  }
+
+  /** Sessions this client is subscribed to for event pre-fetch. */
+  get subscribed(): Set<string> {
+    return this.reconnectState.trackedSessions
   }
 
   /** Connect to the WS server. */
@@ -85,6 +92,18 @@ export class WsClient {
   close(): void {
     this.stopHeartbeat()
     this.stopReconnect()
+    // Reject all pending and queued requests
+    const err = new Error("Connection closed")
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer)
+      p.reject(err)
+    }
+    this.pending.clear()
+    for (const p of this.retryQueue) {
+      clearTimeout(p.timer)
+      p.reject(err)
+    }
+    this.retryQueue = []
     if (this.ws) {
       this.ws.onclose = null // prevent reconnect
       this.ws.close(1000)
@@ -106,7 +125,7 @@ export class WsClient {
         reject(new Error(`Request timeout: ${type}`))
       }, timeout)
 
-      this.pending.set(requestID, { resolve, reject, timer, type })
+      this.pending.set(requestID, { resolve, reject, timer, type, payload, timeoutMs: timeout })
     })
   }
 
@@ -228,6 +247,8 @@ export class WsClient {
         for (const h of this.helloHandlers) h(this.protocolVersion)
         this.setState("connected")
         this.reconnectAttempts = 0
+        // Fetch initial state on every connect (initial + reconnect)
+        this.catchup().catch(() => {})
       } else if (msg.type === "pong") {
         this.lastPongAt = Date.now()
       }
@@ -249,10 +270,10 @@ export class WsClient {
     this.stopHeartbeat()
     this.ws = null
 
-    // Reject all pending requests
-    for (const [id, pending] of this.pending) {
+    // Move pending requests to retry queue — don't reject, they replay on reconnect
+    for (const [, pending] of this.pending) {
       clearTimeout(pending.timer)
-      pending.reject(new Error("Connection closed"))
+      this.retryQueue.push(pending)
     }
     this.pending.clear()
 
@@ -261,6 +282,10 @@ export class WsClient {
     this.setState("reconnecting")
 
     if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
+      // Max attempts reached — reject remaining queued requests
+      const err = new Error("Max reconnect attempts reached")
+      for (const p of this.retryQueue) p.reject(err)
+      this.retryQueue = []
       this.setState("disconnected")
       return
     }
@@ -271,17 +296,39 @@ export class WsClient {
     this.reconnectTimer = setTimeout(async () => {
       try {
         await this.connect()
-        // After reconnect, request state reconciliation
-        await this.request("sync.catchup", {}, 30_000).catch(() => {})
-        // Re-subscribe to previously subscribed sessions
-        if (this.reconnectState.trackedSessions.size > 0) {
-          const ids = [...this.reconnectState.trackedSessions]
-          await this.send("session.subscribe", { sessionIDs: ids })
-        }
       } catch {
         // Reconnect failed — state machine will retry on next handleDisconnect
       }
     }, delay)
+  }
+
+  /**
+   * Request initial state from the server — static data (if version changed) +
+   * session snapshot. Called on every connect (initial + reconnect).
+   */
+  private async catchup(): Promise<void> {
+    const payload: Record<string, unknown> = {}
+    if (this.lastStaticHash) payload.staticHash = this.lastStaticHash
+
+    const result = await this.request("sync.catchup", payload, 30_000) as Record<string, unknown> | undefined
+    if (result?.staticHash) this.lastStaticHash = String(result.staticHash)
+
+    // Re-subscribe to previously subscribed sessions
+    if (this.reconnectState.trackedSessions.size > 0) {
+      const ids = [...this.reconnectState.trackedSessions]
+      await this.send("session.subscribe", { sessionIDs: ids })
+    }
+
+    // Replay queued requests that were in-flight at disconnect
+    if (this.retryQueue.length > 0) {
+      const queued = this.retryQueue
+      this.retryQueue = []
+      for (const pending of queued) {
+        this.request(pending.type, pending.payload, pending.timeoutMs)
+          .then(pending.resolve)
+          .catch(pending.reject)
+      }
+    }
   }
 
   private startHeartbeat(): void {
@@ -362,6 +409,8 @@ interface PendingRequest {
   reject: (error: Error) => void
   timer: ReturnType<typeof setTimeout>
   type: string
+  payload: Record<string, unknown>
+  timeoutMs: number
 }
 
 /**
