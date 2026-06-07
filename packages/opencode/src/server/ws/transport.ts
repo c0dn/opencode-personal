@@ -1,10 +1,11 @@
-import { Effect, Layer, Option, Redacted, Scope } from "effect"
+import { Effect, Exit, Layer, Option, Redacted, Scope } from "effect"
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import * as Socket from "effect/unstable/socket/Socket"
 import { ServerAuth } from "@/server/auth"
 import * as Protocol from "./protocol"
 import { isProtocolError } from "./protocol"
 import { WsConnection } from "./connection"
+import { WsEventBridge } from "./event-bridge"
 import { WsMultiplex } from "./multiplex"
 import { registerAll } from "./handlers"
 import { registerRemaining } from "./extra-handlers"
@@ -54,7 +55,18 @@ export const layer = HttpRouter.use((router) =>
       }
 
       const socket = yield* Effect.orDie(request.upgrade)
-      const conn = yield* WsConnection.create(socket, yield* Scope.make())
+      const scope = yield* Scope.make()
+      const conn = yield* WsConnection.create(socket, scope)
+
+      // Wire EventV2 → WS push events through the connection scope
+      yield* Effect.promise(() =>
+        handlerRuntime.runPromise(
+          WsEventBridge.bridge(conn, scope) as Effect.Effect<any>,
+        ),
+      ).pipe(Effect.catch(() => Effect.void))
+
+      // Clean up scope when connection ends (prevents fiber leaks)
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.succeed(undefined)))
 
       yield* conn.push({ type: "hello", serverVersion: "1.0.0", protocolVersion: 2 }).pipe(
         Effect.catch(() => Effect.void),
