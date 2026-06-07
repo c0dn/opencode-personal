@@ -40,10 +40,11 @@ export const ResumeCommand = effectCmd({
       }),
   handler: Effect.fn("Cli.resume")(function* (args) {
     const svc = yield* Session.Service
+    const maxCount: number = (args as any)["max-count"] ?? 200
 
     // --list mode: load candidates, print, exit
     if (args.list) {
-      const sessions = yield* svc.listGlobal({ roots: true, limit: args.maxCount })
+      const sessions = yield* svc.listGlobal({ roots: true, limit: maxCount })
       if (sessions.length === 0) {
         UI.println("No sessions found")
         return
@@ -54,7 +55,7 @@ export const ResumeCommand = effectCmd({
     }
 
     // Resolve to a single session, then launch
-    const target = yield* resolveSession(svc, args.session, args.maxCount)
+    const target = yield* resolveSession(svc, args.session, maxCount)
 
     yield* Effect.promise(() =>
       new Promise<void>((resolve) => {
@@ -116,7 +117,9 @@ function resolveSession(
     // Exact session ID → direct DB lookup
     const maybeID = tryMakeSessionID(input)
     if (maybeID) {
-      const info = yield* svc.get(maybeID)
+      const info = yield* svc.get(maybeID).pipe(
+        Effect.catchTag("NotFoundError", () => fail(`Session not found: ${input}`)),
+      )
       return info
     }
 

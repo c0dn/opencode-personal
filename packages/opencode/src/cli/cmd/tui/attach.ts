@@ -110,7 +110,7 @@ export const AttachCommand = cmd({
 
       // When URL is auto-resolved, probe the server before launching TUI
       if (!args.url) {
-        const probeHeaders = ServerAuth.headers({ password: args.password, username: args.username })
+        const probeHeaders = ServerAuth.headers({ password: args.password, username: args.username }) ?? {}
         const probe = await probeAttach(url, probeHeaders)
         if (!probe.ok) {
           UI.error(probe.reason)

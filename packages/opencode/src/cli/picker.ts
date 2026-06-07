@@ -71,10 +71,16 @@ function pickTty(options: PickOption[], initialQuery?: string): Promise<PickOpti
 
     // State
     let query = initialQuery ?? ""
-    let filtered = applyFilter(query, options)
     let cursorIndex = 0
     let scrollOffset = 0
     let visibleLines = 0
+
+    const applyFilter = (q: string, opts: PickOption[]): PickOption[] => {
+      if (q.trim().length === 0) return opts.slice()
+      return fuzzyFilter(q, opts)
+    }
+
+    let filtered = applyFilter(query, options)
 
     const redraw = () => {
       const termHeight = process.stdout.rows ?? 24
@@ -122,11 +128,6 @@ function pickTty(options: PickOption[], initialQuery?: string): Promise<PickOpti
         : `\x1b[2m>\x1b[0m \x1b[2mtype to search...\x1b[0m`
       process.stdout.write(prompt + "\n")
       visibleLines++
-    }
-
-    const applyFilter = (q: string, opts: PickOption[]): PickOption[] => {
-      if (q.trim().length === 0) return opts.slice()
-      return fuzzyFilter(q, opts)
     }
 
     // Keypress handler
