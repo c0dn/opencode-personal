@@ -237,12 +237,14 @@ async function mountTui(input: TuiInput & { keymap: ReturnType<typeof createDefa
                 <ToastProvider>
                   <RouteProvider
                     initialRoute={
-                      input.args.continue
-                        ? {
-                            type: "session",
-                            sessionID: "dummy",
-                          }
-                        : undefined
+                      input.args.route
+                        ? JSON.parse(input.args.route)
+                        : input.args.continue
+                          ? {
+                              type: "session",
+                              sessionID: "dummy",
+                            }
+                          : undefined
                     }
                   >
                     <TuiConfigProvider config={input.config}>

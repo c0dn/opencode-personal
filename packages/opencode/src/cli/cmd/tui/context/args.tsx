@@ -7,6 +7,8 @@ export interface Args {
   continue?: boolean
   sessionID?: string
   fork?: boolean
+  /** Initial route JSON string (e.g. '{"type":"plugin","id":"stats"}') */
+  route?: string
 }
 
 export const { use: useArgs, provider: ArgsProvider } = createSimpleContext({
