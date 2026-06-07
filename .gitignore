@@ -34,3 +34,4 @@ logs/
 *.bun-build
 tsconfig.tsbuildinfo
 specs/
+home/

@@ -117,6 +117,23 @@ export class WsClient {
     this.ws!.send(frame)
   }
 
+  /**
+   * Subscribe to events for session IDs for pre-fetch filtering.
+   * Tracked sessions are re-subscribed on reconnect.
+   */
+  async subscribe(sessionIDs: string[]): Promise<void> {
+    for (const id of sessionIDs) this.reconnectState.trackedSessions.add(id)
+    await this.send("session.subscribe", { sessionIDs })
+  }
+
+  /**
+   * Unsubscribe from events for session IDs.
+   */
+  async unsubscribe(sessionIDs: string[]): Promise<void> {
+    for (const id of sessionIDs) this.reconnectState.trackedSessions.delete(id)
+    await this.send("session.unsubscribe", { sessionIDs })
+  }
+
   /** Subscribe to push.event frames. */
   onEvent(handler: EventHandler): () => void {
     this.eventHandlers.push(handler)
@@ -254,13 +271,12 @@ export class WsClient {
     this.reconnectTimer = setTimeout(async () => {
       try {
         await this.connect()
-        // After reconnect, send catchup
-        if (this.reconnectState.cursors.size > 0) {
-          const cursors: Record<string, number> = {}
-          for (const [id, seq] of this.reconnectState.cursors) {
-            cursors[id] = seq
-          }
-          await this.request("sync.catchup", { cursors }, 30_000)
+        // After reconnect, request state reconciliation
+        await this.request("sync.catchup", {}, 30_000).catch(() => {})
+        // Re-subscribe to previously subscribed sessions
+        if (this.reconnectState.trackedSessions.size > 0) {
+          const ids = [...this.reconnectState.trackedSessions]
+          await this.send("session.subscribe", { sessionIDs: ids })
         }
       } catch {
         // Reconnect failed — state machine will retry on next handleDisconnect

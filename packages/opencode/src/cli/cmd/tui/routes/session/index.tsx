@@ -258,9 +258,9 @@ export function Session() {
     const id = route.sessionID
     const ws = sdk.ws
     if (!ws) return
-    ws.send("session.subscribe", { sessionIDs: [id] }).catch(() => {})
+    ws.subscribe([id]).catch(() => {})
     onCleanup(() => {
-      ws.send("session.unsubscribe", { sessionIDs: [id] }).catch(() => {})
+      ws.unsubscribe([id]).catch(() => {})
     })
   })
 

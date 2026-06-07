@@ -159,7 +159,7 @@ export function createServerWsContext(server: ServerConnection.Any) {
             .filter((s) => s.status === "busy")
             .map((s) => s.id)
           if (running.length > 0) {
-            ws!.send("session.subscribe", { sessionIDs: running }).catch(() => {})
+            ws!.subscribe(running).catch(() => {})
           }
         }
       })
@@ -196,7 +196,7 @@ export function createServerWsContext(server: ServerConnection.Any) {
       if (!ws) throw new Error("WS not connected")
       if (!subscribedSessions.has(sessionID)) {
         subscribedSessions.add(sessionID)
-        ws.send("session.subscribe", { sessionIDs: [sessionID] }).catch(() => {})
+        ws.subscribe([sessionID]).catch(() => {})
       }
       return ws.request("session.messages", { sessionID, limit: 100 })
     },
@@ -214,12 +214,12 @@ export function createServerWsContext(server: ServerConnection.Any) {
         if (idx >= 0) toRemove.splice(idx, 1)
         if (!subscribedSessions.has(sessionID)) {
           subscribedSessions.add(sessionID)
-          ws.send("session.subscribe", { sessionIDs: [sessionID] }).catch(() => {})
+          ws.subscribe([sessionID]).catch(() => {})
         }
       }
       if (toRemove.length > 0) {
         for (const id of toRemove) subscribedSessions.delete(id)
-        ws.send("session.unsubscribe", { sessionIDs: toRemove }).catch(() => {})
+        ws.unsubscribe(toRemove).catch(() => {})
       }
     },
     /**
@@ -227,7 +227,7 @@ export function createServerWsContext(server: ServerConnection.Any) {
      */
     subscribe(sessionIDs: string[]): void {
       for (const id of sessionIDs) subscribedSessions.add(id)
-      ws?.send("session.subscribe", { sessionIDs }).catch(() => {})
+      ws?.subscribe(sessionIDs).catch(() => {})
     },
     /**
      * Unsubscribe from session pre-fetch.

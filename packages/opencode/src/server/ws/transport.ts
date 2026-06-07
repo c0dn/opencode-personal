@@ -11,6 +11,7 @@ import { registerAll } from "./handlers"
 import { registerRemaining } from "./extra-handlers"
 import { CorsConfig, isAllowedRequestOrigin } from "@/server/cors"
 import { handlerRuntime } from "./runtime"
+import { pushSnapshot } from "./snapshot"
 import { Config } from "@/config/config"
 import { MCP } from "@/mcp"
 import { Provider } from "@/provider/provider"
@@ -93,6 +94,14 @@ export const layer = HttpRouter.use((router) =>
               projects,
             })
           }).pipe(Effect.catch(() => Effect.void)) as Effect.Effect<any>,
+        ),
+      ).pipe(Effect.catch(() => Effect.void))
+
+      // Push session snapshot on every connect (initial + reconnect).
+      // Ensures client state is reconciled after any disconnect.
+      yield* Effect.promise(() =>
+        handlerRuntime.runPromise(
+          pushSnapshot(conn).pipe(Effect.catch(() => Effect.void)) as Effect.Effect<any>,
         ),
       ).pipe(Effect.catch(() => Effect.void))
 

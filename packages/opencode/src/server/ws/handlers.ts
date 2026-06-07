@@ -20,6 +20,9 @@ import { WsMultiplex } from "./multiplex"
 export function registerAll(): void {
   WsMultiplex.register("ping", handlePing)
 
+  // Reconnect: push fresh snapshot for state reconciliation
+  WsMultiplex.register("sync.catchup", handleSyncCatchup)
+
   // Session read
   WsMultiplex.register("session.list", handleSessionList)
   WsMultiplex.register("session.get", handleSessionGet)
@@ -145,6 +148,45 @@ function handleMcpStatus(_msg: Record<string, unknown>, _conn: Connection) {
   return Effect.gen(function* () {
     const mcp = yield* MCP.Service
     return yield* mcp.status()
+  })
+}
+
+// ---- Reconnect catchup ----
+
+function handleSyncCatchup(_msg: Record<string, unknown>, conn: Connection) {
+  return Effect.gen(function* () {
+    // Push fresh session snapshot to reconcile client state after reconnect.
+    // EventV2 cursors not yet available — pushes full snapshot for now.
+    const sessionsSvc = yield* Session.Service
+    const sessions = yield* sessionsSvc.list()
+    const pageSize = 10
+    const totalPages = Math.max(1, Math.ceil(sessions.length / pageSize))
+
+    for (let page = 0; page < totalPages; page++) {
+      const pageSessions = sessions.slice(page * pageSize, (page + 1) * pageSize)
+      const sessionMeta = pageSessions.map((s) => ({
+        id: s.id,
+        parentID: s.parentID,
+        title: s.title,
+        path: s.directory,
+        projectID: s.projectID,
+        status: "idle" as const,
+        time: s.time,
+        preview: "",
+        messageCount: 0,
+        model: s.model?.id,
+        agent: s.agent,
+        color: undefined as string | undefined,
+      }))
+      yield* conn.push({
+        type: "push.snapshot",
+        page: page + 1,
+        totalPages,
+        sessions: sessionMeta,
+      }).pipe(Effect.catch(() => Effect.void))
+    }
+
+    return { caughtUp: true }
   })
 }
 
