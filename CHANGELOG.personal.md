@@ -9,6 +9,23 @@ Versioning note: automated upstream mirrors are published as
 `<upstream-version>-c0dn.N`. Releases are built manually via
 `personal-release.yml` and are Linux-only (`linux-x64`, `linux-arm64`).
 
+## v1.16.2-c0dn.6 - 2026-06-08
+
+### Fixed
+- **WS transport hung on servers without an opencode project in CWD**: the per-request
+  directory-aware dispatch introduced in v5 called `InstanceStore.load()` for *every*
+  WS message — including `sync.catchup`, `ping`, and `hello` — using `process.cwd()`
+  as the default directory. When the server process's CWD isn't a valid opencode
+  project directory, `project.fromDirectory()` fails inside the Effect, and
+  `handlerRuntime.runPromise()` never resolves. The client waits forever for a
+  response that never arrives, and the WebSocket stream never establishes (stuck at
+  `pending`).
+
+  **Fix**: `InstanceStore.load()` is now only called when `msg.directory` is explicitly
+  provided by the client (wsFetch always sends it). All other messages use the
+  `handlerRuntime`'s safe global default context. Smoke-tested with a real `WsClient`:
+  `sync.catchup`, `project.list`, and `session.list` all return cleanly over WS.
+
 ## v1.16.2-c0dn.5 - 2026-06-08
 
 ### Added
