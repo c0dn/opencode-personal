@@ -10,6 +10,8 @@ import { WsMultiplex } from "./multiplex"
 import { registerAll } from "./handlers"
 import { registerRemaining } from "./extra-handlers"
 import { CorsConfig, isAllowedRequestOrigin } from "@/server/cors"
+import { InstanceRef } from "@/effect/instance-ref"
+import { InstanceStore } from "@/project/instance-store"
 import { handlerRuntime } from "./runtime"
 
 const AUTH_TOKEN_QUERY = "auth_token"
@@ -90,9 +92,20 @@ export const layer = HttpRouter.use((router) =>
               return
             }
 
+            // Resolve per-request directory for InstanceRef scoping.
+            // Handlers that need directory-aware state (via InstanceState) depend on
+            // InstanceRef, which defaults to process.cwd(). REST routes provide the
+            // correct InstanceRef per-request via InstanceStore.provide(); we do the
+            // same here so WS handlers see the directory the client requested.
+            const directory = typeof msg.directory === "string" ? msg.directory : process.cwd()
+            const store = yield* InstanceStore.Service
+            const ctx = yield* store.load({ directory })
+
             const response = yield* Effect.promise(() =>
               handlerRuntime.runPromise(
-                WsMultiplex.dispatch(msg, conn) as Effect.Effect<any>,
+                WsMultiplex.dispatch(msg, conn).pipe(
+                  Effect.provideService(InstanceRef, ctx),
+                ) as Effect.Effect<any>,
               ),
             )
             if (response !== undefined)
