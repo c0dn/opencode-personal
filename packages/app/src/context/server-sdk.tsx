@@ -1,5 +1,5 @@
 import type { Event } from "@opencode-ai/sdk/v2/client"
-import { createOpencodeWsClient, WsClient } from "@opencode-ai/sdk/v2/ws"
+import { createOpencodeWsClient, createWsFetch, WsClient } from "@opencode-ai/sdk/v2/ws"
 import { createSimpleContext } from "@opencode-ai/ui/context"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { makeEventListener } from "@solid-primitives/event-listener"
@@ -288,9 +288,25 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     flush()
   })
 
+  // Experimental: route a verified subset of REST calls over the shared event
+  // WsClient. Default (flag unset) leaves the request sdk exactly as before.
+  // Reuses the single `ws` created by startWs(); falls back to REST when the
+  // socket is connecting/null/unmapped or on any WS error.
+  const wsRequestFetch: typeof fetch | undefined = import.meta.env.VITE_OPENCODE_EXPERIMENTAL_WS_REQUESTS
+    ? (createWsFetch({
+        getClient: () => ws,
+        fallback: (req) => {
+          if (platform.fetch) return platform.fetch(req)
+          ;(req as any).timeout = false
+          return fetch(req)
+        },
+        enabled: () => true,
+      }) as unknown as typeof fetch)
+    : platform.fetch
+
   const sdk = createSdkForServer({
     server: server.http,
-    fetch: platform.fetch,
+    fetch: wsRequestFetch,
     throwOnError: true,
   })
 

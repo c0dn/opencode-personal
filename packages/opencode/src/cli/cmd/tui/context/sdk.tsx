@@ -1,6 +1,6 @@
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import type { GlobalEvent } from "@opencode-ai/sdk/v2"
-import { createOpencodeWsClient, WsClient } from "@opencode-ai/sdk/v2/ws"
+import { createOpencodeWsClient, createWsFetch, WsClient } from "@opencode-ai/sdk/v2/ws"
 import { createSimpleContext } from "./helper"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { Flag } from "@opencode-ai/core/flag/flag"
@@ -23,12 +23,27 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     let sse: AbortController | undefined
     let ws: WsClient | null = null
 
+    // Mirror createOpencodeClient's default fetch (disables Bun's request
+    // timeout) so the WS fallback path behaves exactly like the flag-off path.
+    const defaultFetch: any = (req: any) => {
+      req.timeout = false
+      return fetch(req)
+    }
+    const restFetch = props.fetch ?? defaultFetch
+
     function createSDK() {
+      const requestFetch: typeof fetch | undefined = Flag.OPENCODE_EXPERIMENTAL_WS_REQUESTS
+        ? (createWsFetch({
+            getClient: () => ws,
+            fallback: (req) => restFetch(req),
+            enabled: () => true,
+          }) as unknown as typeof fetch)
+        : props.fetch
       return createOpencodeClient({
         baseUrl: props.url,
         signal: abort.signal,
         directory: props.directory,
-        fetch: props.fetch,
+        fetch: requestFetch,
         headers: props.headers,
       })
     }

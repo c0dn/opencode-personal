@@ -1,0 +1,185 @@
+import { describe, expect, test } from "bun:test"
+import { createWsFetch } from "../../src/v2/ws/ws-fetch.ts"
+import type { WsClient } from "../../src/v2/ws/index.ts"
+
+interface FakeWsOptions {
+  state?: string
+  request?: (type: string, payload: Record<string, unknown>) => Promise<unknown>
+}
+
+function fakeClient(opts: FakeWsOptions = {}) {
+  const calls: { type: string; payload: Record<string, unknown> }[] = []
+  const client = {
+    get connectionState() {
+      return opts.state ?? "connected"
+    },
+    request(type: string, payload: Record<string, unknown> = {}) {
+      calls.push({ type, payload })
+      if (opts.request) return opts.request(type, payload)
+      return Promise.resolve({ ok: true })
+    },
+  }
+  return { client: client as unknown as WsClient, calls }
+}
+
+function fakeFallback() {
+  const calls: Request[] = []
+  const response = new Response("REST", { status: 299 })
+  const fallback = (req: Request) => {
+    calls.push(req)
+    return Promise.resolve(response.clone())
+  }
+  return { fallback, calls, sentinelStatus: 299 }
+}
+
+const req = (method: string, url: string, init?: RequestInit) =>
+  new Request(`http://localhost${url}`, { method, ...init })
+
+describe("createWsFetch — mapping resolution", () => {
+  test("maps GET /session/{id} with path param + query location", async () => {
+    const ws = fakeClient({ request: async () => ({ id: "ses_123", title: "hi" }) })
+    const fb = fakeFallback()
+    const wsFetch = createWsFetch({ getClient: () => ws.client, fallback: fb.fallback, enabled: () => true })
+
+    const res = await wsFetch(req("GET", "/session/ses_123?directory=/foo&workspace=ws1"))
+
+    expect(fb.calls).toHaveLength(0)
+    expect(ws.calls).toEqual([
+      { type: "session.get", payload: { sessionID: "ses_123", directory: "/foo", workspace: "ws1" } },
+    ])
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toBe("application/json")
+    expect(await res.json()).toEqual({ id: "ses_123", title: "hi" })
+  })
+
+  test("maps GET /project with query location only", async () => {
+    const ws = fakeClient({ request: async () => [{ id: "p1" }] })
+    const fb = fakeFallback()
+    const wsFetch = createWsFetch({ getClient: () => ws.client, fallback: fb.fallback, enabled: () => true })
+
+    const res = await wsFetch(req("GET", "/project?directory=/foo"))
+
+    expect(fb.calls).toHaveLength(0)
+    expect(ws.calls).toEqual([{ type: "project.list", payload: { directory: "/foo" } }])
+    expect(await res.json()).toEqual([{ id: "p1" }])
+  })
+
+  test("decodes encoded path params", async () => {
+    const ws = fakeClient({ request: async () => ({}) })
+    const fb = fakeFallback()
+    const wsFetch = createWsFetch({ getClient: () => ws.client, fallback: fb.fallback, enabled: () => true })
+
+    await wsFetch(req("GET", "/session/ses%20123"))
+
+    expect(ws.calls[0]?.payload).toEqual({ sessionID: "ses 123" })
+  })
+
+  test("omits absent location params from payload", async () => {
+    const ws = fakeClient({ request: async () => ({}) })
+    const fb = fakeFallback()
+    const wsFetch = createWsFetch({ getClient: () => ws.client, fallback: fb.fallback, enabled: () => true })
+
+    await wsFetch(req("GET", "/session/ses_123"))
+
+    expect(ws.calls[0]?.payload).toEqual({ sessionID: "ses_123" })
+  })
+})
+
+describe("createWsFetch — fallback paths", () => {
+  test("falls back when disabled (and never touches WS)", async () => {
+    const ws = fakeClient()
+    const fb = fakeFallback()
+    const wsFetch = createWsFetch({ getClient: () => ws.client, fallback: fb.fallback, enabled: () => false })
+
+    const res = await wsFetch(req("GET", "/project"))
+
+    expect(fb.calls).toHaveLength(1)
+    expect(ws.calls).toHaveLength(0)
+    expect(res.status).toBe(fb.sentinelStatus)
+  })
+
+  test("falls back when client is null", async () => {
+    const fb = fakeFallback()
+    const wsFetch = createWsFetch({ getClient: () => null, fallback: fb.fallback, enabled: () => true })
+
+    const res = await wsFetch(req("GET", "/project"))
+
+    expect(fb.calls).toHaveLength(1)
+    expect(res.status).toBe(fb.sentinelStatus)
+  })
+
+  test("falls back when client is not connected", async () => {
+    const ws = fakeClient({ state: "connecting" })
+    const fb = fakeFallback()
+    const wsFetch = createWsFetch({ getClient: () => ws.client, fallback: fb.fallback, enabled: () => true })
+
+    const res = await wsFetch(req("GET", "/project"))
+
+    expect(fb.calls).toHaveLength(1)
+    expect(ws.calls).toHaveLength(0)
+    expect(res.status).toBe(fb.sentinelStatus)
+  })
+
+  test("falls back for an unmapped route", async () => {
+    const ws = fakeClient()
+    const fb = fakeFallback()
+    const wsFetch = createWsFetch({ getClient: () => ws.client, fallback: fb.fallback, enabled: () => true })
+
+    const res = await wsFetch(req("GET", "/config"))
+
+    expect(fb.calls).toHaveLength(1)
+    expect(ws.calls).toHaveLength(0)
+    expect(res.status).toBe(fb.sentinelStatus)
+  })
+
+  test("falls back when method does not match a mapping", async () => {
+    const ws = fakeClient()
+    const fb = fakeFallback()
+    const wsFetch = createWsFetch({ getClient: () => ws.client, fallback: fb.fallback, enabled: () => true })
+
+    const res = await wsFetch(req("POST", "/session/ses_123", { body: "{}" }))
+
+    expect(fb.calls).toHaveLength(1)
+    expect(ws.calls).toHaveLength(0)
+    expect(res.status).toBe(fb.sentinelStatus)
+  })
+
+  test("falls back (and preserves request body) when ws.request rejects", async () => {
+    const ws = fakeClient({ request: async () => Promise.reject(new Error("ws timeout")) })
+    const fb = fakeFallback()
+    const wsFetch = createWsFetch({ getClient: () => ws.client, fallback: fb.fallback, enabled: () => true })
+
+    const res = await wsFetch(req("GET", "/session/ses_123"))
+
+    expect(ws.calls).toHaveLength(1)
+    expect(fb.calls).toHaveLength(1)
+    expect(res.status).toBe(fb.sentinelStatus)
+  })
+
+  test("falls back when the handler returns undefined data", async () => {
+    const ws = fakeClient({ request: async () => undefined })
+    const fb = fakeFallback()
+    const wsFetch = createWsFetch({ getClient: () => ws.client, fallback: fb.fallback, enabled: () => true })
+
+    const res = await wsFetch(req("GET", "/project"))
+
+    expect(ws.calls).toHaveLength(1)
+    expect(fb.calls).toHaveLength(1)
+    expect(res.status).toBe(fb.sentinelStatus)
+  })
+
+  test("does not consume the original request body (clone used for parsing)", async () => {
+    // No non-GET route is mapped, but verify the original request remains
+    // readable for the REST fallback even after the shim inspects it.
+    const ws = fakeClient()
+    const fb = fakeFallback()
+    const wsFetch = createWsFetch({ getClient: () => ws.client, fallback: fb.fallback, enabled: () => true })
+
+    const original = req("POST", "/session/ses_123", { body: JSON.stringify({ a: 1 }) })
+    await wsFetch(original)
+
+    expect(fb.calls).toHaveLength(1)
+    expect(fb.calls[0]?.bodyUsed).toBe(false)
+    expect(await fb.calls[0]?.json()).toEqual({ a: 1 })
+  })
+})
