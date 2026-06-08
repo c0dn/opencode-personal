@@ -9,9 +9,36 @@ Versioning note: automated upstream mirrors are published as
 `<upstream-version>-c0dn.N`. Releases are built manually via
 `personal-release.yml` and are Linux-only (`linux-x64`, `linux-arm64`).
 
-## Unreleased
+## v1.16.2-c0dn.5 - 2026-06-08
 
 ### Added
+- **WS request transport** (`ws-fetch` facade, default-on): 29 REST endpoints now
+  route over the shared event WebSocket instead of HTTP. Both TUI and Web UI
+  always prefer WS for mapped calls when connected, falling back to REST
+  transparently on disconnect or errors. Uses a single socket — no second
+  connection.
+
+#### Mapped endpoints (29)
+| Group | Endpoints |
+|---|---|
+| Session reads | `list`, `get`, `status`, `todo`, `children`, `diff` |
+| Session mutations | `create`, `delete`, `fork`, `abort`, `init`, `prompt`, `command`, `shell`, `revert`, `unrevert`, `summarize` |
+| Messages | `delete`, `part.delete` |
+| Static/read | `project.list`, `config.get`, `mcp.status`, `permission.list`, `question.list` |
+| Control | `mcp.connect/disconnect`, `permission.reply`, `question.reply/reject` |
+
+#### Intentionally on REST
+`session.update`, `session.share/unshare`, `session.promptAsync`, `config.providers`,
+`session.messages` — payload/return shape mismatches with the WS handler; will be
+aligned in a follow-up.
+
+- **Per-request directory-aware WS runtime**: the WS handler dispatch now resolves
+  `InstanceContext` per-message via `InstanceStore.load()` (matching REST's
+  `instance-context` middleware), so directory-scoped handlers like `config.get`
+  and `mcp.status` return per-project results instead of the server's CWD.
+  Messages without a `directory` field default to `process.cwd()` for backward
+  compatibility.
+
 - **Stats dashboard interaction**: keyboard navigation now works (it was
   completely unresponsive). Registered through the OpenTUI keymap in a dedicated
   `stats` mode instead of the raw `useKeyboard` hook (which ran after the keymap
@@ -22,17 +49,21 @@ Versioning note: automated upstream mirrors are published as
   re-query.
 
 ### Changed
-- **WebSocket is now the default event transport** for both the TUI and the Web
-  UI, with automatic SSE fallback. Previously the WS client existed but was
-  effectively unused: the TUI only used WS for password-protected remote attach,
-  and the Web UI mounted a WS provider that was never started (it ran entirely on
-  REST + SSE). Both clients now prefer the batched WS event stream and fall back
-  to SSE if the socket cannot connect or permanently drops. Requests still use
-  the REST client (full requests-over-WS is a planned follow-up).
+- **WebSocket is the default transport** for both events (push.snapshot/batch/meta/static)
+  and requests (REST calls). SSE and REST HTTP remain as transparent fallback when
+  the socket is unavailable. A single `WsClient` handles both flows — no separate
+  event-vs-request connections.
+
 - **Stats number formatting** scales past millions: token counts now render as
   `B` (billions) and `T` (trillions) instead of e.g. `16563.2M`.
 
 ### Fixed
+- **WS handlers now forward all REST payload fields**: `session.prompt` accepts
+  `model` as `{providerID, modelID}` (the SDK shape), `session.command` and
+  `session.shell` forward `model`, `variant`, and `parts` that were previously
+  dropped (silently losing image attachments). `session.delete` now returns
+  `true` matching the REST handler.
+
 - **Stats cost was undercounted** ("pricing seems off"): the dashboard summed the
   stored `session.cost`, but opencode persists `cost: 0` for many responses that
   still have token usage. Cost is now estimated from token usage x the model's
