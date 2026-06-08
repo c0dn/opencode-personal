@@ -2,6 +2,9 @@ import type { WsMessage, WsResponse, ConnectionState, ReconnectState, WsPushEven
 
 export type { WsMessage, WsResponse, ConnectionState, ReconnectState, WsPushEvent, WsSnapshot, SessionMeta, WsHello, WsPushBatch, WsPushMeta, WsPushStatic }
 
+export { createWsFetch, type WsFetchOptions } from "./ws-fetch.js"
+export { WS_FETCH_MAPPINGS } from "./ws-fetch-mappings.js"
+
 const HEARTBEAT_INTERVAL = 15_000
 const HEARTBEAT_TIMEOUT = 45_000
 const RECONNECT_BASE_DELAY = 250

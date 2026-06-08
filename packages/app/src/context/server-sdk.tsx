@@ -1,5 +1,5 @@
 import type { Event } from "@opencode-ai/sdk/v2/client"
-import { createOpencodeWsClient, WsClient } from "@opencode-ai/sdk/v2/ws"
+import { createOpencodeWsClient, createWsFetch, WsClient } from "@opencode-ai/sdk/v2/ws"
 import { createSimpleContext } from "@opencode-ai/ui/context"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { makeEventListener } from "@solid-primitives/event-listener"
@@ -288,9 +288,21 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     flush()
   })
 
+  // Route REST calls over the shared event WsClient when connected.
+  // Falls back to REST transparently when WS is unavailable or the
+  // route is unmapped (ws-fetch.ts handles every edge case internally).
+  const wsRequestFetch = (createWsFetch({
+    getClient: () => ws,
+    fallback: (req) => {
+      if (platform.fetch) return platform.fetch(req)
+      ;(req as any).timeout = false
+      return fetch(req)
+    },
+  }) as unknown as typeof fetch)
+
   const sdk = createSdkForServer({
     server: server.http,
-    fetch: platform.fetch,
+    fetch: wsRequestFetch,
     throwOnError: true,
   })
 
