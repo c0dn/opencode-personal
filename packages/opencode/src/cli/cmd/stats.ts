@@ -4,7 +4,7 @@ import { writeFile, mkdir } from "fs/promises"
 import path from "path"
 import { effectCmd, fail } from "../effect-cmd"
 import { loadStats } from "./tui/stats/repository"
-import type { TimeRange } from "./tui/stats/types"
+import type { StatsCache, StatsData, TimeRange } from "./tui/stats/types"
 
 const CACHE_DIR = (() => {
   const xdg = process.env.XDG_STATE_HOME ?? path.join(process.env.HOME ?? "/tmp", ".local", "state")
@@ -26,16 +26,22 @@ export const StatsCommand = effectCmd({
   handler: Effect.fn("Cli.stats")(function* (args) {
     const range = (args.range as TimeRange) ?? "all"
 
-    // Compute stats data (catch DB errors)
-    const data = yield* loadStats(range).pipe(
-      Effect.catchCause(() => fail("Failed to load stats data")),
-    )
+    // Precompute every range so the dashboard can switch instantly (the `r`
+    // hotkey) without re-querying the database. Catch DB errors.
+    const ranges = yield* Effect.gen(function* () {
+      const all = yield* loadStats("all")
+      const week = yield* loadStats("7d")
+      const month = yield* loadStats("30d")
+      return { all, "7d": week, "30d": month } satisfies Record<TimeRange, StatsData>
+    }).pipe(Effect.catchCause(() => fail("Failed to load stats data")))
+
+    const cache: StatsCache = { ranges, initialRange: range }
 
     // Write to cache file for child process to read
     const cacheFile = path.join(CACHE_DIR, `.stats-cache-${process.pid}.json`)
     yield* Effect.promise(async () => {
       await mkdir(CACHE_DIR, { recursive: true })
-      await writeFile(cacheFile, JSON.stringify(data))
+      await writeFile(cacheFile, JSON.stringify(cache))
     })
 
     // Launch TUI with stats route

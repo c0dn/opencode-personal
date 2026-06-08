@@ -12,14 +12,15 @@ import type { InternalTuiPlugin } from "../plugin/internal"
 import type { JSX } from "@opentui/solid"
 import type { RGBA, ScrollBoxRenderable } from "@opentui/core"
 import { TextAttributes } from "@opentui/core"
-import { useKeyboard, useTerminalDimensions } from "@opentui/solid"
-import { createMemo, createResource, createSignal, For, Match, Show, Switch } from "solid-js"
+import { useTerminalDimensions } from "@opentui/solid"
+import { createEffect, createMemo, createResource, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js"
 import { loadStatsCache } from "./bridge"
-import type { OverviewStats, StatsData } from "./types"
+import type { OverviewStats, StatsData, TimeRange } from "./types"
 import type { UsageRow } from "./format"
 import { buildCalendar, cell, clamp, fmt, glyph, modelRows, money, num, providerRows, relativeTime } from "./format"
 import { selectedForeground, tint, useTheme } from "../context/theme"
 import { useExit } from "../context/exit"
+import { useBindings, useOpencodeModeStack } from "../keymap"
 import { getScrollAcceleration } from "../util/scroll"
 
 const id = "internal:stats"
@@ -34,13 +35,12 @@ const TABS = [
 ] as const
 type TabId = (typeof TABS)[number]["id"]
 
-const DIGIT_TO_TAB: Record<string, TabId | undefined> = {
-  "1": "overview",
-  "2": "models",
-  "3": "providers",
-  "4": "heatmap",
-  "5": "sessions",
-}
+// Time ranges cycled by `r`, in order. Each is precomputed in the cache.
+const RANGES: TimeRange[] = ["all", "7d", "30d"]
+
+// Dedicated keymap mode so single-key stats bindings (1–5, j/k, h/l, r) win
+// over always-active base-mode app bindings such as Tab → agent.cycle.
+const STATS_MODE = "stats"
 
 // Shared table column widths (monospace cells, padded for alignment).
 const RANK_W = 4
@@ -67,14 +67,29 @@ function tui(api: TuiPluginApi) {
 }
 
 function StatsPage(props: { api: TuiPluginApi }): JSX.Element {
-  const [data] = createResource(loadStatsCache)
+  const [cache] = createResource(loadStatsCache)
   const { theme } = useTheme()
   const exit = useExit()
   const term = useTerminalDimensions()
+  const modeStack = useOpencodeModeStack()
   const [tab, setTab] = createSignal<TabId>("overview")
+  const [range, setRange] = createSignal<TimeRange>("all")
 
-  // The active scrollable tab registers its scrollbox here so the single
-  // keyboard handler can drive it. Only one tab is mounted at a time.
+  // Adopt the range chosen on the CLI (`--range`) once the cache loads.
+  let rangeInitialized = false
+  createEffect(() => {
+    const loaded = cache()
+    if (!loaded || rangeInitialized) return
+    rangeInitialized = true
+    setRange(loaded.initialRange)
+  })
+
+  // Active dataset for the selected range. All ranges are precomputed, so
+  // switching with `r` never re-queries the database.
+  const active = createMemo(() => cache()?.ranges[range()])
+
+  // The active scrollable tab registers its scrollbox here so the key
+  // bindings can drive it. Only one tab is mounted at a time.
   let scroll: ScrollBoxRenderable | undefined
   const setScroll: SetScroll = (el) => {
     scroll = el
@@ -87,47 +102,57 @@ function StatsPage(props: { api: TuiPluginApi }): JSX.Element {
     const index = TABS.findIndex((entry) => entry.id === tab())
     selectTab(TABS[(index + direction + TABS.length) % TABS.length]!.id)
   }
+  const cycleRange = () => {
+    const index = RANGES.indexOf(range())
+    setRange(RANGES[(index + 1) % RANGES.length]!)
+  }
+  const scrollBy = (delta: number) => {
+    scroll?.scrollBy(delta)
+  }
 
-  useKeyboard((evt) => {
-    if (evt.name === "q" || evt.name === "escape" || (evt.ctrl && evt.name === "c")) {
-      evt.preventDefault()
-      evt.stopPropagation()
-      void exit()
-      return
-    }
-    const digit = DIGIT_TO_TAB[evt.name]
-    if (digit) {
-      evt.preventDefault()
-      evt.stopPropagation()
-      selectTab(digit)
-      return
-    }
-    if (evt.name === "tab") {
-      evt.preventDefault()
-      evt.stopPropagation()
-      cycle(evt.shift ? -1 : 1)
-      return
-    }
-    if (evt.name === "down" || evt.name === "j") {
-      if (!scroll) return
-      evt.preventDefault()
-      evt.stopPropagation()
-      scroll.scrollBy(2)
-      return
-    }
-    if (evt.name === "up" || evt.name === "k") {
-      if (!scroll) return
-      evt.preventDefault()
-      evt.stopPropagation()
-      scroll.scrollBy(-2)
-    }
+  // Stats owns a dedicated keymap mode so its bindings deactivate the
+  // always-active base-mode app bindings (e.g. Tab → agent.cycle). Mirrors
+  // routes/session/question.tsx.
+  onMount(() => {
+    const popMode = modeStack.push(STATS_MODE)
+    onCleanup(popMode)
   })
+
+  // Drive input through the app's keymap (the proven mechanism used by every
+  // other route/dialog), not the raw keyInput emitter that useKeyboard hooks —
+  // that listener never wins because the keymap host consumes events first.
+  useBindings(() => ({
+    mode: STATS_MODE,
+    bindings: [
+      { key: "q", desc: "Quit", group: "Stats", cmd: () => void exit() },
+      { key: "escape", desc: "Quit", group: "Stats", cmd: () => void exit() },
+      { key: "ctrl+c", desc: "Quit", group: "Stats", cmd: () => void exit() },
+      { key: "ctrl+d", desc: "Quit", group: "Stats", cmd: () => void exit() },
+      ...TABS.map((entry, index) => ({
+        key: String(index + 1),
+        desc: entry.label,
+        group: "Stats",
+        cmd: () => selectTab(entry.id),
+      })),
+      { key: "tab", desc: "Next tab", group: "Stats", cmd: () => cycle(1) },
+      { key: "shift+tab", desc: "Previous tab", group: "Stats", cmd: () => cycle(-1) },
+      { key: "l", desc: "Next tab", group: "Stats", cmd: () => cycle(1) },
+      { key: "right", desc: "Next tab", group: "Stats", cmd: () => cycle(1) },
+      { key: "h", desc: "Previous tab", group: "Stats", cmd: () => cycle(-1) },
+      { key: "left", desc: "Previous tab", group: "Stats", cmd: () => cycle(-1) },
+      { key: "j", desc: "Scroll down", group: "Stats", cmd: () => scrollBy(2) },
+      { key: "down", desc: "Scroll down", group: "Stats", cmd: () => scrollBy(2) },
+      { key: "k", desc: "Scroll up", group: "Stats", cmd: () => scrollBy(-2) },
+      { key: "up", desc: "Scroll up", group: "Stats", cmd: () => scrollBy(-2) },
+      { key: "r", desc: "Cycle range", group: "Stats", cmd: () => cycleRange() },
+    ],
+  }))
 
   return (
     <box flexDirection="column" width="100%" height="100%" backgroundColor={theme.background}>
-      <Header overview={data()?.overview} />
-      <Show when={!data.loading} fallback={<Centered>Loading…</Centered>}>
-        <Show when={data()} fallback={<Centered>No stats data found.</Centered>}>
+      <Header overview={active()?.overview} range={range()} />
+      <Show when={!cache.loading} fallback={<Centered>Loading…</Centered>}>
+        <Show when={active()} fallback={<Centered>No stats data found.</Centered>}>
           {(stats) => (
             <>
               <TabBar active={tab()} onSelect={selectTab} />
@@ -173,7 +198,7 @@ function StatsPage(props: { api: TuiPluginApi }): JSX.Element {
 
 // ── Chrome ────────────────────────────────────────────────────────────
 
-function Header(props: { overview?: OverviewStats }): JSX.Element {
+function Header(props: { overview?: OverviewStats; range: TimeRange }): JSX.Element {
   const { theme } = useTheme()
   return (
     <box
@@ -189,7 +214,8 @@ function Header(props: { overview?: OverviewStats }): JSX.Element {
     >
       <text wrapMode="none">
         <span style={{ fg: theme.accent, bold: true }}>opencode</span>
-        <span style={{ fg: theme.textMuted }}> · stats</span>
+        <span style={{ fg: theme.textMuted }}> · stats · </span>
+        <span style={{ fg: theme.text, bold: true }}>{props.range}</span>
       </text>
       <Show when={props.overview}>
         {(overview) => (
@@ -253,8 +279,9 @@ function Footer(): JSX.Element {
       borderColor={theme.border}
     >
       <Hint keys="1–5" label="tabs" />
-      <Hint keys="Tab" label="switch" />
-      <Hint keys="↑↓ / jk" label="scroll" />
+      <Hint keys="tab / h l" label="switch" />
+      <Hint keys="↑↓ / j k" label="scroll" />
+      <Hint keys="r" label="range" />
       <Hint keys="q" label="quit" />
     </box>
   )
@@ -297,14 +324,17 @@ function ScrollRegion(props: { setScroll: SetScroll; children: JSX.Element }): J
 
 function OverviewTab(props: { data: StatsData; term: TermSize; setScroll: SetScroll }): JSX.Element {
   const { theme } = useTheme()
-  const o = props.data.overview
-  const breakdownMax = Math.max(
-    1,
-    o.inputTokens,
-    o.outputTokens,
-    o.reasoningTokens,
-    o.cacheReadTokens,
-    o.cacheWriteTokens,
+  // Reactive so cycling the time range (`r`) re-renders the cards in place.
+  const o = createMemo(() => props.data.overview)
+  const breakdownMax = createMemo(() =>
+    Math.max(
+      1,
+      o().inputTokens,
+      o().outputTokens,
+      o().reasoningTokens,
+      o().cacheReadTokens,
+      o().cacheWriteTokens,
+    ),
   )
   const barWidth = createMemo(() => clamp(props.term().width - 40, 10, 36))
   return (
@@ -314,60 +344,66 @@ function OverviewTab(props: { data: StatsData; term: TermSize; setScroll: SetScr
           <box flexDirection="row" gap={1}>
             <Card title="Cost" grow>
               <text attributes={TextAttributes.BOLD} fg={theme.accent}>
-                {money(o.totalCost)}
+                {money(o().totalCost)}
               </text>
               <text fg={theme.textMuted}>total spend</text>
               <text wrapMode="none">
                 <span style={{ fg: theme.textMuted }}>{cell("avg / session", 14)}</span>
-                <span style={{ fg: theme.text }}>{money(o.sessions > 0 ? o.totalCost / o.sessions : 0)}</span>
+                <span style={{ fg: theme.text }}>{money(o().sessions > 0 ? o().totalCost / o().sessions : 0)}</span>
               </text>
             </Card>
             <Card title="Tokens" grow>
               <text attributes={TextAttributes.BOLD} fg={theme.accent}>
-                {fmt(o.totalTokens)}
+                {fmt(o().totalTokens)}
               </text>
               <text fg={theme.textMuted}>total tokens</text>
               <text wrapMode="none">
                 <span style={{ fg: theme.textMuted }}>in </span>
-                <span style={{ fg: theme.text }}>{fmt(o.inputTokens)}</span>
+                <span style={{ fg: theme.text }}>{fmt(o().inputTokens)}</span>
                 <span style={{ fg: theme.textMuted }}>{"   out "}</span>
-                <span style={{ fg: theme.text }}>{fmt(o.outputTokens)}</span>
+                <span style={{ fg: theme.text }}>{fmt(o().outputTokens)}</span>
               </text>
             </Card>
             <Card title="Activity" grow>
-              <StatRow label="Sessions" value={o.sessions} />
-              <StatRow label="Messages" value={o.messages} />
-              <StatRow label="Models used" value={o.modelsUsed} />
-              <StatRow label="Active days" value={o.activeDays} />
+              <StatRow label="Sessions" value={o().sessions} />
+              <StatRow label="Messages" value={o().messages} />
+              <StatRow label="Models used" value={o().modelsUsed} />
+              <StatRow label="Active days" value={o().activeDays} />
             </Card>
           </box>
           <Card title="Token Breakdown">
-            <BreakdownRow label="Input" value={o.inputTokens} max={breakdownMax} width={barWidth()} color={theme.info} />
+            <BreakdownRow
+              label="Input"
+              value={o().inputTokens}
+              max={breakdownMax()}
+              width={barWidth()}
+              color={theme.info}
+            />
             <BreakdownRow
               label="Output"
-              value={o.outputTokens}
-              max={breakdownMax}
+              value={o().outputTokens}
+              max={breakdownMax()}
               width={barWidth()}
               color={theme.success}
             />
             <BreakdownRow
               label="Reasoning"
-              value={o.reasoningTokens}
-              max={breakdownMax}
+              value={o().reasoningTokens}
+              max={breakdownMax()}
               width={barWidth()}
               color={theme.secondary}
             />
             <BreakdownRow
               label="Cache read"
-              value={o.cacheReadTokens}
-              max={breakdownMax}
+              value={o().cacheReadTokens}
+              max={breakdownMax()}
               width={barWidth()}
               color={theme.accent}
             />
             <BreakdownRow
               label="Cache write"
-              value={o.cacheWriteTokens}
-              max={breakdownMax}
+              value={o().cacheWriteTokens}
+              max={breakdownMax()}
               width={barWidth()}
               color={theme.warning}
             />

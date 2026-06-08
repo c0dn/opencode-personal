@@ -1,23 +1,24 @@
 /**
  * Bridge between the Effect query layer and the SolidJS TUI.
  *
- * The parent process writes StatsData to a JSON file and sets
- * OPENCODE_STATS_CACHE env var. The TUI component reads it on mount.
+ * The parent process writes a StatsCache (all ranges precomputed) to a JSON
+ * file and sets OPENCODE_STATS_CACHE. The TUI component reads it on mount and
+ * switches between the cached ranges locally.
  */
 
 import { readFile } from "fs/promises"
-import type { StatsData } from "./types"
+import type { StatsCache } from "./types"
 
-let cached: StatsData | null = null
+let cached: StatsCache | null = null
 let loaded = false
 
-/** Called from the TUI component on mount. Returns null if not yet loaded. */
-export function getStatsData(): StatsData | null {
+/** Returns the loaded cache, or null if not yet loaded. */
+export function getStatsCache(): StatsCache | null {
   return cached
 }
 
-/** Called from the TUI plugin on mount to load cached data from file. */
-export function loadStatsCache(): Promise<StatsData | null> {
+/** Called from the TUI plugin on mount to load the cached ranges from file. */
+export function loadStatsCache(): Promise<StatsCache | null> {
   if (loaded) return Promise.resolve(cached)
 
   const path = process.env.OPENCODE_STATS_CACHE
@@ -28,7 +29,7 @@ export function loadStatsCache(): Promise<StatsData | null> {
 
   return readFile(path, "utf-8")
     .then((json) => {
-      cached = JSON.parse(json) as StatsData
+      cached = JSON.parse(json) as StatsCache
       loaded = true
       return cached
     })

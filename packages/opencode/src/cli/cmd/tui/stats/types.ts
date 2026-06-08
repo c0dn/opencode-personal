@@ -77,6 +77,17 @@ export interface StatsData {
   driftPercent: number
 }
 
+/**
+ * Multi-range cache written by the `stats` command for the TUI child process.
+ * Every supported range is precomputed so the dashboard can switch ranges
+ * instantly without re-querying the database.
+ */
+export interface StatsCache {
+  ranges: Record<TimeRange, StatsData>
+  /** Range the dashboard should select first (from the `--range` flag). */
+  initialRange: TimeRange
+}
+
 /** Raw row shapes from SQL queries (internal). */
 
 export interface SessionAggregateRow {
