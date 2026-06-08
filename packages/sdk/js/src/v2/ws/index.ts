@@ -12,7 +12,8 @@ import msgpackParser from "socket.io-msgpack-parser"
 type EventHandler = (event: WsPushEvent) => void
 type SnapshotHandler = (snapshot: WsSnapshot) => void
 type StateChangeHandler = (state: ConnectionState) => void
-type HelloHandler = (protocolVersion: number) => void
+type HelloPayload = WsHello & { protocolVersion: number }
+type HelloHandler = (hello: HelloPayload) => void
 
 /**
  * WebSocket binary protocol client using Socket.IO transport.
@@ -71,9 +72,12 @@ export class WsClient {
         this.setState("handshake")
       })
 
-      sock.on("hello", (hello: { serverVersion: string; protocolVersion?: number }) => {
-        const pv = hello.protocolVersion ?? 1
-        for (const h of this.helloHandlers) h(pv)
+      sock.on("hello", (hello: WsHello) => {
+        const payload: HelloPayload = {
+          ...hello,
+          protocolVersion: hello.protocolVersion ?? 1,
+        }
+        for (const h of this.helloHandlers) h(payload)
         this.setState("connected")
         this.catchup().catch(() => {})
         resolve()
@@ -203,7 +207,7 @@ export class WsClient {
     }
   }
 
-  /** Called on hello with the negotiated protocol version. */
+  /** Called on hello with normalized protocol and server version data. */
   onHello(handler: HelloHandler): () => void {
     this.helloHandlers.push(handler)
     return () => {

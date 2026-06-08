@@ -11,12 +11,10 @@ import { ThemeProvider } from "@opencode-ai/ui/theme/context"
 import { MetaProvider } from "@solidjs/meta"
 import { type BaseRouterProps, Navigate, Route, Router } from "@solidjs/router"
 import { QueryClient, QueryClientProvider } from "@tanstack/solid-query"
-import { Effect } from "effect"
 import {
   type Component,
   createEffect,
   createMemo,
-  createResource,
   createSignal,
   ErrorBoundary,
   For,
@@ -33,7 +31,7 @@ import { CommentsProvider } from "@/context/comments"
 import { FileProvider } from "@/context/file"
 import { ServerSDKProvider } from "@/context/server-sdk"
 import { ServerSyncProvider } from "@/context/server-sync"
-import { GlobalProvider } from "@/context/global"
+import { GlobalProvider, useGlobal } from "@/context/global"
 import { HighlightsProvider } from "@/context/highlights"
 import { LanguageProvider, type Locale, useLanguage } from "@/context/language"
 import { LayoutProvider } from "@/context/layout"
@@ -48,7 +46,6 @@ import { TerminalProvider } from "@/context/terminal"
 import DirectoryLayout from "@/pages/directory-layout"
 import Layout from "@/pages/layout"
 import { ErrorPage } from "./pages/error"
-import { useCheckServerHealth } from "./utils/server-health"
 
 const HomeRoute = lazy(() => import("@/pages/home"))
 const Session = lazy(() => import("@/pages/session"))
@@ -189,31 +186,43 @@ export function AppBaseProviders(props: ParentProps<{ locale?: Locale }>) {
 }
 
 function ConnectionGate(props: ParentProps<{ disableHealthCheck?: boolean }>) {
+  const global = useGlobal()
   const server = useServer()
-  const checkServerHealth = useCheckServerHealth()
 
   const [checkMode, setCheckMode] = createSignal<"blocking" | "background">("blocking")
+  const activeHealth = createMemo(() => {
+    if (props.disableHealthCheck) return { healthy: true } as const
+    if (!server.current) return { healthy: true } as const
+    return global.servers.health[server.key]
+  })
+  const healthy = createMemo(() => activeHealth()?.healthy === true)
+  const blocking = createMemo(() => checkMode() === "blocking" && !healthy())
 
-  // performs repeated health check with a grace period for
-  // non-http connections, otherwise fails instantly
-  const [startupHealthCheck, healthCheckActions] = createResource(() =>
-    props.disableHealthCheck
-      ? true
-      : Effect.gen(function* () {
-          if (!server.current) return true
-          const { http, type } = server.current
+  const startCurrentServer = () => {
+    const current = server.current
+    if (!current) return
+    void global.createServerCtx(current).sdk.event.start()
+  }
 
-          while (true) {
-            const res = yield* Effect.promise(() => checkServerHealth(http))
-            if (res.healthy) return true
-            if (checkMode() === "background" || type === "http") return false
-          }
-        }).pipe(
-          Effect.timeoutOrElse({ duration: "10 seconds", orElse: () => Effect.succeed(false) }),
-          Effect.ensuring(Effect.sync(() => setCheckMode("background"))),
-          Effect.runPromise,
-        ),
-  )
+  const startSelectedServer = (key: ServerConnection.Key) => {
+    const conn = server.list.find((item) => ServerConnection.key(item) === key)
+    if (!conn) return
+    void global.createServerCtx(conn).sdk.event.start()
+  }
+
+  createEffect(() => {
+    if (props.disableHealthCheck) return
+    if (!server.current) return
+
+    server.key
+    setCheckMode("blocking")
+    startCurrentServer()
+
+    const timer = setTimeout(() => {
+      setCheckMode("background")
+    }, 10_000)
+    onCleanup(() => clearTimeout(timer))
+  })
 
   return (
     <Suspense
@@ -223,33 +232,32 @@ function ConnectionGate(props: ParentProps<{ disableHealthCheck?: boolean }>) {
         </div>
       }
     >
-      {/*<Show
-        when={checkMode() === "blocking" ? !startupHealthCheck.loading : startupHealthCheck.state !== "pending"}
+      <Show
+        when={!blocking()}
         fallback={
           <div class="h-dvh w-screen flex flex-col items-center justify-center bg-background-base">
             <Splash class="w-16 h-20 opacity-50 animate-pulse" />
           </div>
         }
-      >*/}
-      {checkMode() === "blocking" ? startupHealthCheck() : startupHealthCheck.latest}
-      <Show
-        when={startupHealthCheck()}
-        fallback={
-          <ConnectionError
-            onRetry={() => {
-              if (checkMode() === "background") void healthCheckActions.refetch()
-            }}
-            onServerSelected={(key) => {
-              setCheckMode("blocking")
-              server.setActive(key)
-              void healthCheckActions.refetch()
-            }}
-          />
-        }
       >
-        {props.children}
+        <Show
+          when={healthy()}
+          fallback={
+            <ConnectionError
+              onRetry={() => {
+                startCurrentServer()
+              }}
+              onServerSelected={(key) => {
+                setCheckMode("blocking")
+                server.setActive(key)
+                startSelectedServer(key)
+              }}
+            />
+          }
+        >
+          {props.children}
+        </Show>
       </Show>
-      {/*</Show>*/}
     </Suspense>
   )
 }

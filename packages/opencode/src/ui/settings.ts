@@ -1,6 +1,5 @@
 import { asc, eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
-import { EventV2 } from "@opencode-ai/core/event"
 import { NonNegativeInt, optionalOmitUndefined } from "@opencode-ai/core/schema"
 import {
   UiAppSettingsTable,
@@ -11,7 +10,6 @@ import {
   UiSettingsProfileTable,
 } from "@opencode-ai/core/ui/settings.sql"
 import { Context, Effect, Layer, Schema } from "effect"
-import { GlobalBus } from "@/bus/global"
 
 const defaultProfileID = "default"
 
@@ -165,13 +163,6 @@ export const defaultAppSettings = {
 
 export const defaultSettings = { ...defaultAppSettings, keybinds: {} } satisfies Settings
 
-export const Event = {
-  Updated: EventV2.define({
-    type: "ui.settings.updated",
-    schema: { profileID: Schema.String },
-  }),
-}
-
 export interface Interface {
   readonly get: () => Effect.Effect<Info>
   readonly updateApp: (input: AppSettings) => Effect.Effect<Info>
@@ -195,18 +186,6 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const { db } = yield* Database.Service
-
-    const emitUpdated = () =>
-      Effect.sync(() =>
-        GlobalBus.emit("event", {
-          directory: "global",
-          payload: {
-            id: EventV2.ID.create(),
-            type: Event.Updated.type,
-            properties: { profileID: defaultProfileID },
-          },
-        }),
-      )
 
     const ensureProfile = (d: DatabaseLike) =>
       d
@@ -367,7 +346,6 @@ export const layer = Layer.effect(
           }),
         )
         .pipe(Effect.orDie)
-      yield* emitUpdated()
       return result
     })
 
@@ -389,7 +367,6 @@ export const layer = Layer.effect(
           }),
         )
         .pipe(Effect.orDie)
-      yield* emitUpdated()
       return result
     })
 
@@ -436,7 +413,6 @@ export const layer = Layer.effect(
           }),
         )
         .pipe(Effect.orDie)
-      yield* emitUpdated()
       return result
     })
 
@@ -468,7 +444,6 @@ export const layer = Layer.effect(
           }),
         )
         .pipe(Effect.orDie)
-      yield* emitUpdated()
       return result
     })
 
@@ -526,7 +501,6 @@ export const layer = Layer.effect(
           }),
         )
         .pipe(Effect.orDie)
-      yield* emitUpdated()
       return result
     })
 
@@ -565,7 +539,6 @@ export const UiSettings = {
   ModelVariantInput,
   defaultAppSettings,
   defaultSettings,
-  Event,
   Service,
   layer,
   defaultLayer,

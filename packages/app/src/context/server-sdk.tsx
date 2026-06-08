@@ -1,8 +1,9 @@
 import type { Event } from "@opencode-ai/sdk/v2/client"
-import { createOpencodeWsClient, createWsFetch, WsClient } from "@opencode-ai/sdk/v2/ws"
+import { type ConnectionState, createWsFetch, WsClient } from "@opencode-ai/sdk/v2/ws"
 import { createSimpleContext } from "@opencode-ai/ui/context"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { batch, onCleanup } from "solid-js"
+import { createStore } from "solid-js/store"
 import { authTokenFromCredentials, createSdkForServer } from "@/utils/server"
 import { useLanguage } from "./language"
 import { usePlatform } from "./platform"
@@ -16,6 +17,10 @@ const isAbortError = (error: unknown) =>
 export function createServerSdkContext(server: ServerConnection.Any) {
   const platform = usePlatform()
   const abort = new AbortController()
+  const [state, setState] = createStore({
+    connectionState: "disconnected" as ConnectionState,
+    serverVersion: undefined as string | undefined,
+  })
 
   const emitter = createGlobalEmitter<{
     [key: string]: Event
@@ -79,6 +84,7 @@ export function createServerSdkContext(server: ServerConnection.Any) {
 
   let run: Promise<void> | undefined
   let started = false
+  let client: WsClient | null = null
   let ws: WsClient | null = null
 
   // Coalesce events by key, push onto the flush queue, and schedule a frame.
@@ -103,14 +109,43 @@ export function createServerSdkContext(server: ServerConnection.Any) {
   // reconnection, and heartbeat natively. We do NOT call ws.subscribe(...) — the
   // web needs every event, and an empty subscription set streams them all.
   const startWs = async () => {
+    client?.close()
     const token = authTokenFromCredentials({
       username: server.http.username,
       password: server.http.password ?? "",
     })
-    const client = await createOpencodeWsClient({
+    const nextClient = new WsClient({
       url: server.http.url,
       authToken: token,
-    }).catch((error) => {
+    })
+    client = nextClient
+    let initialConnection = true
+
+    nextClient.onEvent((e) => {
+      if (e.payload.type === "sync") return
+      enqueue(e.directory ?? "global", e.payload as unknown as Event)
+    })
+    nextClient.onHello((hello) => {
+      setState("serverVersion", hello.serverVersion)
+    })
+    nextClient.onStateChange((connectionState) => {
+      setState("connectionState", connectionState)
+      if (connectionState === "disconnected") {
+        ws = null
+        return
+      }
+      if (connectionState === "connected") {
+        if (initialConnection) {
+          initialConnection = false
+          return
+        }
+        for (const handler of reconnectHandlers) {
+          try { handler() } catch { /* ignore */ }
+        }
+      }
+    })
+
+    const connected = await nextClient.connect().then(() => nextClient).catch((error) => {
       if (!isAbortError(error)) {
         console.error("[global-sdk] ws connect failed", {
           url: server.http.url,
@@ -122,34 +157,21 @@ export function createServerSdkContext(server: ServerConnection.Any) {
 
     // stop()/cleanup happened while connecting — discard the socket.
     if (!started || abort.signal.aborted) {
-      client?.close()
+      if (client === nextClient) client = null
+      nextClient.close()
       return
     }
 
-    if (!client) {
+    if (!connected) {
       return
     }
 
-    ws = client
-    client.onEvent((e) => {
-      if (e.payload.type === "sync") return
-      enqueue(e.directory ?? "global", e.payload as unknown as Event)
-    })
-    client.onStateChange((state) => {
-      if (state === "disconnected") {
-        ws = null
-        return
-      }
-      if (state === "connected") {
-        for (const handler of reconnectHandlers) {
-          try { handler() } catch { /* ignore */ }
-        }
-      }
-    })
+    ws = connected
   }
 
   const start = () => {
-    if (started) return run
+    if (run) return run
+    if (started && ws) return Promise.resolve()
     started = true
     run = startWs().finally(() => {
       run = undefined
@@ -159,7 +181,8 @@ export function createServerSdkContext(server: ServerConnection.Any) {
 
   const stop = () => {
     started = false
-    ws?.close()
+    client?.close()
+    client = null
     ws = null
   }
 
@@ -191,6 +214,12 @@ export function createServerSdkContext(server: ServerConnection.Any) {
 
   return {
     url: server.http.url,
+    get connectionState() {
+      return state.connectionState
+    },
+    get serverVersion() {
+      return state.serverVersion
+    },
     client: sdk,
     event: {
       on: emitter.on.bind(emitter),

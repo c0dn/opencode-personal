@@ -2,7 +2,7 @@ import { createSimpleContext } from "@opencode-ai/ui/context"
 import { createEffect, createMemo, createRoot } from "solid-js"
 import { createStore } from "solid-js/store"
 import { ServerConnection, useServer } from "./server"
-import { useServerHealth } from "@/utils/server-health"
+import { healthFromConnectionState } from "@/utils/server-health"
 import { QueryClient } from "@tanstack/solid-query"
 import { createServerSdkContext } from "./server-sdk"
 import { createServerSyncContext } from "./server-sync"
@@ -13,10 +13,6 @@ export const { use: useGlobal, provider: GlobalProvider } = createSimpleContext(
   name: "Global",
   init: (props: { defaultServer: ServerConnection.Key; servers?: Array<ServerConnection.Any> }) => {
     const server = useServer()
-    const serverHealth = useServerHealth(
-      () => server.list,
-      () => true,
-    )
     const [store, setStore] = createStore({
       settings: {
         serverKey: undefined as ServerConnection.Key | undefined,
@@ -52,6 +48,7 @@ export const { use: useGlobal, provider: GlobalProvider } = createSimpleContext(
             return { dispose, serverCtx }
           }, owner as any)
           serverCtxs.set(key, root)
+          void root.serverCtx.sdk.event.start()
         }
       }
 
@@ -64,6 +61,18 @@ export const { use: useGlobal, provider: GlobalProvider } = createSimpleContext(
       }
     })
 
+    const serverHealth = createMemo(() => {
+      const health: Record<ServerConnection.Key, ReturnType<typeof healthFromConnectionState>> = {}
+      for (const conn of server.list) {
+        const key = ServerConnection.key(conn)
+        const ctx = serverCtxs.get(key)
+        health[key] = ctx
+          ? healthFromConnectionState(ctx.serverCtx.sdk.connectionState, ctx.serverCtx.sdk.serverVersion)
+          : undefined
+      }
+      return health
+    })
+
     const allServers = createMemo(
       (): Array<ServerConnection.Any> =>
         resolveServerList({ stored: serversAndProjects.store.list, props: props.servers }),
@@ -72,7 +81,9 @@ export const { use: useGlobal, provider: GlobalProvider } = createSimpleContext(
     return {
       servers: {
         list: allServers,
-        health: serverHealth,
+        get health() {
+          return serverHealth()
+        },
         default: () => allServers().find((s) => ServerConnection.key(s) === props.defaultServer) ?? allServers()[0]!,
       },
       settings: {

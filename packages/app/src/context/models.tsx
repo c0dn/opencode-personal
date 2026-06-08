@@ -1,4 +1,4 @@
-import { createEffect, createMemo, onCleanup } from "solid-js"
+import { createEffect, createMemo } from "solid-js"
 import { createStore, reconcile } from "solid-js/store"
 import { DateTime } from "luxon"
 import { filter, firstBy, flat, groupBy, mapValues, pipe, uniqueBy, values } from "remeda"
@@ -91,12 +91,6 @@ export const { use: useModels, provider: ModelsProvider } = createSimpleContext(
       removePersisted(Persist.global("model", ["model.v1"]), platform)
     })
 
-    const unsub = serverSDK.event.on("global", (event) => {
-      if (event.type !== "ui.settings.updated") return
-      if (event.properties.profileID !== "default") return
-      refetch()
-    })
-    onCleanup(unsub)
 
     const available = createMemo(() =>
       providers.connected().flatMap((p) =>

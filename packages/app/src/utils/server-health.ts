@@ -1,8 +1,7 @@
+import type { ConnectionState } from "@opencode-ai/sdk/v2/ws"
 import { usePlatform } from "@/context/platform"
 import { ServerConnection } from "@/context/server"
 import { createSdkForServer } from "./server"
-import { Accessor, createEffect, onCleanup } from "solid-js"
-import { createStore, reconcile } from "solid-js/store"
 
 export type ServerHealth = { healthy: boolean; version?: string }
 
@@ -21,6 +20,14 @@ const healthCache = new Map<
   string,
   { at: number; done: boolean; fetch: typeof globalThis.fetch; promise: Promise<ServerHealth> }
 >()
+
+export function healthFromConnectionState(
+  state: ConnectionState,
+  version?: string,
+): ServerHealth | undefined {
+  if (state === "connected") return { healthy: true, version }
+  if (state === "disconnected" || state === "reconnecting") return { healthy: false, version }
+}
 
 function cacheKey(server: ServerConnection.HttpBase) {
   return `${server.url}\n${server.username ?? ""}\n${server.password ?? ""}`
@@ -94,8 +101,6 @@ export async function checkServerHealth(
   return attempt(0).finally(() => timeout?.clear?.())
 }
 
-const pollMs = 10_000
-
 export function useCheckServerHealth() {
   const platform = usePlatform()
   const fetcher = platform.fetch ?? globalThis.fetch
@@ -114,38 +119,4 @@ export function useCheckServerHealth() {
     healthCache.set(key, { at: now, done: false, fetch: fetcher, promise })
     return promise
   }
-}
-
-export const useServerHealth = (servers: Accessor<ServerConnection.Any[]>, enabled: Accessor<boolean>) => {
-  const checkServerHealth = useCheckServerHealth()
-  const [status, setStatus] = createStore({} as Record<ServerConnection.Key, ServerHealth | undefined>)
-
-  createEffect(() => {
-    if (!enabled()) {
-      setStatus(reconcile({}))
-      return
-    }
-    const list = servers()
-    let dead = false
-
-    const refresh = async () => {
-      const results: Record<string, ServerHealth> = {}
-      await Promise.all(
-        list.map(async (conn) => {
-          results[ServerConnection.key(conn)] = await checkServerHealth(conn.http)
-        }),
-      )
-      if (dead) return
-      setStatus(reconcile(results))
-    }
-
-    void refresh()
-    const id = setInterval(() => void refresh(), pollMs)
-    onCleanup(() => {
-      dead = true
-      clearInterval(id)
-    })
-  })
-
-  return status
 }

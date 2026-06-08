@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { ServerConnection } from "@/context/server"
-import { checkServerHealth } from "./server-health"
+import { checkServerHealth, healthFromConnectionState } from "./server-health"
 
 const server: ServerConnection.HttpBase = {
   url: "http://localhost:4096",
@@ -119,5 +119,30 @@ describe("checkServerHealth", () => {
 
     expect(count).toBe(3)
     expect(result).toEqual({ healthy: false })
+  })
+})
+
+describe("healthFromConnectionState", () => {
+  test("returns healthy health for connected state", () => {
+    expect(healthFromConnectionState("connected", "1.2.3")).toEqual({
+      healthy: true,
+      version: "1.2.3",
+    })
+  })
+
+  test("returns unhealthy health for disconnected and reconnecting states", () => {
+    expect(healthFromConnectionState("disconnected", "1.2.3")).toEqual({
+      healthy: false,
+      version: "1.2.3",
+    })
+    expect(healthFromConnectionState("reconnecting", "1.2.3")).toEqual({
+      healthy: false,
+      version: "1.2.3",
+    })
+  })
+
+  test("returns undefined while connection is still starting", () => {
+    expect(healthFromConnectionState("connecting", "1.2.3")).toBeUndefined()
+    expect(healthFromConnectionState("handshake", "1.2.3")).toBeUndefined()
   })
 })
