@@ -118,8 +118,13 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
         ws.onEvent((event) => {
           handleEvent(event as unknown as GlobalEvent)
         })
+
+        // Hydrate workspaces once the socket is connected (parity with the SSE path)
+        if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
+          await sdk.sync.start().catch(() => {})
+        }
       } catch {
-        // WS failed, fall back to SSE
+        // WS connect failed — fall back to SSE
         ws = null
         startSSE()
       }
@@ -132,12 +137,10 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
         if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
           await sdk.sync.start().catch(() => {})
         }
-      } else if (Flag.OPENCODE_SERVER_PASSWORD) {
-        // Running against a server — prefer WS, fall back to SSE
-        await startWS()
-      } else {
-        startSSE()
+        return
       }
+      // Networked source: prefer WS for events, fall back to SSE on failure
+      await startWS()
     })
 
     onCleanup(() => {
