@@ -288,21 +288,17 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     flush()
   })
 
-  // Experimental: route a verified subset of REST calls over the shared event
-  // WsClient. Default (flag unset) leaves the request sdk exactly as before.
-  // Reuses the single `ws` created by startWs(); falls back to REST when the
-  // socket is connecting/null/unmapped or on any WS error.
-  const wsRequestFetch: typeof fetch | undefined = import.meta.env.VITE_OPENCODE_EXPERIMENTAL_WS_REQUESTS
-    ? (createWsFetch({
-        getClient: () => ws,
-        fallback: (req) => {
-          if (platform.fetch) return platform.fetch(req)
-          ;(req as any).timeout = false
-          return fetch(req)
-        },
-        enabled: () => true,
-      }) as unknown as typeof fetch)
-    : platform.fetch
+  // Route REST calls over the shared event WsClient when connected.
+  // Falls back to REST transparently when WS is unavailable or the
+  // route is unmapped (ws-fetch.ts handles every edge case internally).
+  const wsRequestFetch = (createWsFetch({
+    getClient: () => ws,
+    fallback: (req) => {
+      if (platform.fetch) return platform.fetch(req)
+      ;(req as any).timeout = false
+      return fetch(req)
+    },
+  }) as unknown as typeof fetch)
 
   const sdk = createSdkForServer({
     server: server.http,

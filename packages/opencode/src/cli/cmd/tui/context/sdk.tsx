@@ -32,13 +32,13 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     const restFetch = props.fetch ?? defaultFetch
 
     function createSDK() {
-      const requestFetch: typeof fetch | undefined = Flag.OPENCODE_EXPERIMENTAL_WS_REQUESTS
-        ? (createWsFetch({
-            getClient: () => ws,
-            fallback: (req) => restFetch(req),
-            enabled: () => true,
-          }) as unknown as typeof fetch)
-        : props.fetch
+      // Route REST calls over the shared event WsClient when connected.
+      // Falls back to REST transparently when WS is unavailable or the
+      // route is unmapped (ws-fetch.ts handles every edge case internally).
+      const requestFetch = (createWsFetch({
+        getClient: () => ws,
+        fallback: (req) => restFetch(req),
+      }) as unknown as typeof fetch)
       return createOpencodeClient({
         baseUrl: props.url,
         signal: abort.signal,

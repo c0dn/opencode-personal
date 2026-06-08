@@ -46,10 +46,6 @@ export const Flag = {
 
   OPENCODE_WORKSPACE_ID: process.env["OPENCODE_WORKSPACE_ID"],
   OPENCODE_EXPERIMENTAL_WORKSPACES: enabledByExperimental("OPENCODE_EXPERIMENTAL_WORKSPACES"),
-  // Route a verified subset of REST calls over the existing WS connection.
-  // Strict opt-in (not under the OPENCODE_EXPERIMENTAL umbrella) so the default
-  // is zero behavior change: everything falls back to REST unless this is set.
-  OPENCODE_EXPERIMENTAL_WS_REQUESTS: truthy("OPENCODE_EXPERIMENTAL_WS_REQUESTS"),
   OPENCODE_EXPERIMENTAL_SESSION_SWITCHER: enabledByExperimental("OPENCODE_EXPERIMENTAL_SESSION_SWITCHER"),
 
   // Evaluated at access time (not module load) because tests, the CLI, and
