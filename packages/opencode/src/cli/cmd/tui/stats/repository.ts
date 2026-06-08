@@ -8,6 +8,7 @@
 import { Effect } from "effect"
 import { sql } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
+import { ModelsDev } from "@opencode-ai/core/models-dev"
 import type {
   StatsData,
   SessionAggregateRow,
@@ -16,28 +17,41 @@ import type {
   DailyActivityRow,
   SessionListRow,
   ModelUsageRow,
+  CountRow,
 } from "./types"
 import { cutoffFor, type TimeRange } from "./types"
+import { buildPriceLookup, resolveCost, type PriceLookup } from "./pricing"
 
 /** Load all stats data for the given time range. */
 export function loadStats(range: TimeRange) {
   return Effect.gen(function* () {
     const cutoff = cutoffFor(range)
+    const modelsDev = yield* ModelsDev.Service
 
-    // Queries are independent reads — run them concurrently instead of
-    // sequentially so the dashboard does not wait for five round-trips in series.
-    const [aggregate, messageModels, tools, heatmap, sessions] = yield* Effect.all(
+    // Independent reads run concurrently instead of in series. The models.dev
+    // catalog is the in-repo pricing source opencode already maintains on disk
+    // (TTL-cached, falls back to a bundled snapshot offline), so cost estimation
+    // reuses the same prices opencode uses to compute live message cost. If the
+    // catalog is genuinely unavailable, degrade to an empty price table: the
+    // dashboard still renders and simply keeps stored costs (no estimation).
+    const priceCatalog = modelsDev
+      .get()
+      .pipe(Effect.catchDefect(() => Effect.succeed<Record<string, ModelsDev.Provider>>({})))
+    const [priceData, aggregate, messageModels, tools, heatmap, sessions, promptCount] = yield* Effect.all(
       [
+        priceCatalog,
         queryOverview(cutoff),
         queryModelUsage(cutoff),
         queryToolUsage(cutoff),
         queryDailyActivity(),
         querySessionList(cutoff),
+        queryPromptCount(cutoff),
       ],
       { concurrency: "unbounded" },
     )
 
-    return buildStatsData(aggregate, messageModels, tools, heatmap, sessions)
+    const prices = buildPriceLookup(priceData)
+    return buildStatsData(aggregate, messageModels, tools, heatmap, sessions, promptCount?.count ?? 0, prices)
   })
 }
 
@@ -156,6 +170,22 @@ function querySessionList(cutoff: number) {
   })
 }
 
+function queryPromptCount(cutoff: number) {
+  return Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    // A "prompt" is one user message. Scope matches the other queries
+    // (top-level sessions within the range) so the count lines up with them.
+    return yield* db.get<CountRow>(
+      sql`SELECT CAST(COALESCE(COUNT(*), 0) AS INTEGER) as count
+      FROM message m
+      JOIN session s ON m.session_id = s.id
+      WHERE ${sql.raw("json_extract(m.data, '$.role')")} = 'user'
+        AND s.parent_id IS NULL
+        AND s.time_updated >= ${cutoff}`,
+    )
+  })
+}
+
 // ── Data builder ──────────────────────────────────────────────────────
 
 function buildStatsData(
@@ -164,6 +194,8 @@ function buildStatsData(
   tools: ToolCountRow[],
   dailyActivity: DailyActivityRow[],
   sessions: SessionListRow[],
+  prompts: number,
+  prices: PriceLookup,
 ): StatsData {
   const a = agg ?? {
     cost: 0, tokens_input: 0, tokens_output: 0,
@@ -174,9 +206,13 @@ function buildStatsData(
     a.tokens_input + a.tokens_output + a.tokens_reasoning +
     a.tokens_cache_read + a.tokens_cache_write
 
-  // Model usage
+  // Model usage. Cost is resolved per message — stored cost wins when positive,
+  // otherwise it is estimated from tokens × model price (handles older/zero-cost
+  // rows that still have token usage). Overview cost is summed from the same
+  // per-message resolution so the Overview and Models/Providers tabs always agree.
   const modelMap = new Map<string, ModelUsageRow>()
   let messageTotalTokens = 0
+  let messageTotalCost = 0
 
   for (const row of messageModels) {
     const key = `${row.provider_id}/${row.model_id}`
@@ -187,13 +223,26 @@ function buildStatsData(
 
     messageTotalTokens += msgTokens
 
+    const cost = resolveCost(
+      row.cost,
+      {
+        input: row.input_tokens,
+        output: row.output_tokens,
+        reasoning: row.reasoning_tokens,
+        cacheRead: row.cache_read,
+        cacheWrite: row.cache_write,
+      },
+      prices(row.provider_id ?? "unknown", row.model_id ?? "unknown"),
+    )
+    messageTotalCost += cost
+
     if (existing) {
       existing.inputTokens += row.input_tokens
       existing.outputTokens += row.output_tokens
       existing.reasoningTokens += row.reasoning_tokens
       existing.cacheRead += row.cache_read
       existing.cacheWrite += row.cache_write
-      existing.cost += row.cost
+      existing.cost += cost
       existing.messageCount += 1
     } else {
       modelMap.set(key, {
@@ -204,7 +253,7 @@ function buildStatsData(
         reasoningTokens: row.reasoning_tokens,
         cacheRead: row.cache_read,
         cacheWrite: row.cache_write,
-        cost: row.cost,
+        cost,
         messageCount: 1,
       })
     }
@@ -231,10 +280,10 @@ function buildStatsData(
       reasoningTokens: a.tokens_reasoning,
       cacheReadTokens: a.tokens_cache_read,
       cacheWriteTokens: a.tokens_cache_write,
-      totalCost: a.cost,
+      totalCost: messageTotalCost,
       sessions: sessions.length,
       messages: totalMessages,
-      prompts: 0,
+      prompts,
       modelsUsed: modelIds.size,
       activeDays,
     },

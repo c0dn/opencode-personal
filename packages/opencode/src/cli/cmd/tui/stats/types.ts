@@ -135,3 +135,8 @@ export interface SessionListRow {
   time_updated: number
   message_count: number
 }
+
+/** Single scalar COUNT(*) result. */
+export interface CountRow {
+  count: number
+}
