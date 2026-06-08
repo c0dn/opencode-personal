@@ -9,6 +9,25 @@ Versioning note: automated upstream mirrors are published as
 `<upstream-version>-c0dn.N`. Releases are built manually via
 `personal-release.yml` and are Linux-only (`linux-x64`, `linux-arm64`).
 
+## v1.16.2-c0dn.11 - 2026-06-08
+
+### Changed
+- **Resume picker defaults are now local-first**: `opencode resume` / `r`
+  now searches sessions in the current folder by default, with `--global`
+  to search across folders and `--attach` to resume through the local attach
+  flow. The picker empty-state messaging was also tightened up so failed
+  searches recover more cleanly.
+
+### Fixed
+- **Recent project lists scroll correctly again in the new home UI**: the
+  desktop home project viewport now keeps its own vertical scrolling instead of
+  expanding out of the container on large layouts.
+- **Post-Socket.IO Web UI chatter is reduced**: model settings writes no longer
+  trigger an immediate redundant `GET /ui/settings`, and normal server status
+  indicators now derive health from the live Socket.IO connection state instead
+  of polling `/global/health` every 10 seconds. Server version badges are now
+  populated from the WS `hello` payload.
+
 ## v1.16.2-c0dn.10 - 2026-06-08
 
 ### Changed
