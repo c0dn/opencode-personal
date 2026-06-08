@@ -273,7 +273,7 @@ function handleSessionDelete(msg: Record<string, unknown>, _conn: Connection) {
     if (!sessionID) return { error: "Missing sessionID" }
     const sessions = yield* Session.Service
     yield* sessions.remove(sessionID as SessionID)
-    return { deleted: sessionID }
+    return true
   })
 }
 
@@ -384,10 +384,15 @@ function handleSessionPrompt(msg: Record<string, unknown>, _conn: Connection) {
     if (!sessionID) return { error: "Missing sessionID" }
     const prompt = yield* SessionPrompt.Service
     const parts = Array.isArray(msg.parts) ? msg.parts : [{ type: "text", text: typeof msg.text === "string" ? msg.text : "" }]
+    const model = msg.model
+      ? (typeof msg.model === "object" && msg.model !== null
+          ? msg.model
+          : { providerID: "unknown", modelID: String(msg.model) })
+      : undefined
     const result = yield* prompt.prompt({
       sessionID: sessionID as SessionID,
       parts,
-      model: typeof msg.model === "string" ? msg.model : undefined,
+      model,
       agent: typeof msg.agent === "string" ? msg.agent : undefined,
       noReply: msg.noReply === true,
       messageID: typeof msg.messageID === "string" ? msg.messageID : undefined,
@@ -403,10 +408,16 @@ function handleSessionCommand(msg: Record<string, unknown>, _conn: Connection) {
     const command = typeof msg.command === "string" ? msg.command : ""
     if (!command) return { error: "Missing command" }
     const prompt = yield* SessionPrompt.Service
+    // Forward all fields the REST handler expects (model, variant, parts, agent, messageID, etc.)
     const result = yield* prompt.command({
       sessionID: sessionID as SessionID,
       command,
+      model: typeof msg.model === "object" && msg.model !== null && "providerID" in msg.model
+        ? msg.model
+        : typeof msg.model === "string" ? msg.model : undefined,
       arguments: typeof msg.arguments === "string" ? msg.arguments : "",
+      variant: typeof msg.variant === "string" ? msg.variant : undefined,
+      parts: Array.isArray(msg.parts) ? msg.parts : undefined,
       agent: typeof msg.agent === "string" ? msg.agent : undefined,
       messageID: typeof msg.messageID === "string" ? msg.messageID : undefined,
     } as any)
@@ -421,9 +432,13 @@ function handleSessionShell(msg: Record<string, unknown>, _conn: Connection) {
     const command = typeof msg.command === "string" ? msg.command : ""
     if (!command) return { error: "Missing command" }
     const prompt = yield* SessionPrompt.Service
+    // Forward all fields the REST handler expects (model, agent, messageID, etc.)
     const result = yield* prompt.shell({
       sessionID: sessionID as SessionID,
       command,
+      model: typeof msg.model === "object" && msg.model !== null && "providerID" in msg.model
+        ? msg.model
+        : typeof msg.model === "string" ? msg.model : undefined,
       agent: typeof msg.agent === "string" ? msg.agent : "opencode",
       messageID: typeof msg.messageID === "string" ? msg.messageID : undefined,
     } as any)
