@@ -9,6 +9,53 @@ Versioning note: automated upstream mirrors are published as
 `<upstream-version>-c0dn.N`. Releases are built manually via
 `personal-release.yml` and are Linux-only (`linux-x64`, `linux-arm64`).
 
+## v1.16.2-c0dn.10 - 2026-06-08
+
+### Changed
+- **WebSocket transport replaced with Socket.IO + MessagePack**: the entire
+  hand-rolled binary WS protocol (MessagePack + Brotli custom framing, manual
+  heartbeat/reconnect, duplicate `handlerRuntime`) has been replaced with
+  first-party `socket.io` (v4.8.3) + `socket.io-msgpack-parser`. WebSocket
+  remains the primary transport; Socket.IO polling provides the built-in HTTP
+  fallback, eliminating the manual SSE fallback loops in the web app and TUI.
+
+  **Server**:
+  - New `Socket.IO Server` attaches to the existing `node:http` server on path
+    `/socket.io/`, sharing the REST service graph via a captured
+    `Effect.runtime()` — no separate `ManagedRuntime`, no duplicate layer graph.
+  - RPC via Socket.IO `emit-with-ack` on the `"rpc"` channel, reusing the
+    existing `WsMultiplex` handler table and idempotency cache unchanged.
+  - Event push: 16ms `GlobalBus` → `socket.emit("push.event"|"push.batch")`
+    with per-socket subscription filter, ported 1:1 from the old event bridge.
+  - Auth via Socket.IO handshake middleware (`auth_token` + Origin validation).
+
+  **Client**:
+  - `WsClient` (~459→273 LOC) rewritten over `socket.io-client`; public API
+    preserved byte-for-byte — `createOpencodeWsClient`, `request`/`send`,
+    `onEvent`/`onSnapshot`/`onStateChange`, `createWsFetch` all unchanged.
+  - Broadcasts now use `push.event`/`push.batch`/`push.meta`/`push.static`/
+    `push.snapshot` event names emitted directly by the server per-socket
+    (no Socket.IO rooms for fanout).
+  - Dropped manual msgpack/Brotli framing, manual heartbeat, and manual
+    reconnect — all handled natively by Socket.IO.
+
+### Fixed
+- **Production zero-response stall (2.5 GB RSS / heap-limit-exceeded)**: the
+  separate `handlerRuntime` (`ws/runtime.ts`) built a **second** Effect service
+  graph without the shared `memoMap`, eagerly constructing MCP/Provider/Database
+  on first dispatch. If that build stalled (e.g. remote MCP connection), every
+  dispatched WS request hung indefinitely while the server's synchronous
+  `ping`→`pong` path still worked — exactly matching the HAR evidence. The new
+  design shares the single REST graph via `Effect.runtime()`, eliminating the
+  stall and the duplicate memory footprint.
+
+### Removed
+- Deleted `ws/{transport,event-bridge,protocol,snapshot,runtime}.ts`
+- Stripped `ws/connection.ts` to interface-only (reused as a type import)
+- Removed manual SSE fallback loops from `app/server-sdk.tsx` and
+  `tui/context/sdk.tsx` (Socket.IO polling replaces them)
+- Server SSE endpoints `/global/event` + `/event` kept intact for `run`/`acp`/`slack`
+
 ## v1.16.2-c0dn.9 - 2026-06-08
 
 ### Fixed
