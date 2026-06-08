@@ -119,6 +119,17 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
           handleEvent(event as unknown as GlobalEvent)
         })
 
+        ws.onStateChange((state) => {
+          // WsClient only reports "disconnected" after exhausting its own
+          // reconnect attempts. Treat that as WS being dead and fall back to SSE
+          // so the TUI keeps receiving live updates (parity with the web path).
+          if (state !== "disconnected") return
+          if (abort.signal.aborted) return
+          if (sse && !sse.signal.aborted) return
+          ws = null
+          startSSE()
+        })
+
         // Hydrate workspaces once the socket is connected (parity with the SSE path)
         if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
           await sdk.sync.start().catch(() => {})
