@@ -36,3 +36,5 @@ tsconfig.tsbuildinfo
 specs/
 home/
 config.json
+.playwright-mcp/
+.artifacts/
