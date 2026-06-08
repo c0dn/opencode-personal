@@ -100,7 +100,7 @@ function toolPart(content: SessionMessage.AssistantTool): UIMessage["parts"][num
     return {
       ...base,
       state: "output-error",
-      errorText: content.state.error.message,
+      errorText: content.state.error?.message ?? "unknown tool error",
     }
   }
 

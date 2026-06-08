@@ -262,13 +262,20 @@ export const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Serv
             Effect.gen(function* () {
               if (!(yield* enabled())) return
               if (!(yield* exists(state.gitdir))) return
-              const result = yield* git(args(["gc", `--prune=${prune}`]), { cwd: state.directory })
-              if (result.code !== 0) {
-                log.warn("cleanup failed", {
-                  exitCode: result.code,
-                  stderr: result.stderr,
+              const gcResult = yield* git(args(["gc", `--prune=${prune}`]), { cwd: state.directory })
+              if (gcResult.code !== 0) {
+                log.warn("gc failed", {
+                  exitCode: gcResult.code,
+                  stderr: gcResult.stderr,
                 })
                 return
+              }
+              const repackResult = yield* git(args(["repack", "-ad"]), { cwd: state.directory })
+              if (repackResult.code !== 0) {
+                log.warn("repack failed", {
+                  exitCode: repackResult.code,
+                  stderr: repackResult.stderr,
+                })
               }
               log.info("cleanup", { prune })
             }),
