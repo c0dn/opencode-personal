@@ -123,4 +123,4 @@ export function jsonResponse(data: unknown): Response {
   })
 }
 
-export * as WsFetchPayload from "./ws-fetch-payload"
+export * as WsFetchPayload from "./ws-fetch-payload.js"
