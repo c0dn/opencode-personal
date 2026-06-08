@@ -129,27 +129,25 @@ describe("WsConnection", () => {
         expect(OUTBOUND_QUEUE_CAPACITY).toBe(256)
       }).pipe(run))
 
-    test("Queue.offer on bounded queue blocks when full (not returns false)", () =>
+    test("outbound queue saturation closes the connection", () =>
       Effect.gen(function* () {
-        // In Effect v4, Queue.offer on a bounded queue BLOCKS when full,
-        // rather than returning false. This means the backpressure code in
-        // connection.ts (`if (!offered)`) never triggers the close path for
-        // a bounded queue — it would deadlock instead.
-        // This test documents the current behavior.
-        const q = yield* Queue.bounded<number>(1)
-        yield* Queue.offer(q, 1)
-        // Verify the queue is full
-        const size = yield* Queue.size(q)
-        expect(size).toBe(1)
+        const scope = yield* Scope.make()
+        const { socket } = createMockSocket({ blockedWriter: true })
+        const conn = yield* WsConnection.create(socket, scope)
 
-        // Queue.offer on a full bounded queue blocks indefinitely.
-        // We test this by racing against a timeout.
-        const result = yield* Queue.offer(q, 2).pipe(
-          Effect.timeout("10 millis"),
-          Effect.map(() => "offered" as const),
-          Effect.catch(() => Effect.succeed("blocked" as const)),
-        )
-        expect(result).toBe("blocked")
+        // Push enough frames to saturate the queue. The blocked writer
+        // prevents the drain fiber from consuming, so the queue fills up.
+        // When the offer times out, the connection closes.
+        for (let i = 0; i < OUTBOUND_QUEUE_CAPACITY + 10; i++) {
+          yield* conn.push({ type: "msg", id: i })
+        }
+
+        // Allow time for the timeout + close to propagate
+        yield* Effect.sleep(200)
+
+        const open = yield* conn.isOpen
+        expect(open).toBe(false)
+        yield* Scope.close(scope, Exit.void)
       }).pipe(run))
   })
 

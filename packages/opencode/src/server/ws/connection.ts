@@ -72,11 +72,15 @@ export function create(socket: Socket.Socket, scope: Scope.Scope): Effect.Effect
         if (current.closed) return
         const encoded = yield* Effect.promise(() => Protocol.encode(message))
         if (isProtocolError(encoded)) return
-        const offered = yield* Queue.offer(outbound, encoded)
-        if (!offered) {
-          yield* Effect.logWarning("WS outbound queue full")
-          yield* doClose(writeFn, state)
-        }
+        yield* Queue.offer(outbound, encoded).pipe(
+          Effect.timeout("50 millis"),
+          Effect.catch(() =>
+            Effect.gen(function* () {
+              yield* Effect.logWarning("WS outbound queue full")
+              yield* Effect.forkIn(doClose(writeFn, state), scope)
+            }),
+          ),
+        )
       }).pipe(Effect.catch(() => Effect.void)) as Effect.Effect<void>
 
     const close = (code?: number, reason?: string) => doClose(writeFn, state, code, reason)

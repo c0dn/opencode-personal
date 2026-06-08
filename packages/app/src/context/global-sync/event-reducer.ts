@@ -188,20 +188,37 @@ export function applyDirectoryEvent(input: {
       const messages = input.store.message[info.sessionID]
       if (!messages) {
         input.setStore("message", info.sessionID, [info])
-        break
+      } else {
+        const result = Binary.search(messages, info.id, (m) => m.id)
+        if (result.found) {
+          input.setStore("message", info.sessionID, result.index, reconcile(info))
+        } else {
+          input.setStore(
+            "message",
+            info.sessionID,
+            produce((draft) => {
+              draft.splice(result.index, 0, info)
+            }),
+          )
+        }
       }
-      const result = Binary.search(messages, info.id, (m) => m.id)
-      if (result.found) {
-        input.setStore("message", info.sessionID, result.index, reconcile(info))
-        break
+
+      // Self-heal: if assistant message completed/errored but status is still busy
+      // and no blockers exist, reset status to idle
+      if (info.role === "assistant") {
+        const hasCompleted = typeof info.time?.completed === "number"
+        const hasError = !!info.error
+        if (hasCompleted || hasError) {
+          const status = input.store.session_status[info.sessionID]
+          if (status?.type === "busy") {
+            const hasPermission = (input.store.permission[info.sessionID]?.length ?? 0) > 0
+            const hasQuestion = (input.store.question[info.sessionID]?.length ?? 0) > 0
+            if (!hasPermission && !hasQuestion) {
+              input.setStore("session_status", info.sessionID, reconcile({ type: "idle" as const }))
+            }
+          }
+        }
       }
-      input.setStore(
-        "message",
-        info.sessionID,
-        produce((draft) => {
-          draft.splice(result.index, 0, info)
-        }),
-      )
       break
     }
     case "message.removed": {

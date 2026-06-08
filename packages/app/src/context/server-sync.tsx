@@ -1,6 +1,7 @@
 import type { Config, OpencodeClient, Path, Project, ProviderAuthResponse, Todo } from "@opencode-ai/sdk/v2/client"
 import { showToast } from "@/utils/toast"
 import { getFilename } from "@opencode-ai/core/util/path"
+import { Binary } from "@opencode-ai/core/util/binary"
 import { batch, getOwner, onCleanup, onMount, untrack } from "solid-js"
 import { createStore, produce, reconcile } from "solid-js/store"
 import { useLanguage } from "@/context/language"
@@ -18,7 +19,8 @@ import {
 } from "./global-sync/bootstrap"
 import { createChildStoreManager } from "./global-sync/child-store"
 import { applyDirectoryEvent, applyGlobalEvent, cleanupDroppedSessionCaches } from "./global-sync/event-reducer"
-import { clearSessionPrefetchDirectory } from "./global-sync/session-prefetch"
+import { planReconnectRefresh } from "./global-sync/reconnect-refresh"
+import { clearSessionPrefetch, clearSessionPrefetchDirectory } from "./global-sync/session-prefetch"
 import { estimateRootSessionTotal, loadRootSessionsWithFallback } from "./global-sync/session-load"
 import { trimSessions } from "./global-sync/session-trim"
 import type { ProjectMeta } from "./global-sync/types"
@@ -75,6 +77,35 @@ function makeQueryOptionsApi(serverSDK: () => OpencodeClient, sdkFor: (dir: Path
   }
 }
 export type QueryOptionsApi = ReturnType<typeof makeQueryOptionsApi>
+
+// Events that need a materialized child store to apply safely
+const CRITICAL_EVENTS = new Set([
+  "permission.asked",
+  "permission.replied",
+  "question.asked",
+  "question.replied",
+  "question.rejected",
+  "session.status",
+  "session.created",
+  "session.updated",
+  "session.deleted",
+  "message.updated",
+  "message.removed",
+  "message.part.updated",
+  "message.part.removed",
+  "message.part.delta",
+  "todo.updated",
+])
+
+function sessionIDFromEvent(event: { type: string; properties?: unknown }): string | undefined {
+  const props = event.properties as Record<string, unknown> | undefined
+  if (!props) return undefined
+  return (
+    (props.sessionID as string) ??
+    (props as any).info?.sessionID ??
+    (props as any).part?.sessionID
+  )
+}
 
 export function createServerSyncContextInner(_serverSDK?: ServerSDK) {
   const serverSDK: ServerSDK = _serverSDK ?? useServerSDK()
@@ -371,15 +402,36 @@ export function createServerSyncContextInner(_serverSDK?: ServerSDK) {
       })
       if (event.type === "server.connected" || event.type === "global.disposed") {
         if (recent) return
-        for (const directory of Object.keys(children.children)) {
+        // Force-session refresh on server reconnect
+        const plan = planReconnectRefresh({
+          directories: Object.keys(children.children),
+          forceSessions: true,
+          hasSessionMeta: (_key) => true,
+        })
+        if (plan.forceSessionDirectories.length > 0) {
+          for (const directory of plan.forceSessionDirectories) {
+            clearSessionPrefetchDirectory(directory)
+          }
+        }
+        for (const directory of plan.bootstrapDirectories) {
           queue.push(directory)
         }
       }
       return
     }
 
-    const existing = children.children[key]
-    if (!existing) return
+    let materialized = false
+    let existing = children.children[key]
+    if (!existing) {
+      if (!CRITICAL_EVENTS.has(event.type)) return
+      const [store, setStore] = children.peek(directory, { bootstrap: false })
+      existing = [store, setStore]
+      materialized = true
+      const sid = sessionIDFromEvent(event)
+      if (sid) {
+        clearSessionPrefetch(directory, [sid])
+      }
+    }
     children.mark(key)
     const [store, setStore] = existing
     applyDirectoryEvent({
@@ -394,9 +446,49 @@ export function createServerSyncContextInner(_serverSDK?: ServerSDK) {
         void queryClient.fetchQuery(queryOptionsApi.lsp(key))
       },
     })
+    if ((event.type === "permission.asked" || event.type === "question.asked") && materialized) {
+      const sid = sessionIDFromEvent(event)
+      if (sid && !store.session.find((s) => s.id === sid)) {
+        void sdkFor(directory).session.get({ sessionID: sid }).then((s) => {
+          if (s.data?.id) {
+            setStore(
+              "session",
+              produce((draft) => {
+                const match = Binary.search(draft, sid, (x) => x.id)
+                if (!match.found) draft.splice(match.index, 0, s.data!)
+              }),
+            )
+          }
+        })
+      }
+    }
+  })
+
+  const unsubReconnect = serverSDK.event.onReconnect(() => {
+    // Only refresh after the initial bootstrap has completed. Initial
+    // connection fires "connected" during the first handshake, and
+    // bootstrapping at that point races with the already-running query.
+    if (bootedAt === 0) return
+    const plan = planReconnectRefresh({
+      directories: Object.keys(children.children),
+      forceSessions: true,
+      hasSessionMeta: (_key) => true,
+    })
+    if (plan.refreshGlobal) {
+      void queryClient.fetchQuery({ queryKey: ["bootstrap"] }).catch(() => {})
+    }
+    for (const directory of plan.bootstrapDirectories) {
+      queue.push(directory)
+    }
+    if (plan.forceSessionDirectories.length > 0) {
+      for (const directory of plan.forceSessionDirectories) {
+        clearSessionPrefetchDirectory(directory)
+      }
+    }
   })
 
   onCleanup(unsub)
+  onCleanup(unsubReconnect)
   onCleanup(() => {
     queue.dispose()
   })

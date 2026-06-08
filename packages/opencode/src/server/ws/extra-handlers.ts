@@ -29,6 +29,7 @@ export function registerRemaining(): void {
   // Permissions
   WsMultiplex.register("permission.list", handlePermissionList)
   WsMultiplex.register("permission.reply", handlePermissionReply)
+  WsMultiplex.register("permission.respond", handlePermissionRespond)
 
   // Questions
   WsMultiplex.register("question.list", handleQuestionList)
@@ -123,8 +124,26 @@ function handlePermissionReply(msg: Record<string, unknown>, _conn: Connection) 
     const perm = yield* Permission.Service
     const requestID = typeof msg.requestID === "string" ? msg.requestID : undefined
     if (!requestID) return { error: "Missing requestID" }
-    yield* perm.reply({ requestID: requestID as any, reply: msg.reply as any ?? "approve" }) as Effect.Effect<any>
-    return { replied: requestID }
+    const result = yield* perm.reply({ requestID: requestID as any, reply: msg.reply as any ?? "approve" }).pipe(
+      Effect.map(() => ({ replied: requestID })),
+      Effect.catchTag("Permission.NotFoundError", (e) => Effect.succeed({ error: `Permission request not found: ${e.requestID}` })),
+    )
+    return result
+  })
+}
+
+function handlePermissionRespond(msg: Record<string, unknown>, _conn: Connection) {
+  return Effect.gen(function* () {
+    const perm = yield* Permission.Service
+    const sessionID = typeof msg.sessionID === "string" ? msg.sessionID : undefined
+    const permissionID = typeof msg.permissionID === "string" ? msg.permissionID : undefined
+    if (!sessionID) return { error: "Missing sessionID" }
+    if (!permissionID) return { error: "Missing permissionID" }
+    const result = yield* perm.reply({ requestID: permissionID as any, reply: (msg.response as any) ?? "approve" }).pipe(
+      Effect.map(() => ({ replied: permissionID })),
+      Effect.catchTag("Permission.NotFoundError", (e) => Effect.succeed({ error: `Permission request not found: ${e.requestID}` })),
+    )
+    return result
   })
 }
 

@@ -343,6 +343,68 @@ export const createDirSyncContext = (
           clearOptimistic(input.directory, input.sessionID, messageID)
         }
         const [store] = serverSync.child(input.directory, { bootstrap: false })
+        const currentMessages = store.message[input.sessionID] ?? []
+        const currentParts = store.part
+        // Build lookup maps for O(1) access instead of O(n²) .find()
+        const currentMsgMap = new Map(currentMessages.map((m) => [m.id, m]))
+        // Preserve messages that were completed by live WS events during fetch
+        const mergedMessageMap = new Map<string, Message>()
+        for (const fetched of next.session) {
+          const current = currentMsgMap.get(fetched.id)
+          if (!current) {
+            mergedMessageMap.set(fetched.id, fetched)
+            continue
+          }
+          // Live event completed the message while fetch was in flight
+          if (
+            "completed" in current.time &&
+            current.time.completed &&
+            (!("completed" in fetched.time) || !fetched.time.completed)
+          ) {
+            mergedMessageMap.set(current.id, current)
+            continue
+          }
+          // Live event updated error state
+          if ("error" in current && current.error && (!("error" in fetched) || !fetched.error)) {
+            mergedMessageMap.set(current.id, current)
+            continue
+          }
+          mergedMessageMap.set(fetched.id, fetched)
+        }
+        // Preserve messages that arrived live but aren't in fetched page at all
+        for (const msg of currentMessages) {
+          if (!mergedMessageMap.has(msg.id)) mergedMessageMap.set(msg.id, msg)
+        }
+        next.session = [...mergedMessageMap.values()].sort((a, b) => cmp(a.id, b.id))
+        // Preserve parts with live text/reasoning content
+        next.part = next.part.map((p) => {
+          const currentMsgParts = currentParts[p.id] ?? []
+          const currentPartMap = new Map(currentMsgParts.map((x) => [x.id, x]))
+          const partMap = new Map<string, Part>()
+          for (const fp of p.part) {
+            const cp = currentPartMap.get(fp.id)
+            if (!cp) {
+              partMap.set(fp.id, fp)
+              continue
+            }
+            // Live delta filled in text — preserve non-empty content over empty fetched
+            if (
+              (fp.type === "text" || fp.type === "reasoning") &&
+              (!fp.text || fp.text.length === 0) &&
+              (cp.type === "text" || cp.type === "reasoning") &&
+              cp.text.length > 0
+            ) {
+              partMap.set(cp.id, cp)
+              continue
+            }
+            partMap.set(fp.id, fp)
+          }
+          // Add parts that exist in current store but not in fetched
+          for (const cp of currentMsgParts) {
+            if (!partMap.has(cp.id)) partMap.set(cp.id, cp)
+          }
+          return { id: p.id, part: sortParts([...partMap.values()].filter((x) => !SKIP_PARTS.has(x.type))) }
+        })
         const cached = input.mode === "prepend" ? (store.message[input.sessionID] ?? []) : []
         const message = input.mode === "prepend" ? merge(cached, next.session) : next.session
         batch(() => {

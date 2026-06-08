@@ -9,6 +9,45 @@ Versioning note: automated upstream mirrors are published as
 `<upstream-version>-c0dn.N`. Releases are built manually via
 `personal-release.yml` and are Linux-only (`linux-x64`, `linux-arm64`).
 
+## v1.16.2-c0dn.8 - 2026-06-08
+
+### Fixed
+- **WS event reliability for inactive tabs and background sessions**: multiple
+  fixes across the WebSocket transport, SDK, and Web UI state layer so that
+  permission prompts, terminal status, streaming output, and session history
+  stay current even when the affected tab is not focused.
+
+  **Server/SDK**:
+  - Backpressure: outbound queue saturation now closes the connection instead of
+    blocking indefinitely (Effect bounded `Queue.offer` was blocking, not
+    returning false).
+  - Permission WS mapping parity: `POST /permission/{requestID}/reply` and
+    `POST /session/{sessionID}/permissions/{permissionID}` now route over WS
+    with REST-compatible payloads and proper `NotFoundError` handling.
+  - 11 new event-bridge subscription/batching tests covering empty/non-empty
+    subscribed sets and 16 ms `push.batch` fanout.
+
+  **Web client state**:
+  - Event coalescing now preserves arrival order (tombstone + append instead of
+    in-place replacement); permission/question events are never coalesced away.
+  - 14 critical event types materialize child stores for inactive directories
+    and dirty session prefetch caches so permission prompts, terminal status,
+    and streaming updates apply even when no tab is viewing that directory.
+  - Permission/question events trigger async session row warming.
+  - Terminal-status self-healing: completed/errored assistant messages clear
+    stale busy `session_status` when no permission/question blocker exists.
+  - Hydration preservation: live WS message/part updates during `session.messages`
+    fetch are preserved instead of being overwritten by older fetched state.
+  - WS reconnect now triggers refresh planning via `planReconnectRefresh` for
+    global and per-directory/bootstrap reconciliation.
+
+### Validation
+- opencode: typecheck clean, 63 WS tests pass (11 new event-bridge tests).
+- sdk/js: 26 ws-fetch tests pass (2 new permission mapping tests).
+- app: typecheck clean, 14 sync tests pass.
+- Playwright smoke: WS connects, session creation + messaging + subagent
+  spawning all functional with zero browser console errors.
+
 ## v1.16.2-c0dn.7 - 2026-06-08
 
 ### Fixed

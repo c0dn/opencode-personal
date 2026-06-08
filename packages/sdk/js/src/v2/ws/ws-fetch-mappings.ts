@@ -96,6 +96,8 @@ export const WS_FETCH_MAPPINGS: readonly WsRouteMapping[] = [
   // ═══════ Permission ═══════
   { method: "GET",  type: "permission.list",  match: exact("/permission"),                               buildPayload: (i) => location({}, i.query) },
   { method: "POST", type: "permission.reply", match: route("/permission/([^/]+)/respond", ["requestID"]), buildPayload: pathAndBody("requestID") },
+  { method: "POST", type: "permission.reply", match: route("/permission/([^/]+)/reply", ["requestID"]),  buildPayload: pathAndBody("requestID") },
+  { method: "POST", type: "permission.respond", match: route("/session/([^/]+)/permissions/([^/]+)", ["sessionID", "permissionID"]), buildPayload: pathAndBody("sessionID", "permissionID") },
 
   // ═══════ Question ═══════
   { method: "GET",  type: "question.list",   match: exact("/question"),                               buildPayload: (i) => location({}, i.query) },

@@ -182,6 +182,32 @@ describe("createWsFetch — mapping resolution", () => {
     ])
   })
 
+  test("maps POST /permission/{requestID}/reply to permission.reply with reply and location", async () => {
+    const ws = fakeClient()
+    const fb = fakeFallback()
+    const f = makeFetch(ws, fb)
+
+    await f(req("POST", "/permission/per_123/reply", { body: JSON.stringify({ reply: "once" }) }))
+
+    expect(fb.calls).toHaveLength(0)
+    expect(ws.calls).toEqual([
+      { type: "permission.reply", payload: { reply: "once", requestID: "per_123" } },
+    ])
+  })
+
+  test("maps POST /session/{sessionID}/permissions/{permissionID} to permission.respond", async () => {
+    const ws = fakeClient()
+    const fb = fakeFallback()
+    const f = makeFetch(ws, fb)
+
+    await f(req("POST", "/session/ses_123/permissions/per_456", { body: JSON.stringify({ response: "once" }) }))
+
+    expect(fb.calls).toHaveLength(0)
+    expect(ws.calls).toEqual([
+      { type: "permission.respond", payload: { response: "once", sessionID: "ses_123", permissionID: "per_456" } },
+    ])
+  })
+
   test("maps GET /question to question.list", async () => {
     const ws = fakeClient()
     const fb = fakeFallback()

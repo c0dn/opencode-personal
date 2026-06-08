@@ -78,6 +78,7 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     last = Date.now()
     batch(() => {
       for (const event of events) {
+        if (!event) continue
         if (skip && event.payload.type === "message.part.delta") {
           const props = event.payload.properties
           if (skip.has(deltaKey(event.directory, props.messageID, props.partID))) continue
@@ -128,12 +129,11 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     if (k) {
       const i = coalesced.get(k)
       if (i !== undefined) {
-        queue[i] = { directory, payload }
+        queue[i] = null as any
         if (payload.type === "message.part.updated") {
           const part = payload.properties.part
           staleDeltas.add(deltaKey(directory, part.messageID, part.id))
         }
-        return
       }
       coalesced.set(k, queue.length)
     }
@@ -248,13 +248,20 @@ export function createServerSdkContext(server: ServerConnection.Any) {
       enqueue(e.directory ?? "global", e.payload as unknown as Event)
     })
     client.onStateChange((state) => {
-      // The WsClient only reports "disconnected" after exhausting its own
-      // reconnect attempts (or when we close it during stop). A self-initiated
-      // disconnect while still started means WS is dead → fall back to SSE.
-      if (state !== "disconnected") return
-      if (!started || abort.signal.aborted) return
-      ws = null
-      void startSse()
+      if (state === "disconnected") {
+        // The WsClient only reports "disconnected" after exhausting its own
+        // reconnect attempts (or when we close it during stop). A self-initiated
+        // disconnect while still started means WS is dead → fall back to SSE.
+        if (!started || abort.signal.aborted) return
+        ws = null
+        void startSse()
+        return
+      }
+      if (state === "connected") {
+        for (const handler of reconnectHandlers) {
+          try { handler() } catch { /* ignore */ }
+        }
+      }
     })
   }
 
@@ -308,6 +315,8 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     throwOnError: true,
   })
 
+  const reconnectHandlers: (() => void)[] = []
+
   return {
     url: server.http.url,
     client: sdk,
@@ -315,6 +324,13 @@ export function createServerSdkContext(server: ServerConnection.Any) {
       on: emitter.on.bind(emitter),
       listen: emitter.listen.bind(emitter),
       start,
+      onReconnect(handler: () => void) {
+        reconnectHandlers.push(handler)
+        return () => {
+          const idx = reconnectHandlers.indexOf(handler)
+          if (idx >= 0) reconnectHandlers.splice(idx, 1)
+        }
+      },
     },
     createClient(opts: Omit<Parameters<typeof createSdkForServer>[0], "server" | "fetch">) {
       return createSdkForServer({
