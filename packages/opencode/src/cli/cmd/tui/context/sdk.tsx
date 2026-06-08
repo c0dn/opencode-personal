@@ -121,8 +121,8 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     async function startWS() {
       try {
         const password = Flag.OPENCODE_SERVER_PASSWORD ?? ""
-        const wsUrl = props.url.replace(/^http/, "ws")
-        const authUrl = new URL(wsUrl)
+        const authUrl = new URL("/ws", props.url)
+        authUrl.protocol = authUrl.protocol === "https:" ? "wss:" : "ws:"
         authUrl.searchParams.set("auth_token", btoa(`opencode:${password}`))
 
         ws = await createOpencodeWsClient({

@@ -216,8 +216,10 @@ export function createServerSdkContext(server: ServerConnection.Any) {
       username: server.http.username,
       password: server.http.password ?? "",
     })
+    const wsUrl = new URL("/ws", server.http.url)
+    wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:"
     const client = await createOpencodeWsClient({
-      url: server.http.url.replace(/^http/, "ws"),
+      url: wsUrl.toString(),
       authToken: token,
     }).catch((error) => {
       if (!aborted(error)) {
