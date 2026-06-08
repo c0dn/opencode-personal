@@ -56,6 +56,14 @@ class ListenerServerService extends Context.Service<ListenerServerService, Liste
   "@opencode/ListenerServer",
 ) {}
 
+let _httpServer: import("node:http").Server | undefined
+
+/** Returns the underlying node:http.Server. Throws if not yet started. */
+export function getRawHttpServer(): import("node:http").Server {
+  if (!_httpServer) throw new Error("HTTP server not yet started")
+  return _httpServer
+}
+
 const listenerDisposeMiddleware = <E, R>(
   effect: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>,
 ): Effect.Effect<HttpServerResponse.HttpServerResponse, E, R | HttpServerRequest.HttpServerRequest> => disposeMiddleware(effect)
@@ -106,13 +114,39 @@ const listenEffect: (opts: ListenOptions) => Effect.Effect<EffectListener, unkno
 )
 
 function listenerLayer(opts: ListenOptions, port: number) {
+  const server = createServer()
+  _httpServer = server
+  const serverRef = { closeStarted: false, forceStop: false }
+  const close = server.close.bind(server)
+  // Keep shutdown owned by NodeHttpServer, but honor listener.stop(true) by
+  // force-closing active HTTP sockets when its finalizer calls server.close().
+  // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Node's overloads don't preserve a monkey-patched method assignment.
+  server.close = ((callback?: Parameters<typeof server.close>[0]) => {
+    serverRef.closeStarted = true
+    const result = close(callback)
+    if (serverRef.forceStop) server.closeAllConnections()
+    return result
+  }) as typeof server.close
+
   return HttpRouter.serve(HttpApiApp.createRoutes(opts), {
     middleware: listenerDisposeMiddleware,
     disableLogger: true,
     disableListenLog: true,
   }).pipe(
     Layer.provideMerge(WebSocketTracker.layer),
-    Layer.provideMerge(serverLayer({ port, hostname: opts.hostname })),
+    Layer.provideMerge(
+      Layer.succeed(ListenerServerService)(
+        ListenerServerService.of({
+          closeAll: Effect.sync(() => {
+            serverRef.forceStop = true
+            if (serverRef.closeStarted) server.closeAllConnections()
+          }),
+        }),
+      ),
+    ),
+    Layer.provideMerge(
+      NodeHttpServer.layer(() => server, { port, host: opts.hostname, gracefulShutdownTimeout: "1 second" }),
+    ),
     // Install a fresh `ConfigProvider` per listener so `Config.string(...)`
     // reads reflect the current `process.env`. Effect's default
     // `ConfigProvider` snapshots `process.env` on first read and caches the
@@ -192,33 +226,6 @@ function makeStop(state: ListenerState, unpublishMdns: Effect.Effect<void>) {
 
 function forceClose(state: ListenerState) {
   return Effect.all([state.http.closeAll, state.websockets.closeAll], { concurrency: "unbounded", discard: true })
-}
-
-function serverLayer(opts: { port: number; hostname: string }) {
-  const server = createServer()
-  const serverRef = { closeStarted: false, forceStop: false }
-  const close = server.close.bind(server)
-  // Keep shutdown owned by NodeHttpServer, but honor listener.stop(true) by
-  // force-closing active HTTP sockets when its finalizer calls server.close().
-  // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Node's overloads don't preserve a monkey-patched method assignment.
-  server.close = ((callback?: Parameters<typeof server.close>[0]) => {
-    serverRef.closeStarted = true
-    const result = close(callback)
-    if (serverRef.forceStop) server.closeAllConnections()
-    return result
-  }) as typeof server.close
-
-  return Layer.mergeAll(
-    NodeHttpServer.layer(() => server, { port: opts.port, host: opts.hostname, gracefulShutdownTimeout: "1 second" }),
-    Layer.succeed(ListenerServerService)(
-      ListenerServerService.of({
-        closeAll: Effect.sync(() => {
-          serverRef.forceStop = true
-          if (serverRef.closeStarted) server.closeAllConnections()
-        }),
-      }),
-    ),
-  )
 }
 
 export * as Server from "./server"

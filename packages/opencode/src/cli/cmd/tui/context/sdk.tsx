@@ -20,7 +20,6 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     events?: EventSource
   }) => {
     const abort = new AbortController()
-    let sse: AbortController | undefined
     let ws: WsClient | null = null
 
     // Mirror createOpencodeClient's default fetch (disables Bun's request
@@ -84,49 +83,11 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       flush()
     }
 
-    function startSSE() {
-      sse?.abort()
-      const ctrl = new AbortController()
-      sse = ctrl
-      ;(async () => {
-        let attempt = 0
-        while (true) {
-          if (abort.signal.aborted || ctrl.signal.aborted) break
-
-          const events = await sdk.global.event({
-            signal: ctrl.signal,
-            sseMaxRetryAttempts: 0,
-          })
-
-          if (Flag.OPENCODE_EXPERIMENTAL_WORKSPACES) {
-            await sdk.sync.start().catch(() => {})
-          }
-
-          for await (const event of events.stream) {
-            if (ctrl.signal.aborted) break
-            handleEvent(event)
-          }
-
-          if (timer) clearTimeout(timer)
-          if (queue.length > 0) flush()
-          attempt += 1
-          if (abort.signal.aborted || ctrl.signal.aborted) break
-
-          const backoff = Math.min(retryDelay * 2 ** (attempt - 1), maxRetryDelay)
-          await new Promise((resolve) => setTimeout(resolve, backoff))
-        }
-      })().catch(() => {})
-    }
-
     async function startWS() {
       try {
         const password = Flag.OPENCODE_SERVER_PASSWORD ?? ""
-        const authUrl = new URL("/ws", props.url)
-        authUrl.protocol = authUrl.protocol === "https:" ? "wss:" : "ws:"
-        authUrl.searchParams.set("auth_token", btoa(`opencode:${password}`))
-
         ws = await createOpencodeWsClient({
-          url: authUrl.toString(),
+          url: props.url,
           authToken: btoa(`opencode:${password}`),
         })
 
@@ -135,14 +96,8 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
         })
 
         ws.onStateChange((state) => {
-          // WsClient only reports "disconnected" after exhausting its own
-          // reconnect attempts. Treat that as WS being dead and fall back to SSE
-          // so the TUI keeps receiving live updates (parity with the web path).
           if (state !== "disconnected") return
-          if (abort.signal.aborted) return
-          if (sse && !sse.signal.aborted) return
           ws = null
-          startSSE()
         })
 
         // Hydrate workspaces once the socket is connected (parity with the SSE path)
@@ -150,9 +105,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
           await sdk.sync.start().catch(() => {})
         }
       } catch {
-        // WS connect failed — fall back to SSE
         ws = null
-        startSSE()
       }
     }
 
@@ -165,13 +118,12 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
         }
         return
       }
-      // Networked source: prefer WS for events, fall back to SSE on failure
+      // Networked source: WS for events with Socket.IO transport and native fallback
       await startWS()
     })
 
     onCleanup(() => {
       abort.abort()
-      sse?.abort()
       ws?.close()
       if (timer) clearTimeout(timer)
     })

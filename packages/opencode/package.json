@@ -48,6 +48,7 @@
     "@typescript/native-preview": "catalog:",
     "drizzle-orm": "catalog:",
     "prettier": "3.6.2",
+    "socket.io-client": "4.8.3",
     "typescript": "catalog:",
     "vscode-languageserver-types": "3.17.5",
     "why-is-node-running": "3.2.2"
@@ -137,6 +138,8 @@
     "partial-json": "0.1.7",
     "remeda": "catalog:",
     "semver": "^7.6.3",
+    "socket.io": "4.8.3",
+    "socket.io-msgpack-parser": "3.0.0",
     "solid-js": "catalog:",
     "strip-ansi": "7.1.2",
     "tree-sitter-bash": "0.25.0",

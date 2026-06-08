@@ -98,9 +98,9 @@ import { corsVaryFix } from "./middleware/cors-vary"
 import { errorLayer } from "./middleware/error"
 import { fenceLayer } from "./middleware/fence"
 import { schemaErrorLayer } from "./middleware/schema-error"
-import { layer as wsLayer } from "@/server/ws/transport"
+import { layer as socketioLayer } from "@/server/socketio/transport"
 
-const wsRoute = wsLayer.pipe(
+const socketioRoute = socketioLayer.pipe(
   Layer.provide(ServerAuth.Config.defaultLayer),
   Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv())),
 )
@@ -120,7 +120,7 @@ const cors = (corsOptions?: CorsOptions) =>
 // - rootApiRoutes: typed /global/* and control routes; auth is declared by RootHttpApi.
 // - eventApiRoutes: typed SSE route with instance routing context and its existing API contract.
 // - instanceApiRoutes: remaining typed instance routes.
-// - wsLayer: WebSocket binary protocol upgrade at /ws.
+// - socketioLayer: Socket.IO binary protocol at /socket.io/.
 // - uiRoute: raw catch-all fallback; auth is router middleware so public static assets can bypass it.
 const authOnlyRouterLayer = authorizationRouterMiddleware.layer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
 const httpApiAuthLayer = authorizationLayer.pipe(Layer.provide(ServerAuth.Config.defaultLayer))
@@ -198,7 +198,7 @@ export function createRoutes(corsOptions?: CorsOptions) {
     eventApiRoutes,
     instanceRoutes,
     v2Routes,
-    wsRoute,
+    socketioRoute,
     docRoute,
     uiRoute,
   ).pipe(

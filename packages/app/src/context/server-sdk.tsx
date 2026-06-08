@@ -2,8 +2,7 @@ import type { Event } from "@opencode-ai/sdk/v2/client"
 import { createOpencodeWsClient, createWsFetch, WsClient } from "@opencode-ai/sdk/v2/ws"
 import { createSimpleContext } from "@opencode-ai/ui/context"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
-import { makeEventListener } from "@solid-primitives/event-listener"
-import { batch, onCleanup, onMount } from "solid-js"
+import { batch, onCleanup } from "solid-js"
 import { authTokenFromCredentials, createSdkForServer } from "@/utils/server"
 import { useLanguage } from "./language"
 import { usePlatform } from "./platform"
@@ -18,30 +17,12 @@ export function createServerSdkContext(server: ServerConnection.Any) {
   const platform = usePlatform()
   const abort = new AbortController()
 
-  const eventFetch = (() => {
-    if (!platform.fetch || !server) return
-    try {
-      const url = new URL(server.http.url)
-      const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1"
-      if (url.protocol === "http:" && !loopback) return platform.fetch
-    } catch {
-      return
-    }
-  })()
-
-  const eventSdk = createSdkForServer({
-    signal: abort.signal,
-    fetch: eventFetch,
-    server: server.http,
-  })
   const emitter = createGlobalEmitter<{
     [key: string]: Event
   }>()
 
   type Queued = { directory: string; payload: Event }
   const FLUSH_FRAME_MS = 16
-  const STREAM_YIELD_MS = 8
-  const RECONNECT_DELAY_MS = 250
 
   let queue: Queued[] = []
   let buffer: Queued[] = []
@@ -96,34 +77,11 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     timer = setTimeout(flush, Math.max(0, FLUSH_FRAME_MS - elapsed))
   }
 
-  let streamErrorLogged = false
-  const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
-  const aborted = isAbortError
-
-  let attempt: AbortController | undefined
   let run: Promise<void> | undefined
   let started = false
   let ws: WsClient | null = null
-  let sse: Promise<void> | undefined
-  const HEARTBEAT_TIMEOUT_MS = 15_000
-  let lastEventAt = Date.now()
-  let heartbeat: ReturnType<typeof setTimeout> | undefined
-  const resetHeartbeat = () => {
-    lastEventAt = Date.now()
-    if (heartbeat) clearTimeout(heartbeat)
-    heartbeat = setTimeout(() => {
-      attempt?.abort()
-    }, HEARTBEAT_TIMEOUT_MS)
-  }
-  const clearHeartbeat = () => {
-    if (!heartbeat) return
-    clearTimeout(heartbeat)
-    heartbeat = undefined
-  }
 
-  // Shared per-event handling for both transports: coalesce by key, push onto
-  // the flush queue, and schedule a frame. This is the single source of the
-  // coalescing logic so the WS and SSE paths can never drift apart.
+  // Coalesce events by key, push onto the flush queue, and schedule a frame.
   const enqueue = (directory: string, payload: Event) => {
     const k = key(directory, payload)
     if (k) {
@@ -141,89 +99,20 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     schedule()
   }
 
-  // SSE fallback loop (the original transport). Idempotent via the `sse` guard so
-  // a WS failure can only ever spin up a single SSE loop.
-  const startSse = () => {
-    if (sse) return sse
-    sse = (async () => {
-      // oxlint-disable-next-line no-unmodified-loop-condition -- `started` is set to false by stop() which also aborts; both flags are checked to allow graceful exit
-      while (!abort.signal.aborted && started) {
-        attempt = new AbortController()
-        lastEventAt = Date.now()
-        const onAbort = () => {
-          attempt?.abort()
-        }
-        abort.signal.addEventListener("abort", onAbort)
-        try {
-          const events = await eventSdk.global.event({
-            signal: attempt.signal,
-            onSseError: (error) => {
-              if (aborted(error)) return
-              if (streamErrorLogged) return
-              streamErrorLogged = true
-              console.error("[global-sdk] event stream error", {
-                url: server.http.url,
-                fetch: eventFetch ? "platform" : "webview",
-                error,
-              })
-            },
-          })
-          let yielded = Date.now()
-          resetHeartbeat()
-          for await (const event of events.stream) {
-            resetHeartbeat()
-            streamErrorLogged = false
-            const directory = event.directory ?? "global"
-            if (event.payload.type === "sync") continue
-            enqueue(directory, event.payload as Event)
-
-            if (Date.now() - yielded < STREAM_YIELD_MS) continue
-            yielded = Date.now()
-            await wait(0)
-          }
-        } catch (error) {
-          if (!aborted(error) && !streamErrorLogged) {
-            streamErrorLogged = true
-            console.error("[global-sdk] event stream failed", {
-              url: server.http.url,
-              fetch: eventFetch ? "platform" : "webview",
-              error,
-            })
-          }
-        } finally {
-          abort.signal.removeEventListener("abort", onAbort)
-          attempt = undefined
-          clearHeartbeat()
-        }
-
-        if (abort.signal.aborted || !started) return
-        await wait(RECONNECT_DELAY_MS)
-      }
-    })().finally(() => {
-      sse = undefined
-      flush()
-    })
-    return sse
-  }
-
-  // WS-first event source. The WsClient owns its own heartbeat + reconnect, so
-  // the SSE heartbeat stays idle while WS is active. Fall back to SSE if the
-  // socket fails to open or the client permanently gives up reconnecting. We do
-  // NOT call ws.subscribe(...) — the web needs every event, and an empty
-  // subscription set streams them all.
+  // WS-first event source. Socket.IO handles transport fallback (WS → polling),
+  // reconnection, and heartbeat natively. We do NOT call ws.subscribe(...) — the
+  // web needs every event, and an empty subscription set streams them all.
   const startWs = async () => {
     const token = authTokenFromCredentials({
       username: server.http.username,
       password: server.http.password ?? "",
     })
-    const wsUrl = new URL("/ws", server.http.url)
-    wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:"
     const client = await createOpencodeWsClient({
-      url: wsUrl.toString(),
+      url: server.http.url,
       authToken: token,
     }).catch((error) => {
-      if (!aborted(error)) {
-        console.error("[global-sdk] ws connect failed, falling back to sse", {
+      if (!isAbortError(error)) {
+        console.error("[global-sdk] ws connect failed", {
           url: server.http.url,
           error,
         })
@@ -238,7 +127,6 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     }
 
     if (!client) {
-      await startSse()
       return
     }
 
@@ -249,12 +137,7 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     })
     client.onStateChange((state) => {
       if (state === "disconnected") {
-        // The WsClient only reports "disconnected" after exhausting its own
-        // reconnect attempts (or when we close it during stop). A self-initiated
-        // disconnect while still started means WS is dead → fall back to SSE.
-        if (!started || abort.signal.aborted) return
         ws = null
-        void startSse()
         return
       }
       if (state === "connected") {
@@ -276,20 +159,9 @@ export function createServerSdkContext(server: ServerConnection.Any) {
 
   const stop = () => {
     started = false
-    attempt?.abort()
-    clearHeartbeat()
     ws?.close()
     ws = null
   }
-
-  onMount(() => {
-    makeEventListener(document, "visibilitychange", () => {
-      if (document.visibilityState !== "visible") return
-      if (!started) return
-      if (Date.now() - lastEventAt < HEARTBEAT_TIMEOUT_MS) return
-      attempt?.abort()
-    })
-  })
 
   onCleanup(() => {
     stop()
