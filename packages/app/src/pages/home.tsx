@@ -581,7 +581,7 @@ function HomeProjectColumn(props: {
 
 function HomeProjectListViewport(props: { children: JSX.Element }) {
   return (
-    <div class="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1 [scrollbar-width:none] lg:max-h-none lg:overflow-visible lg:pr-0 [&::-webkit-scrollbar]:hidden">
+    <div class="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain pr-1 [scrollbar-width:none] lg:pr-0 [&::-webkit-scrollbar]:hidden">
       {props.children}
     </div>
   )

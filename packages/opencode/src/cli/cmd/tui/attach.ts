@@ -46,6 +46,81 @@ function resolveAttachDirectory(args: { dir?: string; url?: string }): string | 
   return undefined
 }
 
+export interface AttachTuiArgs {
+  url?: string
+  port?: number
+  hostname?: string
+  dir?: string
+  continue?: boolean
+  session?: string
+  fork?: boolean
+  password?: string
+  username?: string
+}
+
+export async function launchAttachTui(args: AttachTuiArgs) {
+  const { TuiConfig } = await import("@/cli/cmd/tui/config/tui")
+  const unguard = win32InstallCtrlCGuard()
+  try {
+    win32DisableProcessedInput()
+
+    if (args.fork && !args.continue && !args.session) {
+      UI.error("--fork requires --continue or --session")
+      process.exitCode = 1
+      return
+    }
+
+    const url = resolveAttachUrl(args)
+
+    // When URL is auto-resolved, probe the server before launching TUI.
+    if (!args.url) {
+      const probeHeaders = ServerAuth.headers({ password: args.password, username: args.username }) ?? {}
+      const probe = await probeAttach(url, probeHeaders)
+      if (!probe.ok) {
+        UI.error(probe.reason)
+        UI.error(`Is \`opencode serve\` running? Use --port to specify a different port.`)
+        process.exitCode = 1
+        return
+      }
+    }
+
+    const directory = resolveAttachDirectory(args)
+    const headers = ServerAuth.headers({ password: args.password, username: args.username })
+    const config = await TuiConfig.get()
+
+    try {
+      await validateSession({
+        url,
+        sessionID: args.session,
+        directory,
+        headers,
+      })
+    } catch (error) {
+      UI.error(errorMessage(error))
+      process.exitCode = 1
+      return
+    }
+
+    const { createTuiRenderer, tui } = await import("./app")
+    const renderer = await createTuiRenderer(config)
+    const handle = tui({
+      url,
+      config,
+      renderer,
+      args: {
+        continue: args.continue,
+        sessionID: args.session,
+        fork: args.fork,
+      },
+      directory,
+      headers,
+    })
+    await handle.done
+  } finally {
+    unguard?.()
+  }
+}
+
 // ── Connection probe ─────────────────────────────────────────────────
 
 async function probeAttach(
@@ -59,7 +134,8 @@ async function probeAttach(
     })
     if (res.ok || res.status === 401) return { ok: true }
     if (res.status === 403) return { ok: false, reason: "Server rejected authentication." }
-    return { ok: true }
+    const status = res.statusText ? `${res.status} ${res.statusText}` : res.status.toString()
+    return { ok: false, reason: `Unexpected response from ${url}/session: HTTP ${status}` }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg.includes("ECONNREFUSED") || msg.includes("fetch failed"))
@@ -119,65 +195,6 @@ export const AttachCommand = cmd({
         describe: "basic auth username (defaults to OPENCODE_SERVER_USERNAME or 'opencode')",
       }),
   handler: async (args) => {
-    const { TuiConfig } = await import("@/cli/cmd/tui/config/tui")
-    const unguard = win32InstallCtrlCGuard()
-    try {
-      win32DisableProcessedInput()
-
-      if (args.fork && !args.continue && !args.session) {
-        UI.error("--fork requires --continue or --session")
-        process.exitCode = 1
-        return
-      }
-
-      const url = resolveAttachUrl(args)
-
-      // When URL is auto-resolved, probe the server before launching TUI
-      if (!args.url) {
-        const probeHeaders = ServerAuth.headers({ password: args.password, username: args.username }) ?? {}
-        const probe = await probeAttach(url, probeHeaders)
-        if (!probe.ok) {
-          UI.error(probe.reason)
-          UI.error(`Is \`opencode serve\` running? Use --port to specify a different port.`)
-          process.exitCode = 1
-          return
-        }
-      }
-
-      const directory = resolveAttachDirectory(args)
-      const headers = ServerAuth.headers({ password: args.password, username: args.username })
-      const config = await TuiConfig.get()
-
-      try {
-        await validateSession({
-          url,
-          sessionID: args.session,
-          directory,
-          headers,
-        })
-      } catch (error) {
-        UI.error(errorMessage(error))
-        process.exitCode = 1
-        return
-      }
-
-      const { createTuiRenderer, tui } = await import("./app")
-      const renderer = await createTuiRenderer(config)
-      const handle = tui({
-        url,
-        config,
-        renderer,
-        args: {
-          continue: args.continue,
-          sessionID: args.session,
-          fork: args.fork,
-        },
-        directory,
-        headers,
-      })
-      await handle.done
-    } finally {
-      unguard?.()
-    }
+    await launchAttachTui(args)
   },
 })

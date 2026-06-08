@@ -8,6 +8,9 @@ import { UI } from "../ui"
 import { pick, PickerCancelledError, type PickOption } from "../picker"
 import { EOL } from "os"
 import { Locale } from "@/util/locale"
+import { InstanceState } from "@/effect/instance-state"
+
+type ResumeSession = Session.Info | Session.GlobalInfo
 
 // ── Command definition ───────────────────────────────────────────────
 
@@ -15,7 +18,7 @@ export const ResumeCommand = effectCmd({
   command: "resume [session]",
   aliases: ["r"],
   describe: "interactively search and resume a session",
-  instance: false,
+  instance: (args) => !Boolean((args as any).global),
   builder: (yargs: Argv) =>
     yargs
       .positional("session", {
@@ -31,7 +34,35 @@ export const ResumeCommand = effectCmd({
       .option("list", {
         alias: ["l"],
         type: "boolean",
-        describe: "list matching sessions without launching",
+        describe: "list matching sessions in the current folder by default (use --global for all folders) without launching",
+      })
+      .option("global", {
+        alias: ["g"],
+        type: "boolean",
+        describe: "search sessions across all folders",
+      })
+      .option("attach", {
+        alias: ["a"],
+        type: "boolean",
+        describe: "attach to a local running server for the selected session",
+      })
+      .option("hostname", {
+        type: "string",
+        describe: "server hostname for --attach (default: 127.0.0.1)",
+      })
+      .option("port", {
+        type: "number",
+        describe: "server port for --attach (default: 4096)",
+      })
+      .option("password", {
+        alias: ["p"],
+        type: "string",
+        describe: "basic auth password for --attach (defaults to OPENCODE_SERVER_PASSWORD)",
+      })
+      .option("username", {
+        alias: ["u"],
+        type: "string",
+        describe: "basic auth username for --attach (defaults to OPENCODE_SERVER_USERNAME or 'opencode')",
       })
       .option("format", {
         type: "string",
@@ -42,10 +73,11 @@ export const ResumeCommand = effectCmd({
   handler: Effect.fn("Cli.resume")(function* (args) {
     const svc = yield* Session.Service
     const maxCount: number = (args as any)["max-count"] ?? 200
+    const global = Boolean((args as any).global)
 
     // --list mode: load candidates, print, exit
     if (args.list) {
-      const sessions = yield* svc.listGlobal({ roots: true, limit: maxCount })
+      const sessions = yield* listResumeSessions(svc, global, maxCount)
       if (sessions.length === 0) {
         UI.println("No sessions found")
         return
@@ -56,7 +88,22 @@ export const ResumeCommand = effectCmd({
     }
 
     // Resolve to a single session, then launch
-    const target = yield* resolveSession(svc, args.session, maxCount)
+    const target = yield* resolveSession(svc, args.session, maxCount, global)
+
+    if ((args as any).attach) {
+      const { launchAttachTui } = yield* Effect.promise(() => import("./tui/attach"))
+      yield* Effect.promise(() =>
+        launchAttachTui({
+          hostname: (args as any).hostname,
+          port: (args as any).port,
+          password: (args as any).password,
+          username: (args as any).username,
+          session: target.id,
+          dir: target.directory,
+        }),
+      )
+      return
+    }
 
     yield* Effect.promise(() =>
       new Promise<void>((resolve) => {
@@ -105,11 +152,12 @@ function resolveSession(
   svc: Session.Interface,
   input: string | undefined,
   maxCount: number,
-): Effect.Effect<Session.GlobalInfo | Session.Info, CliError> {
+  global: boolean,
+): Effect.Effect<ResumeSession, CliError> {
   return Effect.gen(function* () {
     // No input → interactive picker over all root sessions
     if (!input) {
-      const sessions = yield* svc.listGlobal({ roots: true, limit: maxCount })
+      const sessions = yield* listResumeSessions(svc, global, maxCount)
       if (sessions.length === 0) return yield* fail("No sessions found")
       const selected = yield* pickOrFail(toPickOptions(sessions))
       return sessions.find((s) => s.id === selected.id) ?? sessions[0]!
@@ -121,11 +169,12 @@ function resolveSession(
       const info = yield* svc.get(maybeID).pipe(
         Effect.catchTag("NotFoundError", () => fail(`Session not found: ${input}`)),
       )
+      if (!global) yield* requireCurrentProject(info, input)
       return info
     }
 
     // Title / fuzzy resolution
-    const sessions = yield* svc.listGlobal({ roots: true, limit: maxCount })
+    const sessions = yield* listResumeSessions(svc, global, maxCount)
     if (sessions.length === 0) return yield* fail("No sessions found")
 
     const normalized = input.toLowerCase().trim()
@@ -162,6 +211,23 @@ function resolveSession(
   })
 }
 
+function listResumeSessions(
+  svc: Session.Interface,
+  global: boolean,
+  maxCount: number,
+): Effect.Effect<ResumeSession[]> {
+  if (global) return svc.listGlobal({ roots: true, limit: maxCount })
+  return svc.list({ roots: true, limit: maxCount })
+}
+
+function requireCurrentProject(session: Session.Info, input: string): Effect.Effect<void, CliError> {
+  return Effect.gen(function* () {
+    const ctx = yield* InstanceState.context
+    if (session.projectID === ctx.project.id) return
+    return yield* fail(`Session not found in current project: ${input} (use --global to search all folders)`)
+  })
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 function tryMakeSessionID(input: string): SessionID | null {
@@ -172,13 +238,18 @@ function tryMakeSessionID(input: string): SessionID | null {
   }
 }
 
-function toPickOptions(sessions: Session.GlobalInfo[]): PickOption[] {
+function toPickOptions(sessions: ResumeSession[]): PickOption[] {
   return sessions.map((s) => ({
     id: s.id,
     title: s.title,
-    subtitle: s.project?.name ?? s.project?.worktree ?? undefined,
+    subtitle: getProjectLabel(s),
     detail: Locale.todayTimeOrDateTime(s.time.updated),
   }))
+}
+
+function getProjectLabel(session: ResumeSession): string | undefined {
+  if (!("project" in session)) return undefined
+  return session.project?.name ?? session.project?.worktree ?? undefined
 }
 
 function pickOrFail(options: PickOption[], query?: string): Effect.Effect<PickOption, CliError> {
@@ -193,12 +264,12 @@ function pickOrFail(options: PickOption[], query?: string): Effect.Effect<PickOp
 
 // ── Table formatting ─────────────────────────────────────────────────
 
-function formatSessionTable(sessions: Session.GlobalInfo[]): string {
+function formatSessionTable(sessions: ResumeSession[]): string {
   const lines: string[] = []
 
   const maxIdWidth = Math.max(20, ...sessions.map((s) => s.id.length))
   const maxTitleWidth = Math.max(25, ...sessions.map((s) => s.title.length))
-  const maxProjectWidth = Math.max(12, ...sessions.map((s) => (s.project?.name ?? "").length))
+  const maxProjectWidth = Math.max(12, ...sessions.map((s) => (getProjectLabel(s) ?? "").length))
 
   const header =
     `Session ID${" ".repeat(maxIdWidth - 10)}  ` +
@@ -210,7 +281,7 @@ function formatSessionTable(sessions: Session.GlobalInfo[]): string {
 
   for (const session of sessions) {
     const title = Locale.truncate(session.title, maxTitleWidth)
-    const project = Locale.truncate(session.project?.name ?? "", maxProjectWidth)
+    const project = Locale.truncate(getProjectLabel(session) ?? "", maxProjectWidth)
     const timeStr = Locale.todayTimeOrDateTime(session.time.updated)
     lines.push(
       `${session.id.padEnd(maxIdWidth)}  ` +
@@ -223,12 +294,12 @@ function formatSessionTable(sessions: Session.GlobalInfo[]): string {
   return lines.join(EOL)
 }
 
-function formatSessionJSON(sessions: Session.GlobalInfo[]): string {
+function formatSessionJSON(sessions: ResumeSession[]): string {
   const data = sessions.map((s) => ({
     id: s.id,
     title: s.title,
     directory: s.directory,
-    project: s.project?.name ?? null,
+    project: getProjectLabel(s) ?? null,
     updated: s.time.updated,
     created: s.time.created,
   }))

@@ -113,7 +113,7 @@ function pickTty(options: PickOption[], initialQuery?: string): Promise<PickOpti
 
       // Header
       const header = filtered.length === 0
-        ? "\x1b[2mNo sessions match — type to search\x1b[0m"
+        ? formatNoMatchesHeader(query, termWidth)
         : `\x1b[1mSelect a session to resume\x1b[0m  \x1b[2m(type to filter, \u2191\u2193 to move, Enter to select, Esc to cancel)\x1b[0m`
       process.stdout.write(header + "\n")
       visibleLines++
@@ -125,10 +125,6 @@ function pickTty(options: PickOption[], initialQuery?: string): Promise<PickOpti
         const line = formatLine(opt, termWidth, i === cursorIndex ? ">" : " ")
         process.stdout.write(line + "\n")
         visibleLines++
-      }
-
-      if (filtered.length === 0) {
-        visibleLines++ // blank line after header
       }
 
       // Footer / query line
@@ -267,7 +263,7 @@ async function pickNonTty(options: PickOption[], initialQuery?: string): Promise
 
   while (true) {
     if (filtered.length === 0) {
-      process.stderr.write(`\nNo sessions match "${query}"\n`)
+      process.stderr.write(`\nNo sessions match "${query}". Showing all sessions again.\n`)
       if (query.length > 0) {
         const suggestions = fuzzyFilter(query, options).slice(0, 5)
         if (suggestions.length > 0) {
@@ -375,7 +371,7 @@ function pickMultiTty(options: PickOption[], initialQuery?: string): Promise<Pic
       visibleLines = 0
 
       const header = filtered.length === 0
-        ? "\x1b[2mNo sessions match — type to search\x1b[0m"
+        ? formatNoMatchesHeader(query, termWidth)
         : `\x1b[1mSelect sessions to delete\x1b[0m  \x1b[2m(space: toggle, \u2191\u2193: move, Enter: confirm, Esc: cancel)\x1b[0m`
       process.stdout.write(header + "\n")
       visibleLines++
@@ -385,10 +381,6 @@ function pickMultiTty(options: PickOption[], initialQuery?: string): Promise<Pic
         if (!opt) continue
         const line = formatMultiLine(opt, termWidth, i === cursorIndex)
         process.stdout.write(line + "\n")
-        visibleLines++
-      }
-
-      if (filtered.length === 0) {
         visibleLines++
       }
 
@@ -546,7 +538,7 @@ async function pickMultiNonTty(options: PickOption[], initialQuery?: string): Pr
 
   while (true) {
     if (filtered.length === 0) {
-      process.stderr.write(`\nNo sessions match "${query}"\n`)
+      process.stderr.write(`\nNo sessions match "${query}". Showing all sessions again.\n`)
       query = ""
       filtered = options.slice()
       printList(filtered)
@@ -620,6 +612,11 @@ function formatLine(opt: PickOption, width: number, cursor: string): string {
 
   // Narrow: just title
   return `${prefix}  ${truncate(opt.title, width - 4)}${suffix}`
+}
+
+function formatNoMatchesHeader(query: string, width: number): string {
+  const visibleQuery = query.trim().length > 0 ? ` "${truncate(query, Math.max(8, width - 46))}"` : ""
+  return `\x1b[2mNo sessions match${visibleQuery} — Backspace to edit, Esc to cancel\x1b[0m`
 }
 
 function truncate(s: string, max: number): string {
