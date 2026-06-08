@@ -93,18 +93,32 @@ export const layer = HttpRouter.use((router) =>
             }
 
             // Resolve per-request directory for InstanceRef scoping.
-            // Handlers that need directory-aware state (via InstanceState) depend on
-            // InstanceRef, which defaults to process.cwd(). REST routes provide the
-            // correct InstanceRef per-request via InstanceStore.provide(); we do the
-            // same here so WS handlers see the directory the client requested.
-            const directory = typeof msg.directory === "string" ? msg.directory : process.cwd()
-            const store = yield* InstanceStore.Service
-            const ctx = yield* store.load({ directory })
+            //
+            // Messages without an explicit 'directory' field (sync.catchup, ping,
+            // hello, session.subscribe) use the handlerRuntime's default context
+            // (process.cwd() + project "global") — they don't need per-directory
+            // state. Calling InstanceStore.load() for every message is wrong: it
+            // runs project.fromDirectory() which fails (and hangs) when the
+            // server's CWD isn't a valid opencode project.
+            //
+            // Messages WITH 'directory' (from wsFetch requests) resolve the
+            // per-directory InstanceContext via InstanceStore.load(), matching
+            // REST's instance-context middleware exactly.
+            const directory = typeof msg.directory === "string" ? msg.directory : undefined
+            // Pre-resolve InstanceContext in the HTTP route scope (where
+            // InstanceStore is available), then provide it into the handler
+            // dispatch which runs on handlerRuntime.
+            const ctx = directory
+              ? yield* Effect.gen(function* () {
+                  const store = yield* InstanceStore.Service
+                  return yield* store.load({ directory })
+                })
+              : undefined
 
             const response = yield* Effect.promise(() =>
               handlerRuntime.runPromise(
                 WsMultiplex.dispatch(msg, conn).pipe(
-                  Effect.provideService(InstanceRef, ctx),
+                  ctx ? Effect.provideService(InstanceRef, ctx) : (eff) => eff as any,
                 ) as Effect.Effect<any>,
               ),
             )
