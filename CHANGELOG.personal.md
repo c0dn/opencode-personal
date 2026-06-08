@@ -9,6 +9,21 @@ Versioning note: automated upstream mirrors are published as
 `<upstream-version>-c0dn.N`. Releases are built manually via
 `personal-release.yml` and are Linux-only (`linux-x64`, `linux-arm64`).
 
+## v1.16.2-c0dn.9 - 2026-06-08
+
+### Fixed
+- **brotli-wasm crashes in embedded Web UI builds**: the dynamic `import("brotli-wasm")`
+  in `WsClient` fails inside `opencode web`'s Bun-compiled embedded Web UI because
+  the .wasm binary can't be instantiated. The `WebAssembly.instantiateStreaming`
+  call produces a corrupted asset path, then the fallback `WebAssembly.instantiate`
+  also fails.
+
+  **Fix**: `WsClient.encode()` now falls back to raw (no compression) when brotli
+  is unavailable. `WsClient.decode()` falls back to the browser's native
+  `DecompressionStream("brotli")` when `brotli-wasm` isn't loaded, so server-encoded
+  brotli frames can still be decoded. `getBrotli()` catches import failures and
+  returns `null` instead of crashing.
+
 ## v1.16.2-c0dn.8 - 2026-06-08
 
 ### Fixed

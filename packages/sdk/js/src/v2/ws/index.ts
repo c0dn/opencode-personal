@@ -41,7 +41,7 @@ export class WsClient {
   private lastStaticHash: string | undefined
   private url: string
   private authToken: string
-  private brotliPromise: Promise<{ compress(b: Uint8Array, o?: { quality?: number }): Uint8Array; decompress(b: Uint8Array): Uint8Array }> | undefined
+  private brotliPromise: Promise<{ compress(b: Uint8Array, o?: { quality?: number }): Uint8Array; decompress(b: Uint8Array): Uint8Array } | null> | undefined
 
   constructor(config: { url: string; authToken: string }) {
     this.url = config.url
@@ -376,6 +376,14 @@ export class WsClient {
     }
 
     const brotli = await this.getBrotli()
+    // Brotli unavailable — skip compression (e.g. wasm failed to load in embedded builds)
+    if (!brotli) {
+      const frame = new Uint8Array(packed.length + 1)
+      frame[0] = 0x00
+      frame.set(packed, 1)
+      return frame
+    }
+
     const compressed = brotli.compress(packed, { quality: 4 })
     const frame = new Uint8Array(compressed.length + 1)
     frame[0] = 0x01 // Brotli marker
@@ -395,13 +403,38 @@ export class WsClient {
     // Brotli marker (0x01) or legacy (no marker): decompress
     const compressed = marker === 0x01 ? bytes.slice(1) : bytes
     const brotli = await this.getBrotli()
-    const decompressed = brotli.decompress(compressed)
-    return decode(decompressed)
+    if (brotli) {
+      const decompressed = brotli.decompress(compressed)
+      return decode(decompressed)
+    }
+
+    // brotli-wasm unavailable — try native DecompressionStream (browser built-in)
+    const ds = new DecompressionStream("brotli" as any)
+    const writer = ds.writable.getWriter()
+    writer.write(compressed as unknown as BufferSource)
+    writer.close()
+    const chunks: Uint8Array[] = []
+    const reader = ds.readable.getReader()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(value)
+    }
+    const total = chunks.reduce((sum, c) => sum + c.length, 0)
+    const merged = new Uint8Array(total)
+    let offset = 0
+    for (const c of chunks) {
+      merged.set(c, offset)
+      offset += c.length
+    }
+    return decode(merged)
   }
 
   private async getBrotli() {
-    if (!this.brotliPromise) {
-      this.brotliPromise = import("brotli-wasm").then((mod) => mod.default) as Promise<any>
+    if (this.brotliPromise === undefined) {
+      this.brotliPromise = import("brotli-wasm")
+        .then((mod) => mod.default)
+        .catch(() => null) as Promise<{ compress(b: Uint8Array, o?: { quality?: number }): Uint8Array; decompress(b: Uint8Array): Uint8Array } | null>
     }
     return this.brotliPromise
   }
