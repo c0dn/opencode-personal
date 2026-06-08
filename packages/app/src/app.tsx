@@ -33,7 +33,6 @@ import { CommentsProvider } from "@/context/comments"
 import { FileProvider } from "@/context/file"
 import { ServerSDKProvider } from "@/context/server-sdk"
 import { ServerSyncProvider } from "@/context/server-sync"
-import { ServerWsProvider } from "@/context/server-ws"
 import { GlobalProvider } from "@/context/global"
 import { HighlightsProvider } from "@/context/highlights"
 import { LanguageProvider, type Locale, useLanguage } from "@/context/language"
@@ -326,7 +325,6 @@ export function AppInterface(props: {
             <QueryProvider>
               <ServerSDKProvider>
                 <ServerSyncProvider>
-                  <ServerWsProvider>
                   <Dynamic
                     component={props.router ?? Router}
                     root={(routerProps) => <RouterRoot appChildren={props.children}>{routerProps.children}</RouterRoot>}
@@ -337,7 +335,6 @@ export function AppInterface(props: {
                       <Route path="/session/:id?" component={SessionRoute} />
                     </Route>
                   </Dynamic>
-                  </ServerWsProvider>
                 </ServerSyncProvider>
               </ServerSDKProvider>
             </QueryProvider>

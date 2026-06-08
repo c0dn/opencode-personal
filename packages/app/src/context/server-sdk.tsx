@@ -1,9 +1,10 @@
 import type { Event } from "@opencode-ai/sdk/v2/client"
+import { createOpencodeWsClient, WsClient } from "@opencode-ai/sdk/v2/ws"
 import { createSimpleContext } from "@opencode-ai/ui/context"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { makeEventListener } from "@solid-primitives/event-listener"
 import { batch, onCleanup, onMount } from "solid-js"
-import { createSdkForServer } from "@/utils/server"
+import { authTokenFromCredentials, createSdkForServer } from "@/utils/server"
 import { useLanguage } from "./language"
 import { usePlatform } from "./platform"
 import { ServerConnection, useServer } from "./server"
@@ -101,6 +102,8 @@ export function createServerSdkContext(server: ServerConnection.Any) {
   let attempt: AbortController | undefined
   let run: Promise<void> | undefined
   let started = false
+  let ws: WsClient | null = null
+  let sse: Promise<void> | undefined
   const HEARTBEAT_TIMEOUT_MS = 15_000
   let lastEventAt = Date.now()
   let heartbeat: ReturnType<typeof setTimeout> | undefined
@@ -117,10 +120,32 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     heartbeat = undefined
   }
 
-  const start = () => {
-    if (started) return run
-    started = true
-    run = (async () => {
+  // Shared per-event handling for both transports: coalesce by key, push onto
+  // the flush queue, and schedule a frame. This is the single source of the
+  // coalescing logic so the WS and SSE paths can never drift apart.
+  const enqueue = (directory: string, payload: Event) => {
+    const k = key(directory, payload)
+    if (k) {
+      const i = coalesced.get(k)
+      if (i !== undefined) {
+        queue[i] = { directory, payload }
+        if (payload.type === "message.part.updated") {
+          const part = payload.properties.part
+          staleDeltas.add(deltaKey(directory, part.messageID, part.id))
+        }
+        return
+      }
+      coalesced.set(k, queue.length)
+    }
+    queue.push({ directory, payload })
+    schedule()
+  }
+
+  // SSE fallback loop (the original transport). Idempotent via the `sse` guard so
+  // a WS failure can only ever spin up a single SSE loop.
+  const startSse = () => {
+    if (sse) return sse
+    sse = (async () => {
       // oxlint-disable-next-line no-unmodified-loop-condition -- `started` is set to false by stop() which also aborts; both flags are checked to allow graceful exit
       while (!abort.signal.aborted && started) {
         attempt = new AbortController()
@@ -149,27 +174,8 @@ export function createServerSdkContext(server: ServerConnection.Any) {
             resetHeartbeat()
             streamErrorLogged = false
             const directory = event.directory ?? "global"
-            if (event.payload.type === "sync") {
-              continue
-            }
-
-            const payload = event.payload as Event
-
-            const k = key(directory, payload)
-            if (k) {
-              const i = coalesced.get(k)
-              if (i !== undefined) {
-                queue[i] = { directory, payload }
-                if (payload.type === "message.part.updated") {
-                  const part = payload.properties.part
-                  staleDeltas.add(deltaKey(directory, part.messageID, part.id))
-                }
-                continue
-              }
-              coalesced.set(k, queue.length)
-            }
-            queue.push({ directory, payload })
-            schedule()
+            if (event.payload.type === "sync") continue
+            enqueue(directory, event.payload as Event)
 
             if (Date.now() - yielded < STREAM_YIELD_MS) continue
             yielded = Date.now()
@@ -194,8 +200,67 @@ export function createServerSdkContext(server: ServerConnection.Any) {
         await wait(RECONNECT_DELAY_MS)
       }
     })().finally(() => {
-      run = undefined
+      sse = undefined
       flush()
+    })
+    return sse
+  }
+
+  // WS-first event source. The WsClient owns its own heartbeat + reconnect, so
+  // the SSE heartbeat stays idle while WS is active. Fall back to SSE if the
+  // socket fails to open or the client permanently gives up reconnecting. We do
+  // NOT call ws.subscribe(...) — the web needs every event, and an empty
+  // subscription set streams them all.
+  const startWs = async () => {
+    const token = authTokenFromCredentials({
+      username: server.http.username,
+      password: server.http.password ?? "",
+    })
+    const client = await createOpencodeWsClient({
+      url: server.http.url.replace(/^http/, "ws"),
+      authToken: token,
+    }).catch((error) => {
+      if (!aborted(error)) {
+        console.error("[global-sdk] ws connect failed, falling back to sse", {
+          url: server.http.url,
+          error,
+        })
+      }
+      return null
+    })
+
+    // stop()/cleanup happened while connecting — discard the socket.
+    if (!started || abort.signal.aborted) {
+      client?.close()
+      return
+    }
+
+    if (!client) {
+      await startSse()
+      return
+    }
+
+    ws = client
+    client.onEvent((e) => {
+      if (e.payload.type === "sync") return
+      enqueue(e.directory ?? "global", e.payload as unknown as Event)
+    })
+    client.onStateChange((state) => {
+      // The WsClient only reports "disconnected" after exhausting its own
+      // reconnect attempts (or when we close it during stop). A self-initiated
+      // disconnect while still started means WS is dead → fall back to SSE.
+      if (state !== "disconnected") return
+      if (!started || abort.signal.aborted) return
+      ws = null
+      void startSse()
+    })
+  }
+
+  const start = () => {
+    if (started) return run
+    started = true
+    run = startWs().finally(() => {
+      run = undefined
     })
     return run
   }
@@ -204,6 +269,8 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     started = false
     attempt?.abort()
     clearHeartbeat()
+    ws?.close()
+    ws = null
   }
 
   onMount(() => {
