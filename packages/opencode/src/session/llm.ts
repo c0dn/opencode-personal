@@ -304,7 +304,7 @@ const live: Layer.Layer<
               ...failed.toolCall,
               input: JSON.stringify({
                 tool: failed.toolCall.toolName,
-                error: failed.error.message,
+                error: failed.error?.message ?? "unknown tool error",
               }),
               toolName: "invalid",
             }
