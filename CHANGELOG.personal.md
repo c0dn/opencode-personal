@@ -9,6 +9,21 @@ Versioning note: automated upstream mirrors are published as
 `<upstream-version>-c0dn.N`. Releases are built manually via
 `personal-release.yml` and are Linux-only (`linux-x64`, `linux-arm64`).
 
+## v1.16.2-c0dn.7 - 2026-06-08
+
+### Fixed
+- **Web and TUI clients now connect to the correct WS endpoint**: both clients
+  built the socket URL by only swapping the scheme (`http` → `ws`), so a server
+  URL like `https://opencode-main.c0dn.dev` became
+  `wss://opencode-main.c0dn.dev` instead of `wss://opencode-main.c0dn.dev/ws`.
+  That left the browser socket stuck at `pending` behind Cloudflare Tunnel while
+  the Web UI silently continued on REST/SSE fallback.
+
+  **Fix**: both clients now build the WS URL with `new URL("/ws", baseUrl)` and
+  then switch the protocol to `ws:`/`wss:`. Validated by confirming local `101
+  Switching Protocols`, then smoke-testing a real `WsClient` against the server:
+  `sync.catchup`, `project.list`, and `session.list` all completed over WS.
+
 ## v1.16.2-c0dn.6 - 2026-06-08
 
 ### Fixed
