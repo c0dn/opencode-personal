@@ -4,9 +4,9 @@ import type { WsClient } from "./index.js"
  * Options for {@link createWsFetch}.
  *
  * The returned function is a drop-in replacement for `fetch` that the generated
- * SDK client accepts via `config.fetch`. It routes a small, verified set of REST
- * calls over an existing WS connection and transparently falls back to REST for
- * everything else (disabled, not connected, unmapped route, or any WS failure).
+ * SDK client accepts via `config.fetch`. It routes verified REST calls over an
+ * existing WS connection and transparently falls back to REST for everything
+ * else (disabled, not connected, unmapped route, or any WS failure).
  */
 export interface WsFetchOptions {
   /** Returns the live WS client, or null while it is connecting / unavailable. */
@@ -61,27 +61,96 @@ interface WsRouteMapping {
 }
 
 /**
- * Conservative, verified mapping table. Each entry was confirmed to produce a WS
- * `data` shape identical to the REST JSON body AND to be directory-independent,
- * because the WS handler runtime runs against a single process-global instance.
+ * Verified mapping table: REST route → WS handler.
  *
- * - GET /project        -> project.list (global ProjectTable; no params)
- * - GET /session/{id}   -> session.get  (lookup by global session id)
+ * Each entry was confirmed to call the same service method as the REST handler
+ * and return an identical JSON shape. The WS runtime is now directory-aware
+ * (transport.ts resolves per-request InstanceRef), so directory-scoped endpoints
+ * like config.get and mcp.status produce correct per-project results.
  *
- * Everything else intentionally stays on REST (see module docs / report).
+ * Excluded from mapping (intentional REST fallback):
+ * - config.providers  — WS returns raw provider.list(); REST wraps with Provider.toPublicInfo()
+ * - session.messages  — REST adds pagination headers; body shape identical but headers differ
+ * - All mutations (POST/PATCH/DELETE) — not verified for shape parity yet
+ * - TUI/internal-only WS handlers (vcs.*, lsp.*, formatter.*, command.*, agent.*, skill.*)
  */
 export const WS_FETCH_MAPPINGS: readonly WsRouteMapping[] = [
+  // ---- Project ----
   {
     method: "GET",
     type: "project.list",
     match: matchExact("/project"),
     buildPayload: (input) => withLocation({}, input.query),
   },
+
+  // ---- Session ----
+  {
+    method: "GET",
+    type: "session.list",
+    match: matchExact("/session"),
+    buildPayload: (input) => withLocation(withQuery({ limit: readInt(input.query, "limit", 50) }, input.query, "directory"), input.query),
+  },
   {
     method: "GET",
     type: "session.get",
     match: matchPattern(/^\/session\/([^/]+)$/, ["sessionID"]),
     buildPayload: (input) => withLocation({ sessionID: input.params.sessionID }, input.query),
+  },
+  {
+    method: "GET",
+    type: "session.status",
+    match: matchPattern(/^\/session\/([^/]+)\/status$/, ["sessionID"]),
+    buildPayload: (input) => withLocation({ sessionID: input.params.sessionID }, input.query),
+  },
+  {
+    method: "GET",
+    type: "session.todo",
+    match: matchPattern(/^\/session\/([^/]+)\/todo$/, ["sessionID"]),
+    buildPayload: (input) => withLocation({ sessionID: input.params.sessionID }, input.query),
+  },
+  {
+    method: "GET",
+    type: "session.children",
+    match: matchPattern(/^\/session\/([^/]+)\/children$/, ["sessionID"]),
+    buildPayload: (input) => withLocation({ sessionID: input.params.sessionID }, input.query),
+  },
+  {
+    method: "GET",
+    type: "session.diff",
+    match: matchPattern(/^\/session\/([^/]+)\/diff$/, ["sessionID"]),
+    buildPayload: (input) => withLocation({ sessionID: input.params.sessionID }, input.query),
+  },
+
+  // ---- Config ----
+  {
+    method: "GET",
+    type: "config.get",
+    match: matchExact("/config"),
+    buildPayload: (input) => withLocation({}, input.query),
+  },
+
+  // ---- MCP ----
+  {
+    method: "GET",
+    type: "mcp.status",
+    match: matchExact("/mcp"),
+    buildPayload: (input) => withLocation({}, input.query),
+  },
+
+  // ---- Permission ----
+  {
+    method: "GET",
+    type: "permission.list",
+    match: matchExact("/permission"),
+    buildPayload: (input) => withLocation({}, input.query),
+  },
+
+  // ---- Question ----
+  {
+    method: "GET",
+    type: "question.list",
+    match: matchExact("/question"),
+    buildPayload: (input) => withLocation({}, input.query),
   },
 ]
 
@@ -122,6 +191,23 @@ function withLocation(payload: Record<string, unknown>, query: URLSearchParams):
   if (directory) payload.directory = directory
   if (workspace) payload.workspace = workspace
   return payload
+}
+
+/** Copy named query params from the URL into the payload. */
+function withQuery(payload: Record<string, unknown>, query: URLSearchParams, ...keys: string[]): Record<string, unknown> {
+  for (const key of keys) {
+    const value = query.get(key)
+    if (value !== null) payload[key] = value
+  }
+  return payload
+}
+
+/** Read an integer query param with a fallback default. */
+function readInt(query: URLSearchParams, key: string, fallback: number): number {
+  const raw = query.get(key)
+  if (raw === null) return fallback
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
 function hasBody(method: string): boolean {
