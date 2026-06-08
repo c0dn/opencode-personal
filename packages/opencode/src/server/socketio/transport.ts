@@ -264,7 +264,14 @@ function setupSocket(socket: any) {
 
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
-    const rawServer = getRawHttpServer()
+    let rawServer: import("node:http").Server | undefined
+    try {
+      rawServer = getRawHttpServer()
+    } catch {
+      // No node:http server (typically test context with a virtual HTTP server) —
+      // skip Socket.IO attachment. Rest transport + SSE fallback still work.
+      return
+    }
     const cors = yield* CorsConfig
     const authConfig = yield* Effect.serviceOption(ServerAuth.Config)
 
