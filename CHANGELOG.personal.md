@@ -11,7 +11,43 @@ Versioning note: automated upstream mirrors are published as
 
 ## Unreleased
 
-- No unreleased personal changes.
+### Added
+- **Stats dashboard interaction**: keyboard navigation now works (it was
+  completely unresponsive). Registered through the OpenTUI keymap in a dedicated
+  `stats` mode instead of the raw `useKeyboard` hook (which ran after the keymap
+  consumed the keys). `1`-`5` select tabs, `Tab`/`Shift+Tab` + `h`/`l` + arrows
+  cycle tabs, `j`/`k` + arrows scroll, `r` cycles the time range
+  (All -> 7d -> 30d), `q`/`Esc`/`Ctrl+C` quit. The header shows the active range
+  and `opencode stats` precomputes all three ranges so switching needs no DB
+  re-query.
+
+### Changed
+- **WebSocket is now the default event transport** for both the TUI and the Web
+  UI, with automatic SSE fallback. Previously the WS client existed but was
+  effectively unused: the TUI only used WS for password-protected remote attach,
+  and the Web UI mounted a WS provider that was never started (it ran entirely on
+  REST + SSE). Both clients now prefer the batched WS event stream and fall back
+  to SSE if the socket cannot connect or permanently drops. Requests still use
+  the REST client (full requests-over-WS is a planned follow-up).
+- **Stats number formatting** scales past millions: token counts now render as
+  `B` (billions) and `T` (trillions) instead of e.g. `16563.2M`.
+
+### Fixed
+- **Stats cost was undercounted** ("pricing seems off"): the dashboard summed the
+  stored `session.cost`, but opencode persists `cost: 0` for many responses that
+  still have token usage. Cost is now estimated from token usage x the model's
+  models.dev price (reused from opencode's existing `ModelsDev` cache, no new
+  fetch, offline-safe) whenever the stored cost is `0`/missing, and the Overview
+  total and per-model/provider totals are derived from the same source so the
+  tabs agree. The Overview prompt count is now a real query instead of `0`.
+- **Stats dashboard loaded slowly** on large histories: the five stats queries
+  now run concurrently and the per-session message-count N+1 correlated subquery
+  was replaced with a single grouped join.
+- **`opencode attach`** now opens the directory it was invoked from on a local
+  attach (it previously opened `$HOME` when `--dir` was omitted); explicit remote
+  URLs still defer to the server's default directory.
+- Removed the dead, never-started Web UI WS provider (`context/server-ws.tsx`)
+  now that the live WS event path lives in `context/server-sdk.tsx`.
 
 ## v1.16.2-c0dn.4 - 2026-06-07
 
