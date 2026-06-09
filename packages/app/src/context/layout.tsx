@@ -248,6 +248,9 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
           diffStyle: "split" as ReviewDiffStyle,
           panelOpened: true,
         },
+        agentPanel: {
+          opened: false,
+        },
         fileTree: {
           opened: false,
           width: DEFAULT_FILE_TREE_WIDTH,
@@ -706,6 +709,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         const s = createMemo(() => store.sessionView[key()] ?? { scroll: {} })
         const terminalOpened = createMemo(() => store.terminal?.opened ?? false)
         const reviewPanelOpened = createMemo(() => store.review?.panelOpened ?? true)
+        const agentPanelOpened = createMemo(() => store.agentPanel?.opened ?? false)
 
         function setTerminalOpened(next: boolean) {
           const current = store.terminal
@@ -729,6 +733,18 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
           const value = current.panelOpened ?? true
           if (value === next) return
           setStore("review", "panelOpened", next)
+        }
+
+        function setAgentPanelOpened(next: boolean) {
+          const current = store.agentPanel
+          if (!current) {
+            setStore("agentPanel", { opened: next })
+            return
+          }
+
+          const value = current.opened ?? false
+          if (value === next) return
+          setStore("agentPanel", "opened", next)
         }
 
         return {
@@ -772,6 +788,18 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
             },
             toggle() {
               setReviewPanelOpened(!reviewPanelOpened())
+            },
+          },
+          agentManager: {
+            opened: agentPanelOpened,
+            open() {
+              setAgentPanelOpened(true)
+            },
+            close() {
+              setAgentPanelOpened(false)
+            },
+            toggle() {
+              setAgentPanelOpened(!agentPanelOpened())
             },
           },
           review: {

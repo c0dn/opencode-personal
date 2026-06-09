@@ -23,6 +23,7 @@ import { useSync } from "@/context/sync"
 import { useTerminal } from "@/context/terminal"
 import { focusTerminalById } from "@/pages/session/helpers"
 import { useSessionLayout } from "@/pages/session/session-layout"
+import { useAgentManager } from "@/pages/session/agent-manager/agent-manager-context"
 import { agentColor, messageAgentColor } from "@/utils/agent"
 import { decode64 } from "@/utils/base64"
 import { Persist, persisted } from "@/utils/persist"
@@ -245,6 +246,7 @@ export function SessionHeader() {
       color: agentColor(agent.name, agent.color),
     }
   })
+  const agentManager = useAgentManager()
   const v2ActionsState = createMemo<SessionHeaderV2ActionsState>(() => ({
     agentName: activeAgent()?.name,
     agentColor: activeAgent()?.color,
@@ -262,6 +264,10 @@ export function SessionHeader() {
     reviewKeybind: command.keybind("review.toggle"),
     reviewOpened: view().reviewPanel.opened(),
     onReviewToggle: () => view().reviewPanel.toggle(),
+    agentManagerLabel: language.t("command.agentManager.toggle"),
+    agentManagerOpened: view().agentManager.opened(),
+    agentManagerRunningCount: agentManager.runningCount(),
+    onAgentManagerToggle: () => view().agentManager.toggle(),
   }))
 
   const selectApp = (app: OpenApp) => {
@@ -503,6 +509,36 @@ export function SessionHeader() {
                         </Button>
                       </TooltipKeybind>
 
+                      <div class="relative flex items-center">
+                        <Tooltip placement="bottom" value={language.t("command.agentManager.toggle")}>
+                          <Button
+                            variant="ghost"
+                            class="titlebar-icon w-8 h-6 p-0 box-border"
+                            onClick={() => view().agentManager.toggle()}
+                            aria-label={language.t("command.agentManager.toggle")}
+                            aria-expanded={view().agentManager.opened()}
+                            aria-controls="agent-manager-panel"
+                          >
+                            <Icon
+                              size="small"
+                              name="task"
+                              classList={{
+                                "text-icon-strong": view().agentManager.opened(),
+                                "text-icon-weak": !view().agentManager.opened(),
+                              }}
+                            />
+                          </Button>
+                        </Tooltip>
+                        <Show when={agentManager.runningCount() > 0}>
+                          <span
+                            class="pointer-events-none absolute -right-0.5 -top-0.5 z-10 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-text-interactive-base px-1 text-[9px] leading-none text-text-on-interactive-base [font-weight:650]"
+                            aria-hidden="true"
+                          >
+                            {Math.min(agentManager.runningCount(), 99)}
+                          </span>
+                        </Show>
+                      </div>
+
                       <Show when={tree()}>
                         <TooltipKeybind
                           title={language.t("command.fileTree.toggle")}
@@ -558,6 +594,10 @@ type SessionHeaderV2ActionsState = {
   reviewKeybind: string
   reviewOpened: boolean
   onReviewToggle: () => void
+  agentManagerLabel: string
+  agentManagerOpened: boolean
+  agentManagerRunningCount: number
+  onAgentManagerToggle: () => void
 }
 
 function SessionHeaderV2Actions(props: { state: SessionHeaderV2ActionsState }) {
@@ -615,6 +655,30 @@ function SessionHeaderV2Actions(props: { state: SessionHeaderV2ActionsState }) {
           icon={<IconV2 name="sidebar-right" />}
         />
       </TooltipKeybind>
+      <div class="relative hidden shrink-0 md:inline-flex">
+        <Tooltip placement="bottom" value={props.state.agentManagerLabel}>
+          <IconButtonV2
+            type="button"
+            variant="ghost-muted"
+            size="large"
+            class="!w-9 shrink-0"
+            state={props.state.agentManagerOpened ? "pressed" : undefined}
+            onClick={props.state.onAgentManagerToggle}
+            aria-label={props.state.agentManagerLabel}
+            aria-expanded={props.state.agentManagerOpened}
+            aria-controls="agent-manager-panel"
+            icon={<Icon name="task" size="small" />}
+          />
+        </Tooltip>
+        <Show when={props.state.agentManagerRunningCount > 0}>
+          <span
+            class="pointer-events-none absolute -right-0.5 -top-0.5 z-10 flex h-4 min-w-4 items-center justify-center rounded-full bg-text-interactive-base px-1 text-[9px] leading-none text-text-on-interactive-base [font-weight:650]"
+            aria-hidden="true"
+          >
+            {Math.min(props.state.agentManagerRunningCount, 99)}
+          </span>
+        </Show>
+      </div>
     </div>
   )
 }
