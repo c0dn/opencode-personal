@@ -74,7 +74,7 @@ export const MailboxListTool = Tool.define(
               by_state: byState,
             },
           }
-        }).pipe(Effect.orDie),
+        }).pipe(Effect.orDie) as any,
     }
   }),
 )

@@ -88,7 +88,7 @@ export const SubagentListTool = Tool.define(
               caller_id: callerID,
             },
           }
-        }).pipe(Effect.orDie),
+        }).pipe(Effect.orDie) as any,
     }
   }),
 )

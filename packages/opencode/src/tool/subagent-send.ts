@@ -78,7 +78,7 @@ export const SubagentSendTool = Tool.define(
               }),
           }),
           Effect.orDie,
-        ),
+        ) as any,
     }
   }),
 )

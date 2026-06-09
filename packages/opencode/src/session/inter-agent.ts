@@ -54,7 +54,7 @@ export const layer = Layer.effect(
       let depth = 0
       while (currentID && depth < 100) {
         rootID = currentID
-        const info = yield* session.get(SessionID.make(currentID)).pipe(Effect.orDie)
+        const info: Session.Info = yield* session.get(SessionID.make(currentID)).pipe(Effect.orDie)
         currentID = info.parentID
         depth++
       }

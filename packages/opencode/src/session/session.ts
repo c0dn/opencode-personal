@@ -675,7 +675,7 @@ export const layer: Layer.Layer<
       let currentID: string | undefined = sessionID
       let steps = 0
       while (currentID && steps < 100) {
-        const info = yield* get(SessionID.make(currentID)).pipe(Effect.orDie)
+        const info: Info = yield* get(SessionID.make(currentID)).pipe(Effect.orDie)
         currentID = info.parentID
         steps++
         if (currentID) depth++

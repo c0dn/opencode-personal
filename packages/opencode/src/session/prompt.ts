@@ -1645,10 +1645,14 @@ export const layer = Layer.effect(
 
 export const defaultLayer = Layer.suspend(() =>
   layer.pipe(
-    Layer.provide(SessionRunState.defaultLayer),
-    Layer.provide(SessionStatus.defaultLayer),
-    Layer.provide(SessionCompaction.defaultLayer),
-    Layer.provide(SessionProcessor.defaultLayer),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        SessionRunState.defaultLayer,
+        SessionStatus.defaultLayer,
+        SessionCompaction.defaultLayer,
+        SessionProcessor.defaultLayer,
+      ),
+    ),
     Layer.provide(Command.defaultLayer),
     Layer.provide(Permission.defaultLayer),
     Layer.provide(MCP.defaultLayer),
