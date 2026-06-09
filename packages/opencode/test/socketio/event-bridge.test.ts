@@ -83,6 +83,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/** Helper: poll until frames.length reaches expected, or timeout. */
+async function waitForFrames(frames: any[], expected: number, timeoutMs = 2000): Promise<void> {
+  const start = Date.now()
+  while (frames.length < expected) {
+    if (Date.now() - start > timeoutMs) break
+    await sleep(10)
+  }
+}
+
 // Clean up any lingering GlobalBus listeners between test groups.
 afterEach(() => {
   GlobalBus.removeAllListeners("event")
@@ -180,7 +189,7 @@ describe("Socket.IO event bridge", () => {
 
       // Emit a session event
       GlobalBus.emit("event", sessionEvent("session-a"))
-      await sleep(BATCH_MS + 10)
+      await waitForFrames(frames, 1)
 
       expect(frames.length).toBeGreaterThan(0)
       const frame = frames[0]
@@ -203,7 +212,7 @@ describe("Socket.IO event bridge", () => {
       attachBridge(srvSocket)
 
       GlobalBus.emit("event", globalEvent())
-      await sleep(BATCH_MS + 10)
+      await waitForFrames(frames, 1)
 
       expect(frames.length).toBe(1)
       expect(frames[0].type).toBe("push.event")
@@ -228,7 +237,7 @@ describe("Socket.IO event bridge", () => {
       attachBridge(srvSocket, subscribed)
 
       GlobalBus.emit("event", sessionEvent("session-a"))
-      await sleep(BATCH_MS + 10)
+      await waitForFrames(frames, 1)
 
       expect(frames.length).toBe(1)
       expect(frames[0].type).toBe("push.event")
@@ -252,7 +261,7 @@ describe("Socket.IO event bridge", () => {
       attachBridge(srvSocket, subscribed)
 
       GlobalBus.emit("event", globalEvent("tool.installed"))
-      await sleep(BATCH_MS + 10)
+      await waitForFrames(frames, 1)
 
       expect(frames.length).toBe(1)
       expect(frames[0].type).toBe("push.event")
@@ -303,7 +312,7 @@ describe("Socket.IO event bridge", () => {
       GlobalBus.emit("event", sessionEvent("session-a")) // matching
       GlobalBus.emit("event", sessionEvent("session-b")) // non-matching
       GlobalBus.emit("event", globalEvent("some.global")) // global, always
-      await sleep(BATCH_MS + 10)
+      await waitForFrames(frames, 1)
 
       // Should have pushed a batch with exactly 2 events
       expect(frames.length).toBe(1)
@@ -338,7 +347,7 @@ describe("Socket.IO event bridge", () => {
       GlobalBus.emit("event", sessionEvent("session-a"))
       GlobalBus.emit("event", sessionEvent("session-b"))
       GlobalBus.emit("event", globalEvent("config.changed"))
-      await sleep(BATCH_MS + 10)
+      await waitForFrames(frames, 1)
 
       expect(frames.length).toBe(1)
       const batch = frames[0]
@@ -363,11 +372,11 @@ describe("Socket.IO event bridge", () => {
 
       // First batch: emit and wait
       GlobalBus.emit("event", sessionEvent("session-a"))
-      await sleep(BATCH_MS + 10)
+      await waitForFrames(frames, 1)
 
       // Second batch: single event after flush
       GlobalBus.emit("event", sessionEvent("session-b"))
-      await sleep(BATCH_MS + 10)
+      await waitForFrames(frames, 2)
 
       expect(frames.length).toBe(2)
       expect(frames[0].type).toBe("push.event")
@@ -394,7 +403,7 @@ describe("Socket.IO event bridge", () => {
       for (let i = 0; i < 5; i++) {
         GlobalBus.emit("event", sessionEvent("session-" + i))
       }
-      await sleep(BATCH_MS + 10)
+      await waitForFrames(frames, 1)
 
       expect(frames.length).toBe(1)
       expect(frames[0].type).toBe("push.batch")
@@ -419,7 +428,7 @@ describe("Socket.IO event bridge", () => {
 
       // Verify listener is active
       GlobalBus.emit("event", sessionEvent("session-a"))
-      await sleep(BATCH_MS + 10)
+      await waitForFrames(frames, 1)
       expect(frames.length).toBe(1)
 
       // Disconnect (removes listener via on("disconnect"))
