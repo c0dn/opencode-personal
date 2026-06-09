@@ -39,6 +39,7 @@ import { Shell } from "@/shell/shell"
 import { ShellID } from "@/tool/shell/id"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Truncate } from "@/tool/truncate"
+import { overrideUnsupportedMedia } from "./image-read-override"
 import { Image } from "@/image/image"
 import { decodeDataUrl } from "@/util/data-url"
 import { Process } from "@/util/process"
@@ -1434,12 +1435,19 @@ export const layer = Layer.effect(
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            const [skills, env, instructions, modelMsgs] = yield* Effect.all([
+            const [skills, env, instructions, modelMsgs, cfg] = yield* Effect.all([
               sys.skills(agent),
               sys.environment(model),
               instruction.system().pipe(Effect.orDie),
               MessageV2.toModelMessagesEffect(msgs, model),
+              config.get(),
             ])
+            const imageReadConfig = cfg.image_read
+            const finalModelMsgs = imageReadConfig
+              ? yield* overrideUnsupportedMedia(modelMsgs, model, imageReadConfig).pipe(
+                  Effect.provideService(Provider.Service, provider),
+                )
+              : modelMsgs
             const system = [...env, ...instructions, ...(skills ? [skills] : [])]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
@@ -1450,7 +1458,7 @@ export const layer = Layer.effect(
               sessionID,
               parentSessionID: session.parentID,
               system,
-              messages: [...modelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])],
+              messages: [...finalModelMsgs, ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS }] : [])],
               tools,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,

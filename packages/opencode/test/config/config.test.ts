@@ -361,6 +361,33 @@ it.instance(
   { config: { shell: "bash" } },
 )
 
+it.instance(
+  "loads image_read config with model and pdf_strategy",
+  Effect.gen(function* () {
+    const config = yield* Config.use.get()
+    expect(config.image_read).toEqual({ model: "openai/gpt-4o", pdf_strategy: "extract_text" })
+  }),
+  { config: { image_read: { model: "openai/gpt-4o", pdf_strategy: "extract_text" } } },
+)
+
+it.instance(
+  "loads image_read config with only model",
+  Effect.gen(function* () {
+    const config = yield* Config.use.get()
+    expect(config.image_read).toEqual({ model: "openai/gpt-4o" })
+  }),
+  { config: { image_read: { model: "openai/gpt-4o" } } },
+)
+
+it.instance(
+  "loads image_read config with only pdf_strategy",
+  Effect.gen(function* () {
+    const config = yield* Config.use.get()
+    expect(config.image_read).toEqual({ pdf_strategy: "error" })
+  }),
+  { config: { image_read: { pdf_strategy: "error" } } },
+)
+
 it.instance("updates config and preserves empty shell sentinel", () =>
   Effect.gen(function* () {
     const test = yield* TestInstance
@@ -1356,6 +1383,16 @@ test("config parser preserves permission order while rejecting unknown top-level
   }
 })
 
+test("config parser rejects invalid pdf_strategy in image_read", () => {
+  expect(() => {
+    ConfigParse.schema(
+      ConfigV1.Info,
+      { image_read: { pdf_strategy: "invalid" } },
+      "test",
+    )
+  }).toThrow()
+})
+
 // MCP config merging tests
 
 it.instance("project config can override MCP server enabled status", () =>
@@ -1482,6 +1519,22 @@ it.instance("local .opencode config can override MCP from project config", () =>
     const config = yield* Config.use.get()
     expect(config.mcp?.docs?.enabled).toBe(true)
   }),
+)
+
+it.effect("deep merges image_read across global and local configs", () =>
+  withConfigTree(
+    {
+      global: { image_read: { model: "openai/gpt-4o", pdf_strategy: "extract_text" } },
+      local: { image_read: { model: "anthropic/claude-sonnet-4" } },
+    },
+    Effect.gen(function* () {
+      const config = yield* Config.use.get()
+      expect(config.image_read).toEqual({
+        model: "anthropic/claude-sonnet-4",
+        pdf_strategy: "extract_text",
+      })
+    }),
+  ),
 )
 
 const remoteProjectOverride = wellKnown({
