@@ -9,6 +9,91 @@ Versioning note: automated upstream mirrors are published as
 `<upstream-version>-c0dn.N`. Releases are built manually via
 `personal-release.yml` and are Linux-only (`linux-x64`, `linux-arm64`).
 
+## v1.16.2-c0dn.12 - 2026-06-09
+
+### Added
+- **Subagent-to-subagent messaging**: three new tools allow subagents to discover
+  each other and communicate within the same orchestration tree, backed by the
+  existing durable `SessionMailbox` store.
+
+  **Tools**:
+  - `subagent_list` — returns the full orchestration tree (all depths) with
+    relationship labels (`self`, `parent`, `child`, `sibling`, `ancestor`,
+    `descendant`, `peer`), `depth`, and `parent_id` for precise topology.
+  - `subagent_send` — sends a message to any session in the same root tree.
+    Supports `async` delivery (queued for next safe turn boundary) and
+    `interrupt` delivery (cancels target's current run and delivers immediately).
+    Messages appear in the target session as synthetic user messages wrapped in
+    `<inter_agent_message from="ses_…">`. Sibling-to-sibling messages also inject
+    a `<inter_agent_relay>` notification into the root parent session so the user
+    can see all inter-agent traffic.
+  - `mailbox_list` — inspects the mailbox queue for the current session.
+    Filterable by state (`queued`, `processing`, `delivered`, `failed`,
+    `cancelled`) and kind. Read-only debugging tool.
+
+  **New service**:
+  - `SessionInterAgent` (`packages/opencode/src/session/inter-agent.ts`) —
+    validates same-root messaging (walks the `parentID` chain on both sender and
+    target, rejects cross-root sends), enqueues durable `SessionMailbox` records,
+    injects synthetic user messages for immediate delivery, notifies the root
+    session on child-to-child communication, and supports interrupt delivery
+    (cancel target → enqueue → wake).
+
+- **Full-tree session discovery**: `Session.Interface` gained two new methods:
+  - `descendants(rootID)` — BFS traversal returning all descendant sessions with
+    their depth from root.
+  - `depthFromRoot(sessionID)` — walks the parent chain to compute the session's
+    absolute depth (0 = root). Used by `subagent_list` for relationship labeling
+    and by the task tool for depth gating.
+
+### Security
+- **Backend child-session prompt guards**: the HTTP (`POST /session/:id/message`,
+  `/prompt_async`, `/command`, `/shell`) and WebSocket (`session.prompt`,
+  `session.command`, `session.shell`) routes now reject prompts targeting child
+  subagent sessions with a 403 `ChildSessionPromptError`, matching the existing
+  UI-side block. Internal orchestration paths (`task` resume, `subagent_send`)
+  are unaffected.
+- **Sender identity enforcement**: `subagent_send` derives the sender session ID
+  from the tool execution context — never from user/agent input — preventing
+  session spoofing.
+
+### Config
+- **`experimental.max_subagent_depth`** (default 3): caps how deep subagents can
+  spawn via the `task` tool. Set in `opencode.json` under the `experimental`
+  block. Example:
+  ```jsonc
+  { "experimental": { "max_subagent_depth": 5 } }
+  ```
+  The depth guard is enforced at spawn time: when the spawning session's depth
+  from root reaches or exceeds the cap, `task` returns a descriptive error
+  instead of creating the child.
+
+### Tests
+- 23 new tests (subagent_list 5, subagent_send 10, mailbox_list 4, guards 4).
+- Full test suite: 428 pass, 0 fail, 0 regressions.
+- `tsgo --noEmit`: 0 errors introduced (3 pre-existing layer-type noise on
+  `app-runtime`, `httpapi/server`, `socketio/transport` — unchanged from
+  upstream).
+
+### Files changed
+| File | Change |
+|---|---|
+| `packages/core/src/v1/config/config.ts` | + `experimental.max_subagent_depth` |
+| `packages/opencode/src/server/httpapi/errors.ts` | + `ChildSessionPromptError` |
+| `packages/opencode/src/server/httpapi/groups/session.ts` | error arrays |
+| `packages/opencode/src/server/httpapi/handlers/session.ts` | `rejectChildSession` guard |
+| `packages/opencode/src/server/ws/handlers.ts` | WS child-session guards |
+| `packages/opencode/src/session/prompt.ts` | wire mailbox + inter-agent layers |
+| `packages/opencode/src/session/session.ts` | `descendants()`, `depthFromRoot()` |
+| `packages/opencode/src/tool/registry.ts` | register 3 new tools |
+| `packages/opencode/src/tool/task.ts` | depth guard |
+| `packages/opencode/src/session/inter-agent.ts` | **new** — SessionInterAgent service |
+| `packages/opencode/src/tool/subagent-list.ts` + `.txt` | **new** |
+| `packages/opencode/src/tool/subagent-send.ts` + `.txt` | **new** |
+| `packages/opencode/src/tool/mailbox-list.ts` + `.txt` | **new** |
+| `packages/opencode/test/tool/*.test.ts` (3 files) | **new** — 19 tests |
+| `packages/opencode/test/server/subagent-prompt-guards.test.ts` | **new** — 4 tests |
+
 ## v1.16.2-c0dn.11 - 2026-06-08
 
 ### Changed
