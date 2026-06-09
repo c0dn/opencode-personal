@@ -331,6 +331,10 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
       "description": "A short (3-5 words) description of the task",
       "type": "string",
     },
+    "model": {
+      "description": "Optional model override for the subagent in "provider/model" format (e.g. "openai/gpt-4o"). When set, overrides the agent's configured model and the parent's model.",
+      "type": "string",
+    },
     "prompt": {
       "description": "The task for the agent to perform",
       "type": "string",

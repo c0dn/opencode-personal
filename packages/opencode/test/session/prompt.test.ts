@@ -790,7 +790,7 @@ it.instance("loop continues when finish is stop but assistant has tool parts", (
   }),
 )
 
-it.instance("failed subtask preserves metadata on error tool state", () =>
+it.instance("failed subtask preserves metadata on completed tool state", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({
       ...providerCfg(url),
@@ -810,7 +810,7 @@ it.instance("failed subtask preserves metadata on error tool state", () =>
     })
     yield* llm.text("done")
     const msg = yield* user(chat.id, "hello")
-    yield* addSubtask(chat.id, msg.id)
+    yield* addSubtask(chat.id, msg.id, { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("missing-model") })
 
     const result = yield* prompt.loop({ sessionID: chat.id })
     expect(result.info.role).toBe("assistant")
@@ -821,10 +821,11 @@ it.instance("failed subtask preserves metadata on error tool state", () =>
     expect(taskMsg?.info.role).toBe("assistant")
     if (!taskMsg || taskMsg.info.role !== "assistant") return
 
-    const tool = errorTool(taskMsg.parts)
+    const tool = completedTool(taskMsg.parts)
     if (!tool) return
 
-    expect(tool.state.error).toContain("Tool execution failed")
+    expect(tool.state.output).toContain("Error: Model")
+    expect(tool.state.output).toContain("not found")
     expect(tool.state.metadata).toBeDefined()
     expect(tool.state.metadata?.sessionId).toBeDefined()
     expect(tool.state.metadata?.model).toEqual({
