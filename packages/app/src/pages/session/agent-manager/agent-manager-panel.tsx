@@ -106,6 +106,7 @@ function SubagentItem(props: {
       <button
         type="button"
         class="flex-1 min-w-0 flex items-center gap-2.5 rounded-md px-2 py-2 text-left hover:bg-surface-raised-base-hover"
+        style={{ "margin-left": `${indent(props.row.depth)}px` }}
         onClick={() => props.onJump(props.row.sessionID)}
         aria-label={`${language.t("session.agentManager.open")}: ${props.row.title}`}
       >
@@ -132,6 +133,14 @@ function SubagentItem(props: {
       </Show>
     </li>
   )
+}
+
+// Indent deeper subagents to show the tree hierarchy; cap the depth so very
+// deep chains do not push the row content off-screen.
+const INDENT_STEP = 14
+const MAX_INDENT_LEVELS = 6
+function indent(depth: number): number {
+  return Math.min(Math.max(depth - 1, 0), MAX_INDENT_LEVELS) * INDENT_STEP
 }
 
 const STATUS_DOT: Record<Exclude<SubagentStatus, "running">, string> = {

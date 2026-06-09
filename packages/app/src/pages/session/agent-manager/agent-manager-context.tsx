@@ -1,5 +1,6 @@
 import { createSimpleContext } from "@opencode-ai/ui/context"
 import { useSync } from "@/context/sync"
+import { useSDK } from "@/context/sdk"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { createAgentManagerState, createRootID } from "./agent-manager-state"
 
@@ -11,8 +12,9 @@ export const { use: useAgentManager, provider: AgentManagerProvider } = createSi
   gate: false,
   init: () => {
     const sync = useSync()
+    const sdk = useSDK()
     const layout = useSessionLayout()
     const rootID = createRootID(sync, () => layout.params.id)
-    return createAgentManagerState(sync, rootID)
+    return createAgentManagerState(sync, sdk, rootID)
   },
 })

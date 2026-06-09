@@ -9,15 +9,26 @@ export type SubagentRow = {
   title: string
   status: SubagentStatus
   spawnMessageID?: string
+  depth: number
   busy: boolean
 }
+
+// Authoritative membership entry from the server descendants endpoint
+// (GET /session/:id/descendants), depth relative to the root (direct child = 1).
+export type DescendantEntry = { sessionID: string; depth: number }
 
 export type SubagentSource = {
   rootID: string
   messages: Record<string, Message[] | undefined>
   parts: Record<string, Part[] | undefined>
+  // Sessions used for parentID/title/agent. The caller merges the authoritative
+  // server descendant sessions with the live sync store (store wins) so titles
+  // and agents stay live while still covering not-yet-loaded deep sessions.
   sessions: Session[]
   status: Record<string, SessionStatus | undefined>
+  // Authoritative descendant membership + depth from the server. Empty until the
+  // resource resolves; local membership (parentID walk) covers the gap meanwhile.
+  serverDescendants: DescendantEntry[]
 }
 
 type ChildEntry = {
@@ -25,58 +36,108 @@ type ChildEntry = {
   description?: string
 }
 
-// Subagents are task-tool child sessions. The live status map only retains
-// busy/retry entries (status.ts deletes idle sessions), so "absent from the
-// status map" must be treated as idle/completed and the terminal state derived
-// from the child's last assistant message, mirroring event-reducer self-heal.
+// Enumerates the full descendant subtree (grandchildren and deeper) of the root
+// session. Membership is the union of the authoritative server descendants and
+// the locally-known descendants discovered by walking parentID over the sessions
+// list, deduped by id. Depth prefers the server value; locally-only sessions use
+// their parentID chain length. Status/title/busy stay live from the reactive
+// store via deriveStatus.
 export function deriveSubagentRows(source: SubagentSource): SubagentRow[] {
   const byId = new Map(source.sessions.map((session) => [session.id, session]))
-  const children = collectChildren(source, byId)
+  const spawn = collectSpawnAnchors(source)
+  const depthByID = collectMembership(source, byId)
 
   const rows: SubagentRow[] = []
-  for (const [childID, entry] of children) {
+  for (const [childID, depth] of depthByID) {
     const session = byId.get(childID)
+    const entry = spawn.get(childID)
     const state = deriveStatus(childID, source)
     rows.push({
       sessionID: childID,
       parentID: session?.parentID ?? source.rootID,
       agent: session?.agent,
-      title: session?.title?.trim() || entry.description || childID,
+      title: session?.title?.trim() || entry?.description || childID,
       status: state.status,
-      spawnMessageID: entry.spawnMessageID,
+      spawnMessageID: entry?.spawnMessageID,
+      depth,
       busy: state.busy,
     })
   }
 
-  return rows.sort((a, b) => sortKey(a, byId).localeCompare(sortKey(b, byId)))
+  return rows.sort((a, b) => a.depth - b.depth || sortKey(a, byId).localeCompare(sortKey(b, byId)))
 }
 
-// v1 is intentionally flat: it collects only the DIRECT children of the root
-// session (task parts in the root's messages + sessions whose parentID is the
-// root). Grandchildren in deeper orchestration trees are not enumerated;
-// recursive descendant loading is a documented follow-up (would need either
-// client-side recursion over children or a server descendants endpoint).
-function collectChildren(source: SubagentSource, byId: Map<string, Session>): Map<string, ChildEntry> {
-  const children = new Map<string, ChildEntry>()
+// Sorted list of locally-known descendant ids; used as the resource refetch key
+// so descendants are only refetched when subtree membership changes, not on
+// every status tick.
+export function localDescendantSignature(sessions: Session[], rootID: string): string {
+  return [...walkLocalDescendants(sessions, rootID).keys()].sort().join(",")
+}
 
+// Spawn anchors are only resolvable for DIRECT children: the task tool part that
+// spawned them lives in the root session's own messages. Deeper levels leave
+// spawnMessageID undefined (navigation still works by session id).
+function collectSpawnAnchors(source: SubagentSource): Map<string, ChildEntry> {
+  const spawn = new Map<string, ChildEntry>()
   for (const message of source.messages[source.rootID] ?? []) {
     for (const part of source.parts[message.id] ?? []) {
       const task = taskChild(part)
       if (!task) continue
-      if (children.has(task.childID)) continue
-      children.set(task.childID, { spawnMessageID: message.id, description: task.description })
+      if (spawn.has(task.childID)) continue
+      spawn.set(task.childID, { spawnMessageID: message.id, description: task.description })
+    }
+  }
+  return spawn
+}
+
+function collectMembership(source: SubagentSource, byId: Map<string, Session>): Map<string, number> {
+  const depthByID = walkLocalDescendants(source.sessions, source.rootID)
+
+  // Server descendants are authoritative for both membership (adds deep sessions
+  // not yet loaded locally) and depth (BFS, relative to root) — applied last so
+  // the server depth wins over a locally computed chain depth.
+  for (const entry of source.serverDescendants) {
+    if (entry.sessionID === source.rootID) continue
+    depthByID.set(entry.sessionID, entry.depth)
+  }
+
+  // Catch direct children that exist as sessions but whose record may be missing
+  // from the walk inputs (defensive; normally already covered above).
+  for (const session of byId.values()) {
+    if (session.parentID !== source.rootID) continue
+    if (depthByID.has(session.id)) continue
+    depthByID.set(session.id, 1)
+  }
+
+  return depthByID
+}
+
+function walkLocalDescendants(sessions: Session[], rootID: string): Map<string, number> {
+  const childrenByParent = new Map<string, string[]>()
+  for (const session of sessions) {
+    if (!session.parentID) continue
+    const list = childrenByParent.get(session.parentID)
+    if (list) list.push(session.id)
+    else childrenByParent.set(session.parentID, [session.id])
+  }
+
+  const depthByID = new Map<string, number>()
+  const queue: Array<{ id: string; depth: number }> = (childrenByParent.get(rootID) ?? []).map((id) => ({
+    id,
+    depth: 1,
+  }))
+
+  while (queue.length) {
+    const current = queue.shift()
+    if (!current) break
+    if (depthByID.has(current.id)) continue
+    depthByID.set(current.id, current.depth)
+    for (const child of childrenByParent.get(current.id) ?? []) {
+      if (!depthByID.has(child)) queue.push({ id: child, depth: current.depth + 1 })
     }
   }
 
-  // Catch children that exist as sessions but whose spawning task part is not
-  // visible yet (e.g. created event arrived before the message stream).
-  for (const session of byId.values()) {
-    if (session.parentID !== source.rootID) continue
-    if (children.has(session.id)) continue
-    children.set(session.id, {})
-  }
-
-  return children
+  return depthByID
 }
 
 function taskChild(part: Part): { childID: string; description?: string } | undefined {
@@ -90,6 +151,11 @@ function taskChild(part: Part): { childID: string; description?: string } | unde
   return { childID, description }
 }
 
+// Status is derived from the live store: busy/retry => running; otherwise the
+// terminal state comes from the child's last assistant message (error / completed),
+// else idle. Accepted limitation: a deep descendant whose messages are not loaded
+// locally reads running reliably (from session_status), but completed/error may
+// read as idle until that session is visited and its messages stream in.
 function deriveStatus(childID: string, source: SubagentSource): { status: SubagentStatus; busy: boolean } {
   const type = source.status[childID]?.type
   if (type === "busy" || type === "retry") return { status: "running", busy: true }
