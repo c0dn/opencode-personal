@@ -126,23 +126,38 @@ export const TaskTool = Tool.define(
         : undefined
       const nextSession =
         session ??
-        (yield* sessions.create({
-          parentID: ctx.sessionID,
-          title: params.description + ` (@${next.name} subagent)`,
-          agent: next.name,
-          permission: [
-            ...deriveSubagentSessionPermission({
-              parentSessionPermission: parent.permission ?? [],
-              parentAgent,
-              subagent: next,
-            }),
-            ...(cfg.experimental?.primary_tools?.map((item) => ({
-              pattern: "*",
-              action: "allow" as const,
-              permission: item,
-            })) ?? []),
-          ],
-        }))
+        (yield* Effect.gen(function* () {
+          // Depth guard: reject spawn when too deep
+          const maxDepth = cfg.experimental?.max_subagent_depth ?? 3
+          const spawnerDepth = yield* sessions.depthFromRoot(ctx.sessionID)
+          if (spawnerDepth >= maxDepth) {
+            return yield* Effect.fail(
+              new Error(
+                `Subagent depth limit reached. ` +
+                `This session is at depth ${spawnerDepth} from root. ` +
+                `Maximum subagent depth is ${maxDepth} (set experimental.max_subagent_depth in opencode.json to override). ` +
+                `Cannot spawn further subagents.`,
+              ),
+            )
+          }
+          return yield* sessions.create({
+            parentID: ctx.sessionID,
+                title: params.description + ` (@${next.name} subagent)`,
+                agent: next.name,
+                permission: [
+                  ...deriveSubagentSessionPermission({
+                    parentSessionPermission: parent.permission ?? [],
+                    parentAgent,
+                    subagent: next,
+                  }),
+                  ...(cfg.experimental?.primary_tools?.map((item) => ({
+                    pattern: "*",
+                    action: "allow" as const,
+                    permission: item,
+                  })) ?? []),
+                ],
+              })
+            }))
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
         Effect.provideService(Database.Service, database),

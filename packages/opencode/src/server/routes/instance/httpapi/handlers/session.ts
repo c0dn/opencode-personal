@@ -36,6 +36,7 @@ import {
   UpdatePayload,
 } from "../groups/session"
 import { PermissionNotFoundError } from "../errors"
+import * as ApiError from "../errors"
 import * as SessionError from "./session-errors"
 
 const tryParseJson = (text: string) =>
@@ -78,6 +79,15 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
 
     const requireSession = Effect.fn("SessionHttpApi.requireSession")(function* (sessionID: SessionID) {
       return yield* SessionError.mapStorageNotFound(session.get(sessionID))
+    })
+
+    const rejectChildSession = Effect.fn("SessionHttpApi.rejectChildSession")(function* (info: Session.Info) {
+      if (info.parentID) {
+        return yield* new ApiError.ChildSessionPromptError({
+          sessionID: info.id,
+          message: `Cannot prompt a child subagent session directly. Use the parent session to interact with it.`,
+        })
+      }
     })
 
     const get = Effect.fn("SessionHttpApi.get")(function* (ctx: { params: { sessionID: SessionID } }) {
@@ -294,7 +304,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof PromptPayload.Type
     }) {
-      yield* requireSession(ctx.params.sessionID)
+      const info = yield* requireSession(ctx.params.sessionID)
+      yield* rejectChildSession(info)
       const message = yield* promptSvc
         .prompt({
           ...ctx.payload,
@@ -310,7 +321,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof PromptPayload.Type
     }) {
-      yield* requireSession(ctx.params.sessionID)
+      const info = yield* requireSession(ctx.params.sessionID)
+      yield* rejectChildSession(info)
       yield* promptSvc.prompt({ ...ctx.payload, sessionID: ctx.params.sessionID }).pipe(
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
@@ -332,7 +344,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof CommandPayload.Type
     }) {
-      yield* requireSession(ctx.params.sessionID)
+      const info = yield* requireSession(ctx.params.sessionID)
+      yield* rejectChildSession(info)
       return yield* promptSvc
         .command({ ...ctx.payload, sessionID: ctx.params.sessionID })
         .pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
@@ -342,7 +355,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       params: { sessionID: SessionID }
       payload: typeof ShellPayload.Type
     }) {
-      yield* requireSession(ctx.params.sessionID)
+      const info = yield* requireSession(ctx.params.sessionID)
+      yield* rejectChildSession(info)
       return yield* SessionError.mapBusy(promptSvc.shell({ ...ctx.payload, sessionID: ctx.params.sessionID }))
     })
 

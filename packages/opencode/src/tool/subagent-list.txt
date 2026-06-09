@@ -1,0 +1,6 @@
+- List all sessions in your current orchestration tree, including sub-subagents at every depth.
+- Returns each session's ID, agent type, status (running/idle/completed), title, relationship (self/parent/child/sibling/ancestor/descendant/peer), depth, and parent ID.
+- Use this to discover target_session_id values before calling subagent_send.
+- Use this before sending messages to verify the target subagent is still running and available.
+- Sessions at any depth in the same root tree can communicate via subagent_send.
+- This tool requires no parameters — it always returns the full orchestration tree.

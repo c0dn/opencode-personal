@@ -37,7 +37,9 @@ import {
   Service as EmbeddingCache,
   defaultLayer as EmbeddingCacheLayer,
 } from "./session-search/embedding-cache"
-import * as Log from "@opencode-ai/core/util/log"
+import { SubagentListTool } from "./subagent-list"
+import { SubagentSendTool } from "./subagent-send"
+import { MailboxListTool } from "./mailbox-list"
 import { LspTool } from "./lsp"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
@@ -45,6 +47,7 @@ import { Glob } from "@opencode-ai/core/util/glob"
 import path from "path"
 import { pathToFileURL } from "url"
 import { Effect, Layer, Context } from "effect"
+import * as Log from "@opencode-ai/core/util/log"
 import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -161,6 +164,9 @@ export const layer: Layer.Layer<
     const sessionFind = yield* SessionFindTool
     const sessionGet = yield* SessionGetTool
     const sessionList = yield* SessionListTool
+    const subagentList = yield* SubagentListTool
+    const subagentSend = yield* SubagentSendTool
+    const mailboxList = yield* MailboxListTool
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("ToolRegistry.state")(function* (ctx) {
@@ -274,6 +280,9 @@ export const layer: Layer.Layer<
           session_list: Tool.init(sessionList),
           session_search: Tool.init(sessionSearch),
           session_search_global: Tool.init(sessionSearchGlobal),
+                    subagent_list: Tool.init(subagentList),
+                    subagent_send: Tool.init(subagentSend),
+                    mailbox_list: Tool.init(mailboxList),
         })
 
         return {
@@ -302,6 +311,9 @@ export const layer: Layer.Layer<
             tool.session_find,
             tool.session_get,
             tool.session_list,
+                        tool.subagent_list,
+                        tool.subagent_send,
+                        tool.mailbox_list,
           ],
           task: tool.task,
           read: tool.read,
