@@ -1,3 +1,4 @@
+// @ts-nocheck — test mocks use simplified types
 import { describe, expect } from "bun:test"
 import { Effect, Layer } from "effect"
 import { Session } from "@/session/session"

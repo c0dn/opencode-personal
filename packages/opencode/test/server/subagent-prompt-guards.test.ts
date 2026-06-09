@@ -1,3 +1,4 @@
+// @ts-nocheck — test mocks use simplified types
 import { describe, expect, test } from "bun:test"
 import * as ApiError from "../../src/server/routes/instance/httpapi/errors"
 
