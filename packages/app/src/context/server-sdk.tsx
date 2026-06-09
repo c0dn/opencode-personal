@@ -236,7 +236,7 @@ export function createServerSdkContext(server: ServerConnection.Any) {
     createClient(opts: Omit<Parameters<typeof createSdkForServer>[0], "server" | "fetch">) {
       return createSdkForServer({
         server: server.http,
-        fetch: platform.fetch,
+        fetch: wsRequestFetch,
         ...opts,
       })
     },

@@ -123,4 +123,13 @@ export function jsonResponse(data: unknown): Response {
   })
 }
 
+export function jsonResponseWithPagination(data: unknown, cursor: string | null): Response {
+  const headers: Record<string, string> = { "content-type": "application/json" }
+  if (cursor) headers["x-next-cursor"] = cursor
+  return new Response(JSON.stringify(data), {
+    status: 200,
+    headers,
+  })
+}
+
 export * as WsFetchPayload from "./ws-fetch-payload.js"

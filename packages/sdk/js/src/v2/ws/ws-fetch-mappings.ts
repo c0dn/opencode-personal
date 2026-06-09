@@ -6,10 +6,10 @@
  * directories via InstanceRef (transport.ts), matching REST's instance-context
  * middleware exactly.
  *
- * ## Mapped (29 endpoints)
+ * ## Mapped (30 endpoints)
  *
  * ### Session reads
- * GET /session, /session/{id}, /status, /todo, /children, /diff
+ * GET /session, /session/{id}, /status, /todo, /children, /diff, /message
  *
  * ### Session mutations
  * POST /session, DELETE /session/{id},
@@ -27,13 +27,12 @@
  * POST /permission/{id}/respond
  * POST /question/{id}/{reply,reject}
  *
- * ## Intentionally on REST (7)
+ * ## Intentionally on REST (6)
  *
  * session.update        — WS reads msg.patch (legacy payload convention)
  * session.share/unshare — REST returns full session; WS returns { shared: id }
  * session.promptAsync   — REST returns 204 No Content; WS is synchronous
- * session.messages      — REST adds X-Total/X-Limit pagination headers
- * session.context       — same pagination header issue
+ * session.context       — pagination header issue
  * config.providers      — REST wraps Provider.toPublicInfo(); WS is raw
  * WS-only handlers      — vcs.*, lsp.*, formatter.*, command.*, agent.*, skill.*
  */
@@ -67,6 +66,7 @@ export const WS_FETCH_MAPPINGS: readonly WsRouteMapping[] = [
   { method: "GET", type: "session.todo",     match: sessionRoute("todo"),                     buildPayload: path("sessionID") },
   { method: "GET", type: "session.children", match: sessionRoute("children"),                 buildPayload: path("sessionID") },
   { method: "GET", type: "session.diff",     match: sessionRoute("diff"),                     buildPayload: path("sessionID") },
+  { method: "GET", type: "session.messages", match: sessionRoute("message"),                  buildPayload: (i) => location({ sessionID: i.params.sessionID, limit: WsFetchPayload.queryInt(i.query, "limit", 45), before: i.query.get("before") ?? undefined, knownIDs: i.query.get("knownIDs") ?? undefined }, i.query) },
 
   // ═══════ Session mutations ═══════
   { method: "POST",   type: "session.create",  match: exact("/session"),                          buildPayload: bodyOnly },

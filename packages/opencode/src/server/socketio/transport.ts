@@ -30,6 +30,7 @@ import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
 import { SessionSummary } from "@/session/summary"
 import { SessionShare } from "@/share/session"
+import { MessageCache } from "@/session/message-cache"
 import { Database } from "@opencode-ai/core/database/database"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Git } from "@/git"
@@ -115,6 +116,7 @@ const handlerLayer = Layer.mergeAll(
   ShareNext.defaultLayer,
   Reference.defaultLayer,
   InstanceStore.defaultLayer,
+  MessageCache.defaultLayer,
 ).pipe(
   Layer.provide(InstanceBootstrap.defaultLayer),
 )

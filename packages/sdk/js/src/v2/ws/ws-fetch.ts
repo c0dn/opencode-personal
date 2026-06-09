@@ -35,6 +35,10 @@ export function createWsFetch(opts: WsFetchOptions): (req: Request) => Promise<R
       const payload = route.buildPayload({ params: route.params, query: url.searchParams, body })
       const data = await client.request(route.type, payload)
       if (data === undefined) return opts.fallback(req)
+      // Handle paginated WS responses that return { data, cursor }
+      if (data && typeof data === "object" && !Array.isArray(data) && "data" in data && "cursor" in data) {
+        return WsFetchPayload.jsonResponseWithPagination(data.data as unknown, data.cursor as string | null)
+      }
       return WsFetchPayload.jsonResponse(data)
     } catch {
       return opts.fallback(req)

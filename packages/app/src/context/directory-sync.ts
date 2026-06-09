@@ -304,9 +304,9 @@ export const createDirSyncContext = (
     evict(directory, setStore, stale)
   }
 
-  const fetchMessages = async (input: { client: typeof client; sessionID: string; limit: number; before?: string }) => {
+  const fetchMessages = async (input: { client: typeof client; sessionID: string; limit: number; before?: string; knownIDs?: string }) => {
     const messages = await retry(() =>
-      input.client.session.messages({ sessionID: input.sessionID, limit: input.limit, before: input.before }),
+      input.client.session.messages({ sessionID: input.sessionID, limit: input.limit, before: input.before, knownIDs: input.knownIDs }),
     )
     const items = (messages.data ?? []).filter((x) => !!x?.info?.id)
     const session = items.map((x) => clean(x.info)).sort((a, b) => cmp(a.id, b.id))
@@ -330,12 +330,13 @@ export const createDirSyncContext = (
     limit: number
     before?: string
     mode?: "replace" | "prepend"
+    knownIDs?: string
   }) => {
     const key = keyFor(input.directory, input.sessionID)
     if (meta.loading[key]) return
 
     setMeta("loading", key, true)
-    await fetchMessages(input)
+    await fetchMessages({ ...input, knownIDs: input.knownIDs })
       .then((page) => {
         if (!tracked(input.directory, input.sessionID)) return
         const next = mergeOptimisticPage(page, getOptimistic(input.directory, input.sessionID))
@@ -571,6 +572,7 @@ export const createDirSyncContext = (
                   setStore,
                   sessionID,
                   limit,
+                  knownIDs: (store.message[sessionID] ?? []).map((m) => m.id).join(",") || undefined,
                 })
 
           await Promise.all([sessionReq, messagesReq])
@@ -646,6 +648,7 @@ export const createDirSyncContext = (
             limit: step,
             before,
             mode: "prepend",
+            knownIDs: undefined,
           })
         },
       },

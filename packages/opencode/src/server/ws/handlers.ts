@@ -3,6 +3,8 @@ import { Session } from "@/session/session"
 import { SessionID } from "@/session/schema"
 import { SessionStatus } from "@/session/status"
 import { Todo } from "@/session/todo"
+import { MessageV2 } from "@/session/message-v2"
+import { MessageCache } from "@/session/message-cache"
 import { MCP } from "@/mcp"
 import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider"
@@ -93,10 +95,34 @@ function handleSessionMessages(msg: Record<string, unknown>, _conn: Connection) 
   return Effect.gen(function* () {
     const sessionID = typeof msg.sessionID === "string" ? msg.sessionID : undefined
     if (!sessionID) return { error: "Missing sessionID" }
-    const limit = typeof msg.limit === "number" ? msg.limit : 100
-    const sessions = yield* Session.Service
-    const result = yield* sessions.messages({ sessionID: sessionID as SessionID, limit })
-    return result
+    const limit = typeof msg.limit === "number" && msg.limit > 0 ? msg.limit : 45
+    const before = typeof msg.before === "string" ? msg.before : undefined
+    const knownIDs = typeof msg.knownIDs === "string"
+      ? new Set(msg.knownIDs.split(",").filter(Boolean))
+      : new Set<string>()
+
+    const sessionIDTyped = sessionID as SessionID
+    const cache = yield* MessageCache.Service
+
+    // Check in-memory cache first
+    const cached = yield* cache.get(sessionIDTyped, limit, before)
+    if (cached) {
+      const items = knownIDs.size > 0
+        ? cached.items.filter((item) => !knownIDs.has(item.info.id))
+        : cached.items
+      return { data: items, cursor: cached.cursor ?? null }
+    }
+
+    // Cache miss: query DB + hydrate parts
+    const page = yield* MessageV2.page({ sessionID: sessionIDTyped, limit, before })
+
+    // Cache the full page (before knownIDs filter) for future hits
+    yield* cache.set(sessionIDTyped, limit, before, { items: page.items, cursor: page.cursor ?? null })
+
+    const items = knownIDs.size > 0
+      ? page.items.filter((item) => !knownIDs.has(item.info.id))
+      : page.items
+    return { data: items, cursor: page.cursor ?? null }
   })
 }
 
