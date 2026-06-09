@@ -1,0 +1,6 @@
+- Inspect mailbox messages for the current session.
+- Shows messages where this session is the target (incoming inter-agent or control messages).
+- Use state filter to find stuck messages: state="processing" shows messages claimed but not yet settled. Items stuck in "processing" for more than a few seconds may indicate a crashed runner.
+- Use state="queued" to see pending messages waiting for delivery.
+- This tool is read-only — it never modifies mailbox state.
+- Use this to debug message delivery: check if a subagent_send message was enqueued, claimed, delivered, or failed.

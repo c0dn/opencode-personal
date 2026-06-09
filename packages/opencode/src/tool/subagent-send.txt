@@ -1,0 +1,6 @@
+- Send a message to another subagent or the parent agent in the same orchestration tree.
+- Use subagent_list to discover sibling session IDs before sending.
+- delivery: "async" queues the message for delivery at the target's next safe turn boundary. The target will see it the next time it is about to call the model. Use this for non-urgent handoffs.
+- delivery: "interrupt" cancels the target's current run (if any) and delivers the message immediately. Use this when the target needs to stop current work and handle the message right away.
+- If the target session does not exist, has been archived, or is in a different tree, the tool will return an error explaining what went wrong. Read the error carefully — it may tell you the session was not found, is cross-root, or is yourself.
+- Do not use this tool as a substitute for task/resume. Use task with task_id to continue a specific subagent with new instructions. Use subagent_send to hand off a result or request to another agent without waiting for a reply.

@@ -407,6 +407,11 @@ function handleSessionPrompt(msg: Record<string, unknown>, _conn: Connection) {
   return Effect.gen(function* () {
     const sessionID = typeof msg.sessionID === "string" ? msg.sessionID : undefined
     if (!sessionID) return { error: "Missing sessionID" }
+    const sessions = yield* Session.Service
+    const info = yield* sessions.get(sessionID as SessionID)
+    if (info.parentID) {
+      return { error: "Cannot prompt a child subagent session directly. Use the parent session to interact with it." }
+    }
     const prompt = yield* SessionPrompt.Service
     const parts = Array.isArray(msg.parts) ? msg.parts : [{ type: "text", text: typeof msg.text === "string" ? msg.text : "" }]
     const model = msg.model
@@ -430,6 +435,11 @@ function handleSessionCommand(msg: Record<string, unknown>, _conn: Connection) {
   return Effect.gen(function* () {
     const sessionID = typeof msg.sessionID === "string" ? msg.sessionID : undefined
     if (!sessionID) return { error: "Missing sessionID" }
+    const sessions = yield* Session.Service
+    const info = yield* sessions.get(sessionID as SessionID)
+    if (info.parentID) {
+      return { error: "Cannot prompt a child subagent session directly. Use the parent session to interact with it." }
+    }
     const command = typeof msg.command === "string" ? msg.command : ""
     if (!command) return { error: "Missing command" }
     const prompt = yield* SessionPrompt.Service
@@ -454,6 +464,11 @@ function handleSessionShell(msg: Record<string, unknown>, _conn: Connection) {
   return Effect.gen(function* () {
     const sessionID = typeof msg.sessionID === "string" ? msg.sessionID : undefined
     if (!sessionID) return { error: "Missing sessionID" }
+    const sessions = yield* Session.Service
+    const info = yield* sessions.get(sessionID as SessionID)
+    if (info.parentID) {
+      return { error: "Cannot prompt a child subagent session directly. Use the parent session to interact with it." }
+    }
     const command = typeof msg.command === "string" ? msg.command : ""
     if (!command) return { error: "Missing command" }
     const prompt = yield* SessionPrompt.Service

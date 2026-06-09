@@ -259,6 +259,11 @@ export const CreateInput = Schema.optional(
 )
 export type CreateInput = Types.DeepMutable<Schema.Schema.Type<typeof CreateInput>>
 
+export interface DescendantEntry {
+  session: Info
+  depth: number
+}
+
 export const ForkInput = Schema.Struct({
   sessionID: SessionID,
   messageID: Schema.optional(MessageID),
@@ -489,6 +494,8 @@ export interface Interface {
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
   readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<SessionV1.WithParts[], NotFound>
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
+  readonly descendants: (rootID: SessionID) => Effect.Effect<DescendantEntry[], NotFound>
+  readonly depthFromRoot: (sessionID: SessionID) => Effect.Effect<number, NotFound>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
   readonly removeMessage: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<MessageID>
@@ -643,6 +650,40 @@ export const layer: Layer.Layer<
         .all()
         .pipe(Effect.orDie)
       return rows.map(fromRow)
+    })
+
+    const descendants = Effect.fn("Session.descendants")(function* (rootID: SessionID) {
+      yield* get(rootID)
+      const result: DescendantEntry[] = []
+      const queue: { parentID: SessionID; depth: number }[] = [{ parentID: rootID, depth: 0 }]
+
+      while (queue.length > 0) {
+        const current = queue.shift()!
+        const kids = yield* children(current.parentID)
+        for (const kid of kids) {
+          const entryDepth = current.depth + 1
+          result.push({ session: kid, depth: entryDepth })
+          queue.push({ parentID: kid.id, depth: entryDepth })
+        }
+      }
+
+      return result
+    })
+
+    const depthFromRoot = Effect.fn("Session.depthFromRoot")(function* (sessionID: SessionID) {
+      let depth = 0
+      let currentID: string | undefined = sessionID
+      let steps = 0
+      while (currentID && steps < 100) {
+        const info: Info = yield* get(SessionID.make(currentID)).pipe(Effect.orDie)
+        currentID = info.parentID
+        steps++
+        if (currentID) depth++
+      }
+      if (steps >= 100) {
+        return yield* Effect.die(new Error(`depthFromRoot exceeded max depth for ${sessionID}: possible parentID cycle`))
+      }
+      return depth
     })
 
     const remove: Interface["remove"] = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -951,6 +992,8 @@ export const layer: Layer.Layer<
       diff,
       messages,
       children,
+      descendants,
+      depthFromRoot,
       remove,
       updateMessage,
       removeMessage,

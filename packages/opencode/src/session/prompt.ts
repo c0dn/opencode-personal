@@ -56,6 +56,9 @@ import { SessionMessage } from "@opencode-ai/core/session/message"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { AgentAttachment, FileAttachment, Prompt, ReferenceAttachment, Source } from "@opencode-ai/core/session/prompt"
+import { SessionMailbox } from "@opencode-ai/core/session/mailbox"
+import { SessionInterAgent } from "@/session/inter-agent"
+import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { Reference } from "@/reference/reference"
 import * as DateTime from "effect/DateTime"
 import { eq } from "drizzle-orm"
@@ -1650,10 +1653,14 @@ export const layer = Layer.effect(
 
 export const defaultLayer = Layer.suspend(() =>
   layer.pipe(
-    Layer.provide(SessionRunState.defaultLayer),
-    Layer.provide(SessionStatus.defaultLayer),
-    Layer.provide(SessionCompaction.defaultLayer),
-    Layer.provide(SessionProcessor.defaultLayer),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        SessionRunState.defaultLayer,
+        SessionStatus.defaultLayer,
+        SessionCompaction.defaultLayer,
+        SessionProcessor.defaultLayer,
+      ),
+    ),
     Layer.provide(Command.defaultLayer),
     Layer.provide(Permission.defaultLayer),
     Layer.provide(MCP.defaultLayer),
@@ -1668,6 +1675,9 @@ export const defaultLayer = Layer.suspend(() =>
     Layer.provide(Session.defaultLayer),
     Layer.provide(SessionRevert.defaultLayer),
     Layer.provide(SessionSummary.defaultLayer),
+    Layer.provide(SessionExecution.noopLayer),
+    Layer.provide(SessionMailbox.defaultLayer),
+    Layer.provide(SessionInterAgent.defaultLayer),
     Layer.provide(Image.defaultLayer),
     Layer.provide(
       Layer.mergeAll(

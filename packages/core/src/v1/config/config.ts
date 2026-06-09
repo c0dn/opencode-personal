@@ -215,6 +215,9 @@ export const Info = Schema.Struct({
       policies: Schema.optional(Schema.mutable(Schema.Array(ConfigExperimental.Policy))).annotate({
         description: "Policy statements applied to supported resources, such as provider access",
       }),
+      max_subagent_depth: Schema.optional(Schema.Number).annotate({
+        description: "Maximum depth of the subagent orchestration tree (root + children + grandchildren + ...). Default: 3",
+      }),
     }),
   ),
 }).annotate({ identifier: "Config" })
