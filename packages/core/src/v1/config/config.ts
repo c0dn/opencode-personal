@@ -74,6 +74,20 @@ export const Info = Schema.Struct({
   small_model: Schema.optional(Schema.String).annotate({
     description: "Small model to use for tasks like title generation in the format of provider/model",
   }),
+  image_read: Schema.optional(
+    Schema.Struct({
+      model: Schema.optional(Schema.String).annotate({
+        description:
+          "Model in provider/model format to use for describing images when the active model does not support image input. Example: 'openai/gpt-4o'",
+      }),
+      pdf_strategy: Schema.optional(Schema.Literals(["extract_text", "error"])).annotate({
+        description:
+          "How to handle PDFs when the active model does not support PDF input. 'extract_text' extracts text inline. 'error' returns an error to the model. Defaults to 'extract_text' when image_read is configured.",
+      }),
+    }),
+  ).annotate({
+    description: "Automatic image/PDF reading override. When configured, unsupported media is resolved to text before the active model sees it.",
+  }),
   default_agent: Schema.optional(Schema.String).annotate({
     description:
       "Default agent to use when none is specified. Must be a primary agent. Falls back to 'build' if not set or if the specified agent is invalid.",
