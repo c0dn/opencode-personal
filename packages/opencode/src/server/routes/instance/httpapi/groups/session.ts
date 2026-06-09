@@ -46,6 +46,10 @@ export const MessagesQuery = Schema.Struct({
   before: Schema.optional(Schema.String),
 })
 export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
+export const DescendantEntry = Schema.Struct({
+  session: Session.Info,
+  depth: Schema.Int,
+})
 export const UpdatePayload = Schema.Struct({
   title: Schema.optional(Schema.String),
   metadata: Schema.optional(Session.Metadata),
@@ -80,6 +84,7 @@ export const SessionPaths = {
   status: `${root}/status`,
   get: `${root}/:sessionID`,
   children: `${root}/:sessionID/children`,
+  descendants: `${root}/:sessionID/descendants`,
   todo: `${root}/:sessionID/todo`,
   diff: `${root}/:sessionID/diff`,
   messages: `${root}/:sessionID/message`,
@@ -151,6 +156,19 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.children",
             summary: "Get session children",
             description: "Retrieve all child sessions that were forked from the specified parent session.",
+          }),
+        ),
+        HttpApiEndpoint.get("descendants", SessionPaths.descendants, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(Schema.Array(DescendantEntry), "List of descendants"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.descendants",
+            summary: "Get session descendants",
+            description:
+              "Retrieve the full descendant tree of a session, ordered breadth-first, with each entry's depth relative to the root session.",
           }),
         ),
         HttpApiEndpoint.get("todo", SessionPaths.todo, {

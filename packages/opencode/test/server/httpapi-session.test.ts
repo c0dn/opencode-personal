@@ -282,6 +282,10 @@ describe("session HttpApi", () => {
         expect(children.status).toBe(404)
         expect(yield* responseJson(children)).toEqual(missingSessionBody)
 
+        const descendants = yield* request(pathFor(SessionPaths.descendants, { sessionID: missingSession }), { headers })
+        expect(descendants.status).toBe(404)
+        expect(yield* responseJson(descendants)).toEqual(missingSessionBody)
+
         const todo = yield* request(pathFor(SessionPaths.todo, { sessionID: missingSession }), { headers })
         expect(todo.status).toBe(404)
         expect(yield* responseJson(todo)).toEqual(missingSessionBody)
@@ -335,6 +339,7 @@ describe("session HttpApi", () => {
         const headers = { "x-opencode-directory": test.directory }
         const parent = yield* createSession({ title: "parent" })
         const child = yield* createSession({ title: "child", parentID: parent.id })
+        const grandchild = yield* createSession({ title: "grandchild", parentID: child.id })
         const message = yield* createTextMessage(parent.id, "hello")
         yield* createTextMessage(parent.id, "world")
 
@@ -353,6 +358,17 @@ describe("session HttpApi", () => {
             headers,
           })).map((item) => item.id),
         ).toEqual([child.id])
+
+        // descendants walks the full tree breadth-first; children only returns direct kids.
+        expect(
+          (yield* requestJson<{ session: Session.Info; depth: number }[]>(
+            pathFor(SessionPaths.descendants, { sessionID: parent.id }),
+            { headers },
+          )).map((entry) => ({ id: entry.session.id, depth: entry.depth })),
+        ).toEqual([
+          { id: child.id, depth: 1 },
+          { id: grandchild.id, depth: 2 },
+        ])
 
         expect(
           yield* requestJson<unknown[]>(pathFor(SessionPaths.todo, { sessionID: parent.id }), { headers }),
