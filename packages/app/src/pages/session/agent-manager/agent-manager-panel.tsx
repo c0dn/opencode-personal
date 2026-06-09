@@ -11,6 +11,7 @@ import { useSDK } from "@/context/sdk"
 import { useSettings } from "@/context/settings"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { useAgentManager } from "./agent-manager-context"
+import { STATUS_DOT, childSessionPath, indent, showsInterrupt } from "./agent-manager-view"
 import type { SubagentRow, SubagentStatus } from "./subagent-rows"
 
 const PANEL_WIDTH = 320
@@ -26,7 +27,7 @@ export function AgentManagerPanel() {
   const isDesktop = createMediaQuery("(min-width: 768px)")
   const open = createMemo(() => isDesktop() && view().agentManager.opened())
 
-  const jump = (sessionID: string) => navigate(`/${params.dir}/session/${sessionID}`)
+  const jump = (sessionID: string) => navigate(childSessionPath(params.dir, sessionID))
   const interrupt = (sessionID: string) => void sdk.client.session.abort({ sessionID }).catch(() => {})
 
   return (
@@ -118,7 +119,7 @@ function SubagentItem(props: {
           </span>
         </div>
       </button>
-      <Show when={props.row.busy}>
+      <Show when={showsInterrupt(props.row)}>
         <Tooltip placement="bottom" value={language.t("session.agentManager.interrupt")}>
           <IconButtonV2
             type="button"
@@ -133,20 +134,6 @@ function SubagentItem(props: {
       </Show>
     </li>
   )
-}
-
-// Indent deeper subagents to show the tree hierarchy; cap the depth so very
-// deep chains do not push the row content off-screen.
-const INDENT_STEP = 14
-const MAX_INDENT_LEVELS = 6
-function indent(depth: number): number {
-  return Math.min(Math.max(depth - 1, 0), MAX_INDENT_LEVELS) * INDENT_STEP
-}
-
-const STATUS_DOT: Record<Exclude<SubagentStatus, "running">, string> = {
-  idle: "bg-icon-weak",
-  completed: "bg-surface-success-strong",
-  error: "bg-text-diff-delete-base",
 }
 
 function StatusPill(props: { status: SubagentStatus; busy: boolean }) {

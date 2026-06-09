@@ -1,5 +1,23 @@
 import type { Accessor } from "solid-js"
 
+// Boolean open/close/toggle wrapper for a persisted panel slice. Reads current
+// state through `read` and writes through `write` so the backing store stays the
+// single source of truth (same pattern the review/terminal panels follow).
+export function createPanelToggle(read: Accessor<boolean>, write: (next: boolean) => void) {
+  return {
+    opened: read,
+    open() {
+      write(true)
+    },
+    close() {
+      write(false)
+    },
+    toggle() {
+      write(!read())
+    },
+  }
+}
+
 export function ensureSessionKey(key: string, touch: (key: string) => void, seed: (key: string) => void) {
   touch(key)
   seed(key)

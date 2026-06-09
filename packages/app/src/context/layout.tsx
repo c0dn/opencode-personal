@@ -15,9 +15,9 @@ import { same } from "@/utils/same"
 import { createScrollPersistence, type SessionScroll } from "./layout-scroll"
 import { createPathHelpers } from "./file/path"
 import type { ProjectAvatarVariant } from "@opencode-ai/ui/v2/project-avatar-v2"
-import { createSessionKeyReader, ensureSessionKey, pruneSessionKeys } from "./layout-helpers"
+import { createPanelToggle, createSessionKeyReader, ensureSessionKey, pruneSessionKeys } from "./layout-helpers"
 
-export { createSessionKeyReader, ensureSessionKey, pruneSessionKeys }
+export { createPanelToggle, createSessionKeyReader, ensureSessionKey, pruneSessionKeys }
 
 export type { ProjectAvatarVariant }
 
@@ -790,18 +790,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
               setReviewPanelOpened(!reviewPanelOpened())
             },
           },
-          agentManager: {
-            opened: agentPanelOpened,
-            open() {
-              setAgentPanelOpened(true)
-            },
-            close() {
-              setAgentPanelOpened(false)
-            },
-            toggle() {
-              setAgentPanelOpened(!agentPanelOpened())
-            },
-          },
+          agentManager: createPanelToggle(agentPanelOpened, setAgentPanelOpened),
           review: {
             open: createMemo(() => s().reviewOpen ?? []),
             setOpen(open: string[]) {
