@@ -159,7 +159,7 @@ testUserImage.effect("replaces user image file part with text description when m
     const messages: ModelMessage[] = [userImageMessage("photo.png")]
 
     const describeImage: NonNullable<ImageReadOverrideOptions["describeImage"]> = () =>
-      Effect.succeed(DESCRIBED_TEXT)
+      Effect.succeed([DESCRIBED_TEXT])
 
     const result = yield* overrideUnsupportedMedia(messages, active, config, { describeImage })
 
@@ -214,7 +214,7 @@ testToolMedia.effect("replaces tool-role inline image media with text descriptio
     const messages: ModelMessage[] = [toolResultMediaMessage("tool")]
 
     const describeImage: NonNullable<ImageReadOverrideOptions["describeImage"]> = () =>
-      Effect.succeed(DESCRIBED_TEXT)
+      Effect.succeed([DESCRIBED_TEXT])
 
     const result = yield* overrideUnsupportedMedia(messages, active, config, { describeImage })
 
@@ -244,7 +244,7 @@ testAssistantMedia.effect("replaces assistant-role inline image media with text 
     const messages: ModelMessage[] = [toolResultMediaMessage("assistant")]
 
     const describeImage: NonNullable<ImageReadOverrideOptions["describeImage"]> = () =>
-      Effect.succeed(DESCRIBED_TEXT)
+      Effect.succeed([DESCRIBED_TEXT])
 
     const result = yield* overrideUnsupportedMedia(messages, active, config, { describeImage })
 
@@ -353,7 +353,7 @@ testDescribeImageFailure.effect("returns replacement error text when describeIma
     const messages: ModelMessage[] = [userImageMessage("broken.png")]
 
     const describeImage: NonNullable<ImageReadOverrideOptions["describeImage"]> = () =>
-      Effect.succeed(DESCRIBE_ERROR_TEXT)
+      Effect.succeed([DESCRIBE_ERROR_TEXT])
 
     const result = yield* overrideUnsupportedMedia(messages, active, config, { describeImage })
 
@@ -508,7 +508,7 @@ testImagePart.effect("replaces user image type part with text description", () =
     ]
 
     const describeImage: NonNullable<ImageReadOverrideOptions["describeImage"]> = () =>
-      Effect.succeed(DESCRIBED_TEXT)
+      Effect.succeed([DESCRIBED_TEXT])
 
     const result = yield* overrideUnsupportedMedia(messages, active, config, { describeImage })
 
@@ -537,7 +537,7 @@ testMixedRoles.effect("processes user image and tool media in a mixed message ar
     ]
 
     const describeImage: NonNullable<ImageReadOverrideOptions["describeImage"]> = () =>
-      Effect.succeed(DESCRIBED_TEXT)
+      Effect.succeed([DESCRIBED_TEXT])
 
     const result = yield* overrideUnsupportedMedia(messages, active, config, { describeImage })
 
@@ -684,5 +684,122 @@ testEmptyImage.effect("returns error text for empty file data", () =>
     expect(part.type).toBe("text")
     expect(part.text).toMatch(/ERROR: Image/)
     expect(part.text).toMatch(/empty or corrupted/)
+  }),
+)
+
+// ---------------------------------------------------------------------------
+// Test: Multiple images in one user message are batched into a single
+// describeImage call, and each returned description maps to a text part
+// in the correct position.
+// ---------------------------------------------------------------------------
+const testBatchedImages = testEffect(
+  makeFakeProviderLayer(visionModel()),
+)
+
+testBatchedImages.effect("batches multiple images into one describeImage call, preserving order", () =>
+  Effect.gen(function* () {
+    const active = noVisionModel()
+    const config: ImageReadConfig = { model: "openai/gpt-4o" }
+    const IMG1 = "data:image/png;base64,aW1nMQ=="
+    const IMG2 = "data:image/png;base64,aW1nMg=="
+    const messages: ModelMessage[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Look at these:" },
+          { type: "file", mediaType: "image/png", filename: "img1.png", data: IMG1 },
+          { type: "text", text: "and this:" },
+          { type: "image" as any, image: IMG2 },
+        ],
+      },
+    ]
+
+    let describeImageCalled = false
+    let receivedInputs: any[] = []
+    const describeImage: NonNullable<ImageReadOverrideOptions["describeImage"]> = (inputs) => {
+      describeImageCalled = true
+      receivedInputs = inputs
+      return Effect.succeed(["desc for img1", "desc for img2"])
+    }
+
+    const result = yield* overrideUnsupportedMedia(messages, active, config, { describeImage })
+
+    // describeImage should be called exactly once with 2 inputs
+    expect(describeImageCalled).toBe(true)
+    expect(receivedInputs).toHaveLength(2)
+    expect(receivedInputs[0].filename).toBe("img1.png")
+    expect(receivedInputs[1].mime).toBe("image/png")
+
+    // Content order: text("Look at these:"), text("desc for img1"), text("and this:"), text("desc for img2")
+    expect(result).toHaveLength(1)
+    const content = result[0].content as any[]
+    expect(content).toHaveLength(4)
+    expect(content[0].type).toBe("text")
+    expect(content[0].text).toBe("Look at these:")
+    expect(content[1].type).toBe("text")
+    expect(content[1].text).toBe("desc for img1")
+    expect(content[2].type).toBe("text")
+    expect(content[2].text).toBe("and this:")
+    expect(content[3].type).toBe("text")
+    expect(content[3].text).toBe("desc for img2")
+  }),
+)
+
+// ---------------------------------------------------------------------------
+// Test: Batching with tool-result media items — multiple images grouped
+// into one batch per tool-result.
+// ---------------------------------------------------------------------------
+const testBatchedToolMedia = testEffect(
+  makeFakeProviderLayer(visionModel()),
+)
+
+testBatchedToolMedia.effect("batches multiple tool-result media images into one describeImage call", () =>
+  Effect.gen(function* () {
+    const active = noVisionModel()
+    const config: ImageReadConfig = { model: "openai/gpt-4o" }
+    const messages: ModelMessage[] = [
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "screenshot",
+            output: {
+              type: "content",
+              value: [
+                { type: "media", mediaType: "image/png", data: "aW1nMQ==" },
+                { type: "media", mediaType: "image/png", data: "aW1nMg==" },
+                { type: "text", text: "two screenshots captured" },
+              ],
+            },
+          },
+        ],
+      },
+    ]
+
+    let describeImageCalled = false
+    let receivedInputs: any[] = []
+    const describeImage: NonNullable<ImageReadOverrideOptions["describeImage"]> = (inputs) => {
+      describeImageCalled = true
+      receivedInputs = inputs
+      return Effect.succeed(["screen 1 desc", "screen 2 desc"])
+    }
+
+    const result = yield* overrideUnsupportedMedia(messages, active, config, { describeImage })
+
+    expect(describeImageCalled).toBe(true)
+    expect(receivedInputs).toHaveLength(2)
+
+    expect(result).toHaveLength(1)
+    const part = (result[0].content as any[])[0]
+    expect(part.type).toBe("tool-result")
+    expect(part.output.value).toHaveLength(3)
+    expect(part.output.value[0].type).toBe("text")
+    expect(part.output.value[0].text).toBe("screen 1 desc")
+    expect(part.output.value[1].type).toBe("text")
+    expect(part.output.value[1].text).toBe("screen 2 desc")
+    expect(part.output.value[2].type).toBe("text")
+    expect(part.output.value[2].text).toBe("two screenshots captured")
   }),
 )
