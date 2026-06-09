@@ -346,6 +346,7 @@ export const layer = Layer.effect(
             description: task.description,
             subagent_type: task.agent,
             command: task.command,
+            ...(task.model ? { model: `${task.model.providerID}/${task.model.modelID}` } : {}),
           },
           time: { start: Date.now() },
         },
@@ -355,6 +356,7 @@ export const layer = Layer.effect(
         description: task.description,
         subagent_type: task.agent,
         command: task.command,
+        ...(task.model ? { model: `${task.model.providerID}/${task.model.modelID}` } : {}),
       }
       yield* plugin.trigger(
         "tool.execute.before",

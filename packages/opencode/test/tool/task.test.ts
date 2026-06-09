@@ -22,6 +22,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { disposeAllInstances } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+import { Provider } from "@/provider/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 
 afterEach(async () => {
@@ -454,6 +455,280 @@ describe("tool.task", () => {
     },
   )
 
+  it.instance("execute applies model override from params to subagent prompt", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({ text: "done", onPrompt: (input) => (seen = input) })
+
+      yield* def.execute(
+        {
+          description: "test task",
+          prompt: "do the thing",
+          subagent_type: "general",
+          model: "openai/gpt-4o",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(seen?.model).toEqual({
+        modelID: ModelV2.ID.make("gpt-4o"),
+        providerID: ProviderV2.ID.make("openai"),
+      })
+    }),
+  )
+
+  it.instance("execute clears variant when model override is provided", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({ text: "done", onPrompt: (input) => (seen = input) })
+
+      yield* def.execute(
+        {
+          description: "test task",
+          prompt: "do the thing",
+          subagent_type: "general",
+          model: "openai/gpt-4o",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(seen?.variant).toBeUndefined()
+    }),
+  )
+
+  it.instance("execute inherits parent model when no override and no agent model config", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      let seen: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({ text: "done", onPrompt: (input) => (seen = input) })
+
+      yield* def.execute(
+        {
+          description: "test task",
+          prompt: "do the thing",
+          subagent_type: "general",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(seen?.model).toEqual(ref)
+      expect(seen?.variant).toBe("xhigh")
+    }),
+  )
+
+  it.instance("execute returns suggestions when model override is not found", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const result = yield* def.execute(
+        {
+          description: "test task",
+          prompt: "do the thing",
+          subagent_type: "general",
+          model: "bad/gpt-5",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: {
+              cancel: () => Effect.void,
+              resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+              prompt: () =>
+                Effect.die(
+                  new Provider.ModelNotFoundError({
+                    providerID: ProviderV2.ID.make("bad"),
+                    modelID: ModelV2.ID.make("gpt-5"),
+                    suggestions: ["gpt-4o", "gpt-4o-mini"],
+                  }),
+                ),
+            } satisfies TaskPromptOps,
+          },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      expect(result.output).toContain("state=\"completed\"")
+      expect(result.output).toContain("Error: Model")
+      expect(result.output).toContain("\"bad/gpt-5\"")
+      expect(result.output).toContain("not found")
+      expect(result.output).toContain("Available models for provider \"bad\"")
+      expect(result.output).toContain("gpt-4o")
+      expect(result.output).toContain("gpt-4o-mini")
+    }),
+  )
+
+  it.instance(
+    "execute uses agent config model when no params.model override",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+        const promptOps = stubOps({ text: "done", onPrompt: (input) => (seen = input) })
+
+        yield* def.execute(
+          {
+            description: "test task",
+            prompt: "do the thing",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(seen?.model).toEqual({
+          modelID: ModelV2.ID.make("gpt-4o"),
+          providerID: ProviderV2.ID.make("openai"),
+        })
+        expect(seen?.variant).toBeUndefined()
+      }),
+    {
+      config: {
+        agent: {
+          general: {
+            model: "openai/gpt-4o",
+            mode: "subagent",
+          },
+        },
+      },
+    },
+  )
+
+  it.instance(
+    "execute overrides agent config model with params.model",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+        const promptOps = stubOps({ text: "done", onPrompt: (input) => (seen = input) })
+
+        yield* def.execute(
+          {
+            description: "test task",
+            prompt: "do the thing",
+            subagent_type: "general",
+            model: "anthropic/claude-sonnet",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(seen?.model).toEqual({
+          modelID: ModelV2.ID.make("claude-sonnet"),
+          providerID: ProviderV2.ID.make("anthropic"),
+        })
+        expect(seen?.variant).toBeUndefined()
+      }),
+    {
+      config: {
+        agent: {
+          general: {
+            model: "openai/gpt-4o",
+            mode: "subagent",
+          },
+        },
+      },
+    },
+  )
+
+  it.instance("execute passes through non-ModelNotFoundError defects", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const exit = yield* def
+        .execute(
+          {
+            description: "test task",
+            prompt: "do the thing",
+            subagent_type: "general",
+            model: "bad/gpt-5",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: {
+              promptOps: {
+                cancel: () => Effect.void,
+                resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+                prompt: () => Effect.die(new Error("unexpected runtime failure")),
+              } satisfies TaskPromptOps,
+            },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+    }),
+  )
+
   it.instance("rejects background execution when the experiment is disabled", () =>
     Effect.gen(function* () {
       const { chat, assistant } = yield* seed()
@@ -520,6 +795,43 @@ describe("tool.task", () => {
       expect(result.metadata.background).toBe(true)
       expect(result.output).toContain(`state="running"`)
       expect(job?.status).toBe("running")
+    }),
+  )
+
+  background.instance("background task uses model override", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+          background: true,
+          model: "openai/gpt-4o",
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps({ text: "background done" }) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      const job = yield* jobs.get(result.metadata.sessionId)
+      expect(result.metadata.background).toBe(true)
+      expect(result.output).toContain("state=\"running\"")
+      expect(job?.metadata?.model).toEqual({
+        modelID: ModelV2.ID.make("gpt-4o"),
+        providerID: ProviderV2.ID.make("openai"),
+      })
     }),
   )
 
