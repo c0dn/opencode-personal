@@ -316,7 +316,14 @@ export const layer = Layer.effect(
       const ctx = yield* InstanceState.context
       const promptOps = yield* ops()
       const { task: taskTool } = yield* registry.named()
-      const taskModel = task.model ? yield* getModel(task.model.providerID, task.model.modelID, sessionID) : model
+      const taskModel = task.model
+        ? yield* getModel(task.model.providerID, task.model.modelID, sessionID).pipe(
+            Effect.catchDefect((defect) => {
+              if (Provider.ModelNotFoundError.isInstance(defect)) return Effect.succeed(model)
+              return Effect.die(defect)
+            }),
+          )
+        : model
       const assistantMessage: SessionV1.Assistant = yield* sessions.updateMessage({
         id: MessageID.ascending(),
         role: "assistant",
@@ -346,6 +353,7 @@ export const layer = Layer.effect(
             description: task.description,
             subagent_type: task.agent,
             command: task.command,
+            ...(task.model ? { model: `${task.model.providerID}/${task.model.modelID}` } : {}),
           },
           time: { start: Date.now() },
         },
@@ -355,6 +363,7 @@ export const layer = Layer.effect(
         description: task.description,
         subagent_type: task.agent,
         command: task.command,
+        ...(task.model ? { model: `${task.model.providerID}/${task.model.modelID}` } : {}),
       }
       yield* plugin.trigger(
         "tool.execute.before",
