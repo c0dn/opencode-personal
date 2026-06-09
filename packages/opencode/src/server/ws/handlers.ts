@@ -106,10 +106,11 @@ function handleSessionMessages(msg: Record<string, unknown>, _conn: Connection) 
 
     // Check in-memory cache first
     const cached = yield* cache.get(sessionIDTyped, limit, before)
+    const filterKnown = <T extends { info: { id: string } }>(items: T[]) =>
+      knownIDs.size > 0 ? items.filter((item) => !knownIDs.has(item.info.id)) : items
+
     if (cached) {
-      const items = knownIDs.size > 0
-        ? cached.items.filter((item) => !knownIDs.has(item.info.id))
-        : cached.items
+      const items = filterKnown(cached.items)
       return { data: items, cursor: cached.cursor ?? null }
     }
 
@@ -119,9 +120,7 @@ function handleSessionMessages(msg: Record<string, unknown>, _conn: Connection) 
     // Cache the full page (before knownIDs filter) for future hits
     yield* cache.set(sessionIDTyped, limit, before, { items: page.items, cursor: page.cursor ?? null })
 
-    const items = knownIDs.size > 0
-      ? page.items.filter((item) => !knownIDs.has(item.info.id))
-      : page.items
+    const items = filterKnown(page.items)
     return { data: items, cursor: page.cursor ?? null }
   })
 }
