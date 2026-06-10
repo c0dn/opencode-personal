@@ -14,16 +14,17 @@ export interface DescribeImageInput {
 
 export interface ImageReadOverrideOptions {
   describeImage?: (
-    input: DescribeImageInput,
+    inputs: DescribeImageInput[],
     visionModel: Provider.Model,
-  ) => Effect.Effect<string, never, Provider.Service>
+  ) => Effect.Effect<string[], never, Provider.Service>
   extractPdfText?: (input: { dataUrl: string; filename?: string }) => Effect.Effect<string, never>
 }
 
 const SYSTEM_PROMPT =
-  "You are an image description tool. Describe the image in detail, focusing on text content, " +
+  "You are an image description tool. Describe each image in detail, focusing on text content, " +
   "visual elements, layout, diagrams, code, screenshots, and any details relevant to a software " +
-  "development context. Be thorough but concise."
+  "development context. Be thorough but concise. " +
+  "Preface each description with the image label exactly as given (e.g. \"[Image 1 of 3]:\")."
 
 function mediaKind(mime: string): "image" | "pdf" | undefined {
   if (mime.startsWith("image/")) return "image"
@@ -42,65 +43,150 @@ function extractMimeFromDataUrl(dataUrl: string): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Default describe image implementation
+// Default describe image implementation (batched, cancellable)
 // ---------------------------------------------------------------------------
 
 function describeImageDefault(
-  input: DescribeImageInput,
+  inputs: DescribeImageInput[],
   visionModel: Provider.Model,
-): Effect.Effect<string, never, Provider.Service> {
+): Effect.Effect<string[], never, Provider.Service> {
+  if (inputs.length === 0) return Effect.succeed([])
+
   return Effect.gen(function* () {
     const provider = yield* Provider.Service
     const language = yield* provider.getLanguage(visionModel)
+    const controller = new AbortController()
 
-    const label = input.filename ? `"${input.filename}"` : ""
-
-    const result = yield* Effect.tryPromise(() => generateImageDescription(language, input)).pipe(
+    const result = yield* Effect.tryPromise(() =>
+      generateBatchedImageDescriptions(language, inputs, controller.signal),
+    ).pipe(
+      Effect.onInterrupt(() => Effect.sync(() => controller.abort())),
+      Effect.onError(() => Effect.sync(() => controller.abort())),
       Effect.timeout("30 seconds"),
     )
 
-    return `[Image ${label} described by ${visionModel.name}:\n${result}]`.trim()
+    const descriptions = result
+      .map((desc, i) => {
+        const fileLabel = inputs[i].filename ? `"${inputs[i].filename}"` : `image ${i + 1}`
+        return `[Image ${fileLabel} described by ${visionModel.name}:\n${desc}]`.trim()
+      })
+
+    // Wrap in a batch marker so the caller can parse individual descriptions
+    return descriptions
   }).pipe(
     Effect.catch((error) =>
       Effect.succeed(
-        `ERROR: Failed to describe image with ${visionModel.name}: ${errorMessage(error)}`,
+        inputs.map((inp) =>
+          `ERROR: Failed to describe image${inp.filename ? ` "${inp.filename}"` : ""} with ${visionModel.name}: ${errorMessage(error)}`,
+        ),
       ),
     ),
   )
 }
 
-async function generateImageDescription(
+async function generateBatchedImageDescriptions(
   language: any,
-  input: DescribeImageInput,
-): Promise<string> {
+  inputs: DescribeImageInput[],
+  abortSignal?: AbortSignal,
+): Promise<string[]> {
   const { generateText } = await import("ai")
+
+  if (inputs.length === 1) {
+    const input = inputs[0]
+    const resp = await generateText({
+      model: language,
+      system: SYSTEM_PROMPT,
+      messages: [
+        {
+          role: "user" as const,
+          content: [
+            {
+              type: "text" as const,
+              text: input.filename
+                ? `Describe this image (filename: "${input.filename}").`
+                : "Describe this image in detail.",
+            },
+            {
+              type: "image" as const,
+              image: `data:${input.mime};base64,${input.data}`,
+              mimeType: input.mime,
+            } as any,
+          ],
+        },
+      ],
+      abortSignal,
+    })
+    return [resp.text]
+  }
+
+  // Multiple images: send all in one message, ask for labeled descriptions
+  const content: any[] = [
+    {
+      type: "text" as const,
+      text: `Describe each of the following ${inputs.length} images. Label each description with the image number (e.g. "[Image 1 of ${inputs.length}]:").`,
+    },
+  ]
+  for (let i = 0; i < inputs.length; i++) {
+    content.push({
+      type: "image" as const,
+      image: `data:${inputs[i].mime};base64,${inputs[i].data}`,
+      mimeType: inputs[i].mime,
+    } as any)
+  }
   const resp = await generateText({
     model: language,
     system: SYSTEM_PROMPT,
-    messages: [
-      {
-        role: "user" as const,
-        content: [
-          {
-            type: "text" as const,
-            text: input.filename
-              ? `Describe this image (filename: "${input.filename}").`
-              : "Describe this image in detail.",
-          },
-          {
-            type: "image" as const,
-            image: `data:${input.mime};base64,${input.data}`,
-            mimeType: input.mime,
-          } as any,
-        ],
-      },
-    ],
+    messages: [{ role: "user" as const, content }],
+    abortSignal,
   })
-  return resp.text
+
+  return splitDescriptions(resp.text, inputs.length)
+}
+
+/**
+ * Split a combined description response into per-image descriptions.
+ * Tries to parse labeled sections like "[Image 1 of N]:" or "[Image 1]:".
+ * Falls back to returning the full text as a single description if parsing fails.
+ */
+function splitDescriptions(text: string, count: number): string[] {
+  if (count <= 1) return [text]
+
+  // Try to split by labeled headers
+  const labeled = new RegExp(`\\[Image \\d+(?: of ${count})?\\]`, "gi")
+  const splits = text.split(labeled)
+  // splits[0] is preamble (before first label), rest are descriptions between labels
+  const descriptions: string[] = []
+  let preamble = splits[0]?.trim()
+  if (preamble) descriptions.push(preamble)
+
+  for (let i = 1; i < splits.length; i += 1) {
+    const desc = splits[i]
+    if (desc === undefined) continue
+    const trimmed = desc.trim().replace(/^:\s*/, "")
+    if (trimmed) descriptions.push(trimmed)
+  }
+
+  // If we got roughly the right number, use parsed result
+  if (descriptions.length === count) return descriptions
+
+  // If we got more than expected, take the first `count` and merge the rest
+  if (descriptions.length > count) {
+    const extra = descriptions.slice(count).join("\n\n")
+    const result = descriptions.slice(0, count)
+    result[result.length - 1] = (result[result.length - 1] + "\n\n" + extra).trim()
+    return result
+  }
+
+  // Fallback: return full text as one description, pad the rest
+  const result: string[] = [text]
+  for (let i = 1; i < count; i++) {
+    result.push("")
+  }
+  return result
 }
 
 // ---------------------------------------------------------------------------
-// Default PDF text extraction implementation
+// Default PDF text extraction implementation (unchanged)
 // ---------------------------------------------------------------------------
 
 function extractPdfTextDefault(input: {
@@ -172,7 +258,7 @@ async function extractPdfTextContent(input: {
 }
 
 // ---------------------------------------------------------------------------
-// Resolve vision model from config
+// Resolve vision model from config (unchanged)
 // ---------------------------------------------------------------------------
 
 function resolveVisionModel(modelId: string): Effect.Effect<Provider.Model, string, Provider.Service> {
@@ -227,7 +313,45 @@ function isMediaItem(item: unknown): item is { type: "media"; mediaType: string;
 }
 
 // ---------------------------------------------------------------------------
-// Main override function
+// Image input collection — gathers all image DescribeImageInput objects
+// from a message part, for later batch processing.
+// ---------------------------------------------------------------------------
+
+interface ImageCandidate {
+  position: number // original index in the content array
+  input: DescribeImageInput
+}
+
+function collectImageCandidates(
+  content: unknown[],
+  needsImageOverride: boolean,
+): ImageCandidate[] {
+  const candidates: ImageCandidate[] = []
+  for (let i = 0; i < content.length; i++) {
+    const part = content[i]
+    if (isFilePart(part)) {
+      const mime = part.mediaType
+      if (mediaKind(mime) !== "image" || !needsImageOverride) continue
+      const rawBase64 = extractBase64FromDataUrl(part.data)
+      if (rawBase64?.length) {
+        candidates.push({ position: i, input: { data: rawBase64, mime, filename: part.filename } })
+      }
+    } else if (isImagePart(part)) {
+      if (!needsImageOverride) continue
+      const dataUrl = String(part.image)
+      const mime = extractMimeFromDataUrl(dataUrl)
+      if (mediaKind(mime ?? "") !== "image") continue
+      const rawBase64 = extractBase64FromDataUrl(dataUrl)
+      if (rawBase64?.length) {
+        candidates.push({ position: i, input: { data: rawBase64, mime: mime ?? "image/png" } })
+      }
+    }
+  }
+  return candidates
+}
+
+// ---------------------------------------------------------------------------
+// Main override function (batched)
 // ---------------------------------------------------------------------------
 
 export function overrideUnsupportedMedia(
@@ -264,46 +388,73 @@ export function overrideUnsupportedMedia(
 
       // Process user message file/image parts
       if (msg.role === "user") {
+        const candidates = collectImageCandidates(msg.content, needsImageOverride)
         let changed = false
-        const newContent: any[] = []
-        for (const part of msg.content) {
-          if (isFilePart(part)) {
-            const mime = part.mediaType
-            const kind = mediaKind(mime)
-            if (!kind) {
-              newContent.push(part)
-              continue
-            }
+        const descriptions: (string | null)[] = Array(msg.content.length).fill(null)
 
-            if (kind === "image" && needsImageOverride) {
-              const description = yield* handleImageFilePart(part, visionModel, describeImg)
-              newContent.push({ type: "text" as const, text: description })
-              changed = true
-              continue
+        // Batch describe all images at once
+        if (candidates.length > 0 && typeof visionModel !== "string") {
+          const resolved = visionModel
+          if (resolved) {
+            const batchDescriptions = yield* describeImg(
+              candidates.map((c) => c.input),
+              resolved,
+            )
+            for (let i = 0; i < candidates.length; i++) {
+              descriptions[candidates[i].position] = batchDescriptions[i]
             }
-
-            if (kind === "pdf" && needsPdfOverride) {
-              const description = yield* handlePdfFilePart(part, pdfStrategy, extractPdf)
-              newContent.push({ type: "text" as const, text: description })
-              changed = true
-              continue
-            }
-
-            newContent.push(part)
-          } else if (isImagePart(part)) {
-            const dataUrl = String(part.image)
-            const mime = extractMimeFromDataUrl(dataUrl)
-            const kind = mime ? mediaKind(mime) : undefined
-            if (kind === "image" && needsImageOverride) {
-              const description = yield* handleImagePart(part, visionModel, describeImg)
-              newContent.push({ type: "text" as const, text: description })
-              changed = true
-              continue
-            }
-            newContent.push(part)
+            changed = true
           } else {
-            newContent.push(part)
+            // visionModel is undefined — no vision model configured
+            for (const c of candidates) {
+              descriptions[c.position] =
+                "ERROR: image_read.model is not configured. Cannot describe images with this model."
+            }
+            changed = true
           }
+        } else if (candidates.length > 0) {
+          // visionModel is an error string
+          for (const c of candidates) {
+            descriptions[c.position] = visionModel as string
+          }
+          changed = true
+        }
+
+        // Build new content array, replacing image parts with descriptions
+        const newContent: any[] = []
+        for (let i = 0; i < msg.content.length; i++) {
+          const part = msg.content[i]
+          if (descriptions[i] !== null) {
+            newContent.push({ type: "text" as const, text: descriptions[i]! })
+            continue
+          }
+          // Handle image file parts that need override but lack valid base64
+          // (HTTP URLs, empty data). These weren't collected for batching.
+          if (isFilePart(part) && needsImageOverride && mediaKind(part.mediaType) === "image") {
+            newContent.push({
+              type: "text" as const,
+              text: `ERROR: Image ${part.filename ? `"${part.filename}"` : "file"} is empty or corrupted. Please provide a valid image.`,
+            })
+            changed = true
+            continue
+          }
+          // Handle image-type parts with invalid/empty data URLs
+          if (isImagePart(part) && needsImageOverride) {
+            newContent.push({
+              type: "text" as const,
+              text: "ERROR: Image file is empty or corrupted. Please provide a valid image.",
+            })
+            changed = true
+            continue
+          }
+          if (isFilePart(part) && needsPdfOverride && mediaKind(part.mediaType) === "pdf") {
+            const description = yield* handlePdfFilePart(part, pdfStrategy, extractPdf)
+            newContent.push({ type: "text" as const, text: description })
+            changed = true
+            continue
+          }
+          // Pass-through non-image file parts, non-file parts, etc.
+          newContent.push(part)
         }
         result.push(changed ? { ...msg, content: newContent } : msg)
         continue
@@ -321,48 +472,67 @@ export function overrideUnsupportedMedia(
               continue
             }
 
-            let valueChanged = false
-            const newValue: any[] = []
-            for (const item of outputValue) {
+            // Collect media items that need image override
+            const mediaCandidates: { index: number; input: DescribeImageInput }[] = []
+            const pdfCandidates: { index: number; dataUrl: string; filename?: string }[] = []
+
+            for (let i = 0; i < outputValue.length; i++) {
+              const item = outputValue[i]
               if (isMediaItem(item)) {
                 const mime = item.mediaType
                 const kind = mediaKind(mime)
-                if (!kind) {
-                  newValue.push(item)
-                  continue
-                }
-
                 if (kind === "image" && needsImageOverride) {
                   const filename = (item as any).filename as string | undefined
-                  const description = yield* describeImg(
-                    { data: item.data, mime, filename },
-                    visionModel as Provider.Model,
-                  )
-                  newValue.push({ type: "text" as const, text: description })
-                  valueChanged = true
-                  continue
-                }
-
-                if (kind === "pdf" && needsPdfOverride) {
+                  mediaCandidates.push({ index: i, input: { data: item.data, mime, filename } })
+                } else if (kind === "pdf" && needsPdfOverride) {
                   const dataUrl = `data:${mime};base64,${item.data}`
                   const filename = (item as any).filename as string | undefined
-                  const description = yield* handlePdfMediaItem(dataUrl, pdfStrategy, filename, extractPdf)
-                  newValue.push({ type: "text" as const, text: description })
-                  valueChanged = true
-                  continue
+                  pdfCandidates.push({ index: i, dataUrl, filename })
                 }
-
-                newValue.push(item)
-              } else {
-                newValue.push(item)
               }
             }
+
+            if (mediaCandidates.length === 0 && pdfCandidates.length === 0) {
+              newContent.push(part)
+              continue
+            }
+
+            // Batch describe tool-result images
+            let partChanged = false
+            const newValue: any[] = [...outputValue]
+            if (mediaCandidates.length > 0 && typeof visionModel !== "string" && visionModel) {
+              const batchDescriptions = yield* describeImg(
+                mediaCandidates.map((c) => c.input),
+                visionModel,
+              )
+              for (let i = 0; i < mediaCandidates.length; i++) {
+                newValue[mediaCandidates[i].index] = { type: "text" as const, text: batchDescriptions[i] }
+              }
+              partChanged = true
+            } else if (mediaCandidates.length > 0) {
+              const errMsg = typeof visionModel === "string"
+                ? visionModel
+                : "ERROR: image_read.model is not configured. Cannot describe images with this model."
+              for (const mc of mediaCandidates) {
+                newValue[mc.index] = { type: "text" as const, text: errMsg }
+              }
+              partChanged = true
+            }
+
+            // Process PDFs in tool results (individual calls, not batched since
+            // they use pdfjs-dist in-process extraction)
+            for (const pc of pdfCandidates) {
+              const description = yield* handlePdfMediaItem(pc.dataUrl, pdfStrategy, pc.filename, extractPdf)
+              newValue[pc.index] = { type: "text" as const, text: description }
+              partChanged = true
+            }
+
             newContent.push(
-              valueChanged
+              partChanged
                 ? { ...part, output: { ...part.output, value: newValue } }
                 : part,
             )
-            if (valueChanged) changed = true
+            changed = changed || partChanged
           } else {
             newContent.push(part)
           }
@@ -380,63 +550,8 @@ export function overrideUnsupportedMedia(
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers for processing specific part types
+// Internal helpers for PDF processing (image processing moved to batch)
 // ---------------------------------------------------------------------------
-
-function handleImageFilePart(
-  part: { filename?: string; data: string; mediaType: string },
-  visionModel: Provider.Model | string | undefined,
-  describeImg: NonNullable<ImageReadOverrideOptions["describeImage"]>,
-): Effect.Effect<string, never, Provider.Service> {
-  const rawBase64 = extractBase64FromDataUrl(part.data)
-
-  if (typeof visionModel === "string") {
-    return Effect.succeed(visionModel)
-  }
-
-  if (!visionModel) {
-    return Effect.succeed(
-      "ERROR: image_read.model is not configured. Cannot describe images with this model.",
-    )
-  }
-
-  if (!rawBase64 || rawBase64.length === 0) {
-    return Effect.succeed(
-      `ERROR: Image ${part.filename ? `"${part.filename}"` : "file"} is empty or corrupted. Please provide a valid image.`,
-    )
-  }
-
-  return describeImg(
-    { data: rawBase64, mime: part.mediaType, filename: part.filename },
-    visionModel,
-  )
-}
-
-function handleImagePart(
-  part: { image: string },
-  visionModel: Provider.Model | string | undefined,
-  describeImg: NonNullable<ImageReadOverrideOptions["describeImage"]>,
-): Effect.Effect<string, never, Provider.Service> {
-  const dataUrl = String(part.image)
-  const rawBase64 = extractBase64FromDataUrl(dataUrl)
-  const mime = extractMimeFromDataUrl(dataUrl) ?? "image/png"
-
-  if (typeof visionModel === "string") {
-    return Effect.succeed(visionModel)
-  }
-
-  if (!visionModel) {
-    return Effect.succeed(
-      "ERROR: image_read.model is not configured. Cannot describe images with this model.",
-    )
-  }
-
-  if (!rawBase64 || rawBase64.length === 0) {
-    return Effect.succeed("ERROR: Image file is empty or corrupted. Please provide a valid image.")
-  }
-
-  return describeImg({ data: rawBase64, mime, filename: undefined }, visionModel)
-}
 
 function handlePdfFilePart(
   part: { filename?: string; data: string; mediaType: string },
