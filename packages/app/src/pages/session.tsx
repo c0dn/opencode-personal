@@ -58,7 +58,7 @@ import { useSessionLayout } from "@/pages/session/session-layout"
 import { syncSessionModel } from "@/pages/session/session-model-helpers"
 import { SessionMobileBottomBar, SessionMobileTabToggle } from "@/pages/session/session-mobile-bottom-bar"
 import { SessionSidePanel } from "@/pages/session/session-side-panel"
-import { AgentManagerPanel } from "@/pages/session/agent-manager/agent-manager-panel"
+import { AgentManagerPanel, AGENT_MANAGER_PANEL_WIDTH } from "@/pages/session/agent-manager/agent-manager-panel"
 import { AgentManagerProvider } from "@/pages/session/agent-manager/agent-manager-context"
 import { TerminalPanel } from "@/pages/session/terminal-panel"
 import { useSessionCommands } from "@/pages/session/use-session-commands"
@@ -273,11 +273,22 @@ export default function Page() {
     shouldUseV2NewSessionPage({ newLayoutDesigns: newSessionDesign(), sessionID: params.id })
   const desktopReviewOpen = createMemo(() => isDesktop() && view().reviewPanel.opened() && !isV2NewSessionPage())
   const desktopFileTreeOpen = createMemo(() => isDesktop() && layout.fileTree.opened() && !isV2NewSessionPage())
-  const desktopSidePanelOpen = createMemo(() => desktopReviewOpen() || desktopFileTreeOpen())
+  // The agent-manager panel is a fixed-width right-rail sibling (see
+  // AgentManagerPanel). Its visibility condition mirrors the panel's own `open`
+  // memo so the reserved width below matches exactly when it renders.
+  const desktopAgentManagerOpen = createMemo(() => isDesktop() && view().agentManager.opened())
+  const desktopSidePanelOpen = createMemo(
+    () => desktopReviewOpen() || desktopFileTreeOpen() || desktopAgentManagerOpen(),
+  )
   const sessionPanelWidth = createMemo(() => {
     if (!desktopSidePanelOpen()) return "100%"
     if (desktopReviewOpen()) return `${layout.session.width()}px`
-    return `calc(100% - ${layout.fileTree.width()}px)`
+    // Review closed: reserve room for whichever fixed-width right panels are
+    // open (file tree and/or agent manager) so they aren't pushed off-screen.
+    const reserved: string[] = []
+    if (desktopFileTreeOpen()) reserved.push(`${layout.fileTree.width()}px`)
+    if (desktopAgentManagerOpen()) reserved.push(`${AGENT_MANAGER_PANEL_WIDTH}px`)
+    return `calc(100% - ${reserved.join(" - ")})`
   })
   const centered = createMemo(() => isDesktop() && !desktopReviewOpen())
 

@@ -724,6 +724,11 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         }
 
         function setReviewPanelOpened(next: boolean) {
+          // Personal fork: the review and agent-manager panels share the right
+          // rail and are mutually exclusive, so opening one closes the other.
+          // This lets the agent manager be viewed on its own without manually
+          // toggling the (default-open) review panel off first.
+          if (next) setAgentPanelOpened(false)
           const current = store.review
           if (!current) {
             setStore("review", { diffStyle: "split" as ReviewDiffStyle, panelOpened: next })
@@ -736,6 +741,8 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         }
 
         function setAgentPanelOpened(next: boolean) {
+          // Personal fork: mutually exclusive with the review panel (see above).
+          if (next) setReviewPanelOpened(false)
           const current = store.agentPanel
           if (!current) {
             setStore("agentPanel", { opened: next })

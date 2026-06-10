@@ -9,6 +9,37 @@ Versioning note: automated upstream mirrors are published as
 `<upstream-version>-c0dn.N`. Releases are built manually via
 `personal-release.yml` and are Linux-only (`linux-x64`, `linux-arm64`).
 
+## v1.16.2-c0dn.14 - 2026-06-10
+
+### Fixed
+- **Agent Manager panel can now be viewed on its own**: toggling the Agent
+  Manager on previously appeared to do nothing unless the Review side panel was
+  also open. The panel is a fixed-width (320px) right-rail sibling, but the main
+  session panel was sized to `100%` whenever Review and the file tree were both
+  closed, pushing the Agent Manager off-screen.
+
+  **Fix** (`packages/app`):
+  - The session panel width calculation
+    (`packages/app/src/pages/session.tsx`) now reserves room for the Agent
+    Manager when it is open (`calc(100% - 320px)`), alongside the existing file
+    tree reservation, so it is never pushed off-screen.
+  - The Review and Agent Manager panels are now mutually exclusive on the right
+    rail (`packages/app/src/context/layout.tsx`): opening one closes the other,
+    so the Agent Manager shows **alone** without manually toggling Review off.
+  - Exported `AGENT_MANAGER_PANEL_WIDTH` from the panel so the reserved layout
+    width stays in sync with the panel's actual width.
+
+### Validation
+- `bun --cwd packages/app typecheck`: clean.
+- App unit tests (`layout.test.ts` + agent-manager suite): 45 pass, 0 fail.
+
+### Files changed
+| File | Change |
+|---|---|
+| `packages/app/src/pages/session.tsx` | reserve right-rail width for the agent manager |
+| `packages/app/src/context/layout.tsx` | review/agent-manager panels mutually exclusive |
+| `packages/app/src/pages/session/agent-manager/agent-manager-panel.tsx` | export `AGENT_MANAGER_PANEL_WIDTH` |
+
 ## v1.16.2-c0dn.13 - 2026-06-10
 
 ### Changed

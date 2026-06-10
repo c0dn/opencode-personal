@@ -14,7 +14,8 @@ import { useAgentManager } from "./agent-manager-context"
 import { STATUS_DOT, childSessionPath, indent, showsInterrupt } from "./agent-manager-view"
 import type { SubagentRow, SubagentStatus } from "./subagent-rows"
 
-const PANEL_WIDTH = 320
+export const AGENT_MANAGER_PANEL_WIDTH = 320
+const PANEL_WIDTH = AGENT_MANAGER_PANEL_WIDTH
 
 export function AgentManagerPanel() {
   const sdk = useSDK()
