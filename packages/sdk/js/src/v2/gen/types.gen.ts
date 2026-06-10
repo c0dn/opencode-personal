@@ -7945,6 +7945,43 @@ export type SessionChildrenResponses = {
 
 export type SessionChildrenResponse = SessionChildrenResponses[keyof SessionChildrenResponses]
 
+export type SessionDescendantsData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/descendants"
+}
+
+export type SessionDescendantsErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionDescendantsError = SessionDescendantsErrors[keyof SessionDescendantsErrors]
+
+export type SessionDescendantsResponses = {
+  /**
+   * List of descendants
+   */
+  200: Array<{
+    session: Session
+    depth: number
+  }>
+}
+
+export type SessionDescendantsResponse = SessionDescendantsResponses[keyof SessionDescendantsResponses]
+
 export type SessionTodoData = {
   body?: never
   path: {

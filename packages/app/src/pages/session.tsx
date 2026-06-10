@@ -58,6 +58,8 @@ import { useSessionLayout } from "@/pages/session/session-layout"
 import { syncSessionModel } from "@/pages/session/session-model-helpers"
 import { SessionMobileBottomBar, SessionMobileTabToggle } from "@/pages/session/session-mobile-bottom-bar"
 import { SessionSidePanel } from "@/pages/session/session-side-panel"
+import { AgentManagerPanel } from "@/pages/session/agent-manager/agent-manager-panel"
+import { AgentManagerProvider } from "@/pages/session/agent-manager/agent-manager-context"
 import { TerminalPanel } from "@/pages/session/terminal-panel"
 import { useSessionCommands } from "@/pages/session/use-session-commands"
 import { useSessionHashScroll } from "@/pages/session/use-session-hash-scroll"
@@ -1718,6 +1720,7 @@ export default function Page() {
   )
 
   return (
+    <AgentManagerProvider>
     <div class="relative size-full overflow-hidden flex flex-col">
       {sessionSync() ?? ""}
       <SessionHeader />
@@ -1836,6 +1839,8 @@ export default function Page() {
           reviewSnap={ui.reviewSnap}
           size={size}
         />
+
+        <AgentManagerPanel />
       </div>
 
       <Show when={newSessionDesign() && !isDesktop() && !!params.id ? mobileTitlebarLeftMount() : undefined}>
@@ -1856,5 +1861,6 @@ export default function Page() {
 
       <TerminalPanel />
     </div>
+    </AgentManagerProvider>
   )
 }

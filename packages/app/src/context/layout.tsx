@@ -15,9 +15,9 @@ import { same } from "@/utils/same"
 import { createScrollPersistence, type SessionScroll } from "./layout-scroll"
 import { createPathHelpers } from "./file/path"
 import type { ProjectAvatarVariant } from "@opencode-ai/ui/v2/project-avatar-v2"
-import { createSessionKeyReader, ensureSessionKey, pruneSessionKeys } from "./layout-helpers"
+import { createPanelToggle, createSessionKeyReader, ensureSessionKey, pruneSessionKeys } from "./layout-helpers"
 
-export { createSessionKeyReader, ensureSessionKey, pruneSessionKeys }
+export { createPanelToggle, createSessionKeyReader, ensureSessionKey, pruneSessionKeys }
 
 export type { ProjectAvatarVariant }
 
@@ -247,6 +247,9 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         review: {
           diffStyle: "split" as ReviewDiffStyle,
           panelOpened: true,
+        },
+        agentPanel: {
+          opened: false,
         },
         fileTree: {
           opened: false,
@@ -706,6 +709,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         const s = createMemo(() => store.sessionView[key()] ?? { scroll: {} })
         const terminalOpened = createMemo(() => store.terminal?.opened ?? false)
         const reviewPanelOpened = createMemo(() => store.review?.panelOpened ?? true)
+        const agentPanelOpened = createMemo(() => store.agentPanel?.opened ?? false)
 
         function setTerminalOpened(next: boolean) {
           const current = store.terminal
@@ -729,6 +733,18 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
           const value = current.panelOpened ?? true
           if (value === next) return
           setStore("review", "panelOpened", next)
+        }
+
+        function setAgentPanelOpened(next: boolean) {
+          const current = store.agentPanel
+          if (!current) {
+            setStore("agentPanel", { opened: next })
+            return
+          }
+
+          const value = current.opened ?? false
+          if (value === next) return
+          setStore("agentPanel", "opened", next)
         }
 
         return {
@@ -774,6 +790,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
               setReviewPanelOpened(!reviewPanelOpened())
             },
           },
+          agentManager: createPanelToggle(agentPanelOpened, setAgentPanelOpened),
           review: {
             open: createMemo(() => s().reviewOpen ?? []),
             setOpen(open: string[]) {

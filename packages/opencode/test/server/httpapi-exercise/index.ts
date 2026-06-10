@@ -1348,6 +1348,37 @@ const scenarios: Scenario[] = [
       )
     }),
   http.protected
+    .get("/session/{sessionID}/descendants", "session.descendants")
+    .seeded((ctx) =>
+      Effect.gen(function* () {
+        const parent = yield* ctx.session({ title: "Descendants parent" })
+        const child = yield* ctx.session({ title: "Descendants child", parentID: parent.id })
+        const grandchild = yield* ctx.session({ title: "Descendants grandchild", parentID: child.id })
+        return { parent, child, grandchild }
+      }),
+    )
+    .at((ctx) => ({
+      path: route("/session/{sessionID}/descendants", { sessionID: ctx.state.parent.id }),
+      headers: ctx.headers(),
+    }))
+    .json(200, (body, ctx) => {
+      array(body)
+      // descendants returns { session, depth }[] (BFS), unlike children which returns Session[]
+      check(
+        body.some(
+          (item) => isRecord(item) && isRecord(item.session) && item.session.id === ctx.state.child.id && item.depth === 1,
+        ),
+        "descendants should include direct child at depth 1",
+      )
+      check(
+        body.some(
+          (item) =>
+            isRecord(item) && isRecord(item.session) && item.session.id === ctx.state.grandchild.id && item.depth === 2,
+        ),
+        "descendants should include grandchild at depth 2",
+      )
+    }),
+  http.protected
     .get("/session/{sessionID}/todo", "session.todo")
     .seeded((ctx) =>
       Effect.gen(function* () {

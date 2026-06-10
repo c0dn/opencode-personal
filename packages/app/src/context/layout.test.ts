@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { createRoot, createSignal } from "solid-js"
-import { createSessionKeyReader, ensureSessionKey, pruneSessionKeys } from "./layout-helpers"
+import { createPanelToggle, createSessionKeyReader, ensureSessionKey, pruneSessionKeys } from "./layout-helpers"
 
 describe("layout session-key helpers", () => {
   test("couples touch and scroll seed in order", () => {
@@ -30,6 +30,47 @@ describe("layout session-key helpers", () => {
     })
 
     expect(seen).toEqual(["dir/one", "dir/two"])
+  })
+})
+
+describe("createPanelToggle", () => {
+  // Guards the agent-manager toolbar toggle: view().agentManager is built from
+  // createPanelToggle(agentPanelOpened, setAgentPanelOpened), mirroring the
+  // review panel. The backing store slice defaults to closed (agentPanel.opened
+  // = false) and persists through the shared layout.v6 store.
+  test("open/close/toggle drive the backing boolean and default stays closed", () => {
+    createRoot((dispose) => {
+      const [opened, setOpened] = createSignal(false)
+      const panel = createPanelToggle(opened, setOpened)
+
+      expect(panel.opened()).toBe(false)
+
+      panel.open()
+      expect(opened()).toBe(true)
+      expect(panel.opened()).toBe(true)
+
+      panel.close()
+      expect(opened()).toBe(false)
+
+      panel.toggle()
+      expect(opened()).toBe(true)
+      panel.toggle()
+      expect(opened()).toBe(false)
+
+      dispose()
+    })
+  })
+
+  test("opened() reflects external writes to the backing slice", () => {
+    createRoot((dispose) => {
+      const [opened, setOpened] = createSignal(false)
+      const panel = createPanelToggle(opened, setOpened)
+
+      setOpened(true)
+      expect(panel.opened()).toBe(true)
+
+      dispose()
+    })
   })
 })
 
