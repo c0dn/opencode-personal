@@ -1,6 +1,5 @@
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { SessionID } from "./schema"
-import { GlobalBus, type GlobalEvent } from "@/bus/global"
 import { Effect, Layer, Context } from "effect"
 
 type CacheEntry = {
@@ -19,18 +18,6 @@ function cacheKey(sessionID: SessionID, limit: number, before?: string) {
 
 const MAX_ENTRIES = 200
 
-// Message mutation events that make a cached page stale. Web prompts, TUI writes,
-// revert cleanup, and streaming all emit one of these, so invalidating on them is
-// what keeps this read-through cache coherent without patching cached arrays.
-const INVALIDATING_EVENTS = new Set<string>([
-  "message.updated",
-  "message.removed",
-  "message.part.updated",
-  "message.part.removed",
-  "message.part.delta",
-  "session.deleted",
-])
-
 export interface Interface {
   readonly get: (sessionID: SessionID, limit: number, before?: string) => Effect.Effect<MessagePage | undefined>
   readonly set: (
@@ -39,6 +26,8 @@ export interface Interface {
     before: string | undefined,
     page: MessagePage,
   ) => Effect.Effect<void>
+  // Public invalidation seam. The server transport drives this on message
+  // mutations so this module stays transport- and event-source agnostic.
   readonly invalidate: (sessionID: SessionID) => Effect.Effect<void>
 }
 
@@ -47,11 +36,9 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Me
 export const layer: Layer.Layer<Service> = Layer.effect(
   Service,
   Effect.gen(function* () {
-    // Plain Map rather than a SynchronizedRef: every cache operation here is a
-    // synchronous in-memory mutation with no interleaving await, so the GlobalBus
-    // listener below can invalidate directly from its (non-Effect) callback —
-    // mirroring the repo's other GlobalBus subscribers (event.ts, global.ts) that
-    // mutate state in-line via *Unsafe helpers.
+    // Plain Map store: every cache operation is a synchronous in-memory mutation
+    // with no interleaving await, so invalidate is a pure synchronous Effect the
+    // server can run with runSync from a bus callback.
     const entries = new Map<string, { entry: CacheEntry; at: number }>()
 
     const evictLRU = () => {
@@ -92,22 +79,6 @@ export const layer: Layer.Layer<Service> = Layer.effect(
     const invalidate = Effect.fn("MessageCache.invalidate")(function* (sessionID: SessionID) {
       removeSession(String(sessionID))
     })
-
-    // Event-driven invalidation. Every message write (web, TUI, revert, streaming)
-    // publishes one of INVALIDATING_EVENTS on GlobalBus, so dropping the affected
-    // session's cached pages here makes the next read re-populate from the DB.
-    // acquireRelease binds listener teardown to this layer's scope.
-    const listener = (event: GlobalEvent) => {
-      const type = event.payload?.type
-      if (typeof type !== "string" || !INVALIDATING_EVENTS.has(type)) return
-      const sessionID = event.payload?.properties?.sessionID
-      if (typeof sessionID !== "string") return
-      removeSession(sessionID)
-    }
-    yield* Effect.acquireRelease(
-      Effect.sync(() => GlobalBus.on("event", listener)),
-      () => Effect.sync(() => GlobalBus.off("event", listener)),
-    )
 
     return Service.of({ get, set, invalidate })
   }),

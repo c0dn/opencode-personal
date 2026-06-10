@@ -31,6 +31,7 @@ import { SessionRevert } from "@/session/revert"
 import { SessionSummary } from "@/session/summary"
 import { SessionShare } from "@/share/session"
 import { MessageCache } from "@/session/message-cache"
+import { SessionID } from "@/session/schema"
 import { Database } from "@opencode-ai/core/database/database"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Git } from "@/git"
@@ -294,6 +295,37 @@ export const layer = Layer.effectDiscard(
 
     setupAuth(io, cors, authConfig)
     io.on("connection", (socket: any) => setupSocket(socket))
+
+    // Process-level MessageCache invalidation. The cache is read only on the WS
+    // message path (handleSessionMessages) served by this transport, so this is
+    // the correct single home for bus-driven invalidation. A per-socket listener
+    // would miss writes that land while no web socket is connected (e.g. TUI).
+    const cache = yield* Effect.promise(() =>
+      handlerRuntime.runPromise(Effect.gen(function* () {
+        return yield* MessageCache.Service
+      })),
+    )
+    const invalidatingEvents = new Set<string>([
+      "message.updated",
+      "message.removed",
+      "message.part.updated",
+      "message.part.removed",
+      "message.part.delta",
+      "session.deleted",
+    ])
+    const invalidateListener = (event: GlobalEvent) => {
+      const type = event.payload?.type
+      if (typeof type !== "string" || !invalidatingEvents.has(type)) return
+      const sessionID = event.payload?.properties?.sessionID
+      if (typeof sessionID !== "string") return
+      // invalidate is a pure synchronous Effect (in-memory Map drop, no further
+      // emit/IO), so run it synchronously to close the race where a concurrent
+      // read could observe the stale page before the drop lands. runSync is safe
+      // here (no async boundary) and cannot re-enter the bus emit path.
+      handlerRuntime.runSync(cache.invalidate(sessionID as SessionID))
+    }
+    GlobalBus.on("event", invalidateListener)
+    yield* Effect.addFinalizer(() => Effect.sync(() => GlobalBus.off("event", invalidateListener)))
 
     yield* Effect.logInfo("Socket.IO transport attached")
   }),
