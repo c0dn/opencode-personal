@@ -21,6 +21,7 @@ export const Parameters = Schema.Struct({
 export const SubagentSendTool = Tool.define(
   "subagent_send",
   Effect.gen(function* () {
+    const interAgent = yield* SessionInterAgent.Service
     return {
       description: DESCRIPTION,
       parameters: Parameters,
@@ -29,8 +30,6 @@ export const SubagentSendTool = Tool.define(
         ctx: Tool.Context,
       ) =>
         Effect.gen(function* () {
-          const interAgent = yield* SessionInterAgent.Service
-
           const result = yield* interAgent.send({
             fromSessionID: ctx.sessionID,
             toSessionID: SessionID.make(params.target_session_id),

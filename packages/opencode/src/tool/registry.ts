@@ -41,6 +41,7 @@ import { SubagentListTool } from "./subagent-list"
 import { SubagentSendTool } from "./subagent-send"
 import { MailboxListTool } from "./mailbox-list"
 import { LspTool } from "./lsp"
+import { SessionInterAgent } from "@/session/inter-agent"
 import * as Truncate from "./truncate"
 import { ApplyPatchTool } from "./apply_patch"
 import { Glob } from "@opencode-ai/core/util/glob"
@@ -165,7 +166,7 @@ export const layer: Layer.Layer<
     const sessionGet = yield* SessionGetTool
     const sessionList = yield* SessionListTool
     const subagentList = yield* SubagentListTool
-    const subagentSend = yield* SubagentSendTool
+    const subagentSend = yield* Effect.provide(SubagentSendTool, SessionInterAgent.defaultLayer)
     const mailboxList = yield* MailboxListTool
 
     const state = yield* InstanceState.make<State>(
