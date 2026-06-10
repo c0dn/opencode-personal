@@ -9,6 +9,45 @@ Versioning note: automated upstream mirrors are published as
 `<upstream-version>-c0dn.N`. Releases are built manually via
 `personal-release.yml` and are Linux-only (`linux-x64`, `linux-arm64`).
 
+## v1.16.2-c0dn.13 - 2026-06-10
+
+### Changed
+- **PDF text extraction migrated from `pdfjs-dist` to `unpdf`**: the
+  image-read override's in-process PDF text extraction
+  (`packages/opencode/src/session/image-read-override.ts`) now uses
+  [`unpdf`](https://github.com/unjs/unpdf) (`1.6.2`) instead of the stock
+  `pdfjs-dist` (`5.4.449`) modern build.
+
+  **Why**: the modern `pdfjs-dist` build prints
+  `Warning: Please use the \`legacy\` build in Node.js environments.` whenever it
+  runs under Node/Bun (the warning is gated on `isNodeJS`). In the compiled
+  binary this leaked into the TUI output. `unpdf` ships a serverless PDF.js
+  build that omits the warning and stays compatible with the Node 20 floor the
+  fork still supports.
+
+  **Behavior preserved**: same 50MB input cap, first-100-page limit, 500KB
+  output budget, and truncation markers. Extraction now uses
+  `extractText(bytes, { mergePages: false })` and iterates the returned
+  per-page `text[]` instead of the manual `getDocument`/`getPage`/
+  `getTextContent` loop.
+
+### Removed
+- Dropped the direct `pdfjs-dist` dependency from `packages/opencode`.
+
+### Validation
+- `bun --cwd packages/opencode typecheck`: clean.
+- `bun --cwd packages/opencode test test/installation/installation.test.ts`:
+  8 pass, 0 fail.
+- Functional smoke test: extracted a real 12-page PDF with correct text and
+  **no** legacy-build warning on stderr.
+
+### Files changed
+| File | Change |
+|---|---|
+| `packages/opencode/package.json` | `pdfjs-dist` → `unpdf` |
+| `packages/opencode/src/session/image-read-override.ts` | `extractPdfTextContent` rewritten on `unpdf`; comments updated |
+| `bun.lock` | dependency resolution |
+
 ## v1.16.2-c0dn.12 - 2026-06-09
 
 ### Added

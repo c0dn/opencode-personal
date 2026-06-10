@@ -186,7 +186,7 @@ function splitDescriptions(text: string, count: number): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Default PDF text extraction implementation (unchanged)
+// Default PDF text extraction implementation (unpdf serverless build)
 // ---------------------------------------------------------------------------
 
 function extractPdfTextDefault(input: {
@@ -214,19 +214,21 @@ async function extractPdfTextContent(input: {
     return `ERROR: PDF ${name} exceeds 50MB limit for text extraction (${sizeMB.toFixed(1)}MB).`
   }
 
-  const pdfjsLib = await import("pdfjs-dist")
-  const doc = await pdfjsLib.getDocument({ data: bytes }).promise
+  // unpdf ships a serverless pdfjs build, so it does not emit the
+  // "Please use the `legacy` build in Node.js environments" warning that the
+  // stock pdfjs-dist modern build prints under Node/Bun.
+  const { extractText } = await import("unpdf")
+  const extracted = await extractText(new Uint8Array(bytes), { mergePages: false })
+  const numPages = extracted.totalPages
 
-  const maxPages = Math.min(doc.numPages, 100)
+  const maxPages = Math.min(numPages, 100)
   const pages: string[] = []
   const MAX_TEXT_BYTES = 500 * 1024 // 500KB
   let totalBytes = 0
   let truncated = false
 
-  for (let i = 1; i <= maxPages; i++) {
-    const page = await doc.getPage(i)
-    const content = await page.getTextContent()
-    const pageText = content.items.map((item: any) => item.str ?? "").join(" ")
+  for (let i = 0; i < maxPages; i++) {
+    const pageText = extracted.text[i] ?? ""
     const pageBytes = Buffer.byteLength(pageText, "utf8")
 
     if (totalBytes + pageBytes > MAX_TEXT_BYTES) {
@@ -247,8 +249,8 @@ async function extractPdfTextContent(input: {
   }
 
   let text = pages.join("\n\n")
-  if (doc.numPages > 100) {
-    text += `\n\n[PDF text extraction limited to first 100 pages (document has ${doc.numPages} pages)]`
+  if (numPages > 100) {
+    text += `\n\n[PDF text extraction limited to first 100 pages (document has ${numPages} pages)]`
   }
   if (truncated) {
     text = `[PDF text truncated: showing first ${(MAX_TEXT_BYTES / 1024).toFixed(0)}KB]\n\n${text}`
@@ -520,7 +522,7 @@ export function overrideUnsupportedMedia(
             }
 
             // Process PDFs in tool results (individual calls, not batched since
-            // they use pdfjs-dist in-process extraction)
+            // they use unpdf in-process extraction)
             for (const pc of pdfCandidates) {
               const description = yield* handlePdfMediaItem(pc.dataUrl, pdfStrategy, pc.filename, extractPdf)
               newValue[pc.index] = { type: "text" as const, text: description }

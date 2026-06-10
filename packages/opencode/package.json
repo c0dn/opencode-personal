@@ -112,7 +112,7 @@
     "ai": "catalog:",
     "ai-gateway-provider": "3.1.2",
     "bonjour-service": "1.3.0",
-    "pdfjs-dist": "5.4.449",
+    "unpdf": "1.6.2",
     "brotli-wasm": "3.0.1",
     "chokidar": "4.0.3",
     "clipboardy": "4.0.0",
