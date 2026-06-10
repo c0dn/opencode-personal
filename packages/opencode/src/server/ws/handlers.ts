@@ -149,21 +149,20 @@ function handleSessionTodo(msg: Record<string, unknown>, _conn: Connection) {
 
 function handleSessionSubscribe(msg: Record<string, unknown>, conn: Connection) {
   return Effect.gen(function* () {
-    const sessionIDs = Array.isArray(msg.sessionIDs) ? msg.sessionIDs.filter((id): id is string => typeof id === "string") : []
-    for (const id of sessionIDs) {
-      conn.subscribed.add(id)
-    }
-    return { subscribed: sessionIDs.length }
+    // Clients send a single sessionID (singular). Treat a missing/invalid id as a no-op.
+    const sessionID = typeof msg.sessionID === "string" ? msg.sessionID : undefined
+    if (!sessionID) return { subscribed: 0 }
+    conn.subscribed.add(sessionID)
+    return { subscribed: 1 }
   })
 }
 
 function handleSessionUnsubscribe(msg: Record<string, unknown>, conn: Connection) {
   return Effect.gen(function* () {
-    const sessionIDs = Array.isArray(msg.sessionIDs) ? msg.sessionIDs.filter((id): id is string => typeof id === "string") : []
-    for (const id of sessionIDs) {
-      conn.subscribed.delete(id)
-    }
-    return { unsubscribed: sessionIDs.length }
+    const sessionID = typeof msg.sessionID === "string" ? msg.sessionID : undefined
+    if (!sessionID) return { unsubscribed: 0 }
+    conn.subscribed.delete(sessionID)
+    return { unsubscribed: 1 }
   })
 }
 
@@ -366,9 +365,15 @@ function handleSessionRevert(msg: Record<string, unknown>, _conn: Connection) {
     const sessionID = typeof msg.sessionID === "string" ? msg.sessionID : undefined
     const messageID = typeof msg.messageID === "string" ? msg.messageID : undefined
     if (!sessionID || !messageID) return { error: "Missing sessionID or messageID" }
+    const partID = typeof msg.partID === "string" ? msg.partID : undefined
     const revert = yield* SessionRevert.Service
-    yield* revert.revert({ sessionID: sessionID as SessionID, messageID: messageID as any }) as Effect.Effect<any>
-    return { reverted: sessionID }
+    // Match REST semantics: forward partID and return the full updated Session.Info.
+    const result = yield* revert.revert({
+      sessionID: sessionID as SessionID,
+      messageID: messageID as any,
+      partID: partID as any,
+    }) as Effect.Effect<any>
+    return result
   })
 }
 
